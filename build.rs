@@ -84,7 +84,7 @@ fn generate_headers() -> Result<
             );
 
             println!(
-                "cargo:warning=Generated rssn.h"
+                "cargo:warning=Generated rssn-advanced.h"
             );
         },
         | Err(e) => {
