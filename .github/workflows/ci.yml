@@ -1,0 +1,72 @@
+name: CI/CD workflow for branch main & pull requests
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+
+jobs:
+  build-test-bench-fmt-doc:
+    runs-on: self-hosted
+    strategy:
+      matrix:
+        toolchain: [stable, beta, nightly, 1.89.0]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          override: true
+
+      - name: Install System Dependencies for fontconfig & bench testing
+        run: sudo apt-get update && sudo apt-get install -y fontconfig libfontconfig1-dev linux-tools-common linux-tools-generic linux-tools-`uname -r`
+
+      - name: Install Cargo flamegraph
+        run: cargo install flamegraph
+
+      - name: Install Clippy & Rustfmt if using nightly
+        run: |
+             if [[ "${{ matrix.toolchain }}" == "nightly" ]]; then
+                rustup component add --toolchain nightly clippy
+                rustup component add --toolchain nightly rustfmt
+             fi
+      
+      - name: Install Clippy & Rustfmt if using beta
+        run: |
+             if [[ "${{ matrix.toolchain }}" == "beta" ]]; then
+                rustup component add --toolchain beta clippy
+                rustup component add --toolchain beta rustfmt
+             fi
+      
+      - name: Install Clippy & Rustfmt if using v1.89
+        run: |
+             if [[ "${{ matrix.toolchain }}" == "1.89.0" ]]; then
+                rustup component add --toolchain 1.89.0 clippy
+                rustup component add --toolchain 1.89.0 rustfmt
+             fi
+      
+      - name: Build with full features
+        run: cargo clippy --all-features --verbose
+        continue-on-error: true
+
+      - name: Test with full features
+        run: cargo test --all-features --verbose
+
+      - name: Flamegraph with full features
+        run: cargo flamegraph --examples demo.rs
+        continue-on-error: true
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+        continue-on-error: true
+
+      - name: Check docing
+        run: cargo doc --all
