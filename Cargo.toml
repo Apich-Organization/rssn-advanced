@@ -1,0 +1,92 @@
+[package]
+name = "rssn-advanced"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89.0"
+authors = ["The rssn-advanced developers"]
+description = "A crate containing complex and delicate mathematical algorithms exspcialy heuristic one based on rssn."
+license = "Apache-2.0"
+repository = "https://github.com/Apich-Organization/rssn-advanced"
+homepage = "https://github.com/Apich-Organization/rssn-advanced"
+readme = "README.md"
+keywords = [
+    "scientific-computing",
+    "symbolic-math",
+    "numerical-analysis",
+    "physics-simulation",
+    "optimization",
+]
+categories = [
+    "science",
+    "mathematics",
+    "data-structures",
+    "simulation",
+    "algorithms",
+]
+exclude = [
+    "*.sh",
+    "*.bat",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib", "staticlib"]
+
+[profile.dev]
+lto = false
+opt-level = 0
+debug = true
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+strip = true
+debug = false
+debug-assertions = false
+overflow-checks = false
+incremental = true
+
+[dependencies]
+rssn = { version = "0.2.3", features = ["full", "experimental"] }
+
+[build-dependencies]
+cbindgen = "0.29"
+vergen = { version = "9", features = [
+    "build",
+    "cargo",
+    "cargo_metadata",
+    "emit_and_set",
+    "regex",
+    "rustc",
+    "rustc_version",
+    "si",
+    "sysinfo",
+    "time",
+] }
+vergen-gitcl = { version = "9", features = [
+    "build",
+    "cargo",
+    "emit_and_set",
+    "rustc",
+    "si",
+] }
+
+[features]
+default = []
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+proptest = "1.9"
+assert_approx_eq = "1.1"
+
+[[bench]]
+name = "rssn_advanced_benches"
+harness = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--html-in-header", "doc-header.html"]
+
+[lints.clippy]
+empty-line-after-doc-comments = "allow"
