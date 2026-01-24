@@ -1,4 +1,5 @@
+use criterion::criterion_main;
+
 mod constant;
 
-fn main() {
-}
+criterion_main!(constant::benches,);
