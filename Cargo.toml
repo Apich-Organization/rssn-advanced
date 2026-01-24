@@ -1,6 +1,6 @@
 [package]
 name = "rssn-advanced"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.89.0"
 authors = ["The rssn-advanced developers"]
@@ -24,8 +24,29 @@ categories = [
     "algorithms",
 ]
 exclude = [
+    "examples/*",
+    "tests/*",
+    "benches/*",
+    "doc/*",
+    ".gitea/*",
+    ".github/*",
+    ".vscode/*",
+    ".idea/*",
     "*.sh",
     "*.bat",
+    "scripts/*",
+    "docs/*",
+    "certificates/*",
+    "*.h",
+    "*.hpp",
+    "*.cpp",
+    "*.c",
+    "*.o",
+    "*.a",
+    "*.so",
+    "*.dylib",
+    "*.lib",
+    "*.obj",
 ]
 
 [lib]
@@ -48,7 +69,10 @@ overflow-checks = false
 incremental = true
 
 [dependencies]
-rssn = { version = "0.2.3", features = ["full", "experimental"] }
+bincode-next = "2.0.4"
+rssn = { version = "0.2.4", features = ["full", "experimental"] }
+serde = "1.0.228"
+serde_json = "1.0.149"
 
 [build-dependencies]
 cbindgen = "0.29"
@@ -74,6 +98,7 @@ vergen-gitcl = { version = "9", features = [
 
 [features]
 default = []
+ffi_api = []
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

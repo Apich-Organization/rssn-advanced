@@ -53,5 +53,12 @@
 #![allow(
     clippy::restriction,
     unused_doc_comments,
+    clippy::empty_line_after_outer_attr,
     clippy::empty_line_after_doc_comments
 )]
+
+/// System and physical constants.
+pub mod constant;
+/// FFI APIs for the 'rssn-advanced' Library.
+#[cfg(feature = "ffi_api")]
+pub mod ffi_apis;
