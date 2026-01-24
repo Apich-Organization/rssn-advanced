@@ -2,7 +2,4 @@ use criterion::criterion_main;
 
 mod constant;
 
-criterion_main!(
-    constant::benches,
-);
-
+criterion_main!(constant::benches,);
