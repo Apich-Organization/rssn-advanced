@@ -6,7 +6,6 @@
 #![doc(
     html_favicon_url = "https://raw.githubusercontent.com/Apich-Organization/rssn/refs/heads/dev/doc/favicon.ico"
 )]
-
 // -------------------------------------------------------------------------
 // Rust Lint Configuration: rssn-advanced
 // -------------------------------------------------------------------------
