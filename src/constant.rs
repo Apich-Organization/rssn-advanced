@@ -1,3 +1,5 @@
+#![allow(clippy::inline_always)]
+
 /// The date the library was built.
 
 pub const BUILD_DATE: &str =

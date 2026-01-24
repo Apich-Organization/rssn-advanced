@@ -15,6 +15,150 @@
 namespace rssn-advanced {
 #endif  // __cplusplus
 
+/*
+ A buffer containing binary data from bincode serialization.
+
+ The caller is responsible for freeing this buffer using `rssn_free_bincode_buffer`.
+ */
+typedef struct rssn_advanced_BincodeBuffer {
+    /*
+     Pointer to the binary data.
+     */
+    uint8_t *mData;
+    /*
+     Length of the binary data in bytes.
+     */
+    size_t mLen;
+} rssn_advanced_BincodeBuffer;
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
+/*
+ Frees a bincode buffer allocated by an FFI function.
+
+ # Safety
+ The buffer must have been allocated by an FFI function that returns `BincodeBuffer`.
+ This function should only be called once per buffer.
+ */
+rssn_advanced_
+void rssn_free_bincode_buffer(struct rssn_advanced_BincodeBuffer aBuffer)
+;
+
+/*
+ Frees a string allocated by an FFI function.
+
+ # Safety
+ The string must have been allocated by an FFI function that returns `*mut c_char`.
+ This function should only be called once per string.
+ */
+rssn_advanced_
+void rssn_free_string(char *aS)
+;
+
+/*
+ Frees a C string that was allocated by the `rssn_get_*` functions in this module.
+
+ # Safety
+ The `ptr` must be a valid C string pointer allocated by this module.
+ */
+rssn_advanced_
+void rssn_free_string_constant(char *aPtr)
+;
+
+/*
+ Returns the build date as a C string.
+ The caller must free the returned string using `rssn_free_string`.
+ */
+rssn_advanced_
+char *rssn_get_build_date(void)
+;
+
+/*
+ Returns the build date as a `bincode_next` buffer.
+ The caller must free the returned buffer using `rssn_free_bincode_buffer`.
+ */
+rssn_advanced_
+struct rssn_advanced_BincodeBuffer rssn_get_build_date_bincode(void)
+;
+
+/*
+ Returns the build date as a JSON string.
+ The caller must free the returned string using `rssn_free_string`.
+ */
+rssn_advanced_
+char *rssn_get_build_date_json(void)
+;
+
+/*
+ Returns all build information as a `bincode_next` buffer.
+ The caller must free the returned buffer using `rssn_free_bincode_buffer`.
+ */
+rssn_advanced_
+struct rssn_advanced_BincodeBuffer rssn_get_build_info_bincode(void)
+;
+
+/*
+ Returns all build information as a JSON string.
+ The caller must free the returned string using `rssn_free_string`.
+ */
+rssn_advanced_
+char *rssn_get_build_info_json(void)
+;
+
+/*
+ Returns the cargo target triple as a C string.
+ The caller must free the returned string using `rssn_free_string`.
+ */
+rssn_advanced_
+char *rssn_get_cargo_target_triple(void)
+;
+
+/*
+ Returns the commit SHA as a C string.
+ The caller must free the returned string using `rssn_free_string`.
+ */
+rssn_advanced_
+char *rssn_get_commit_sha(void)
+;
+
+/*
+ Returns the commit SHA as a `bincode_next` buffer.
+ The caller must free the returned buffer using `rssn_free_bincode_buffer`.
+ */
+rssn_advanced_
+struct rssn_advanced_BincodeBuffer rssn_get_commit_sha_bincode(void)
+;
+
+/*
+ Returns the commit SHA as a JSON string.
+ The caller must free the returned string using `rssn_free_string`.
+ */
+rssn_advanced_
+char *rssn_get_commit_sha_json(void)
+;
+
+/*
+ Returns the rustc version as a C string.
+ The caller must free the returned string using `rssn_free_string`.
+ */
+rssn_advanced_
+char *rssn_get_rustc_version(void)
+;
+
+/*
+ Returns the system info as a C string.
+ The caller must free the returned string using `rssn_free_string`.
+ */
+rssn_advanced_
+char *rssn_get_system_info(void)
+;
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
+
 #ifdef __cplusplus
 }  // namespace rssn-advanced
 #endif  // __cplusplus

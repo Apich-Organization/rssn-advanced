@@ -3068,10 +3068,13 @@ name = "rssn-advanced"
 version = "0.0.1"
 dependencies = [
  "assert_approx_eq",
+ "bincode-next",
  "cbindgen",
  "criterion",
  "proptest",
  "rssn",
+ "serde",
+ "serde_json",
  "vergen",
  "vergen-gitcl",
 ]

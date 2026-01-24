@@ -54,6 +54,7 @@
 #![allow(
     clippy::restriction,
     unused_doc_comments,
+    clippy::empty_line_after_outer_attr,
     clippy::empty_line_after_doc_comments
 )]
 

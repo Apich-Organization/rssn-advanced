@@ -23,4 +23,4 @@ pub mod macros;
 /// Common FFI utilities.
 pub mod common;
 /// FFI APIs for the constants module.
-pub mod contant_ffi;
+pub mod constant_ffi;
