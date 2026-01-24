@@ -6,6 +6,7 @@
 #![doc(
     html_favicon_url = "https://raw.githubusercontent.com/Apich-Organization/rssn/refs/heads/dev/doc/favicon.ico"
 )]
+
 // -------------------------------------------------------------------------
 // Rust Lint Configuration: rssn-advanced
 // -------------------------------------------------------------------------
@@ -55,3 +56,9 @@
     unused_doc_comments,
     clippy::empty_line_after_doc_comments
 )]
+
+/// System and physical constants.
+pub mod constant;
+/// FFI APIs for the 'rssn-advanced' Library.
+#[cfg(feature = "ffi_api")]
+pub mod ffi_apis;

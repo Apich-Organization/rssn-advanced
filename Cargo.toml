@@ -1,6 +1,6 @@
 [package]
 name = "rssn-advanced"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.89.0"
 authors = ["The rssn-advanced developers"]
@@ -26,6 +26,16 @@ categories = [
 exclude = [
     "*.sh",
     "*.bat",
+    "*.h",
+    "*.hpp",
+    "*.cpp",
+    "*.c",
+    "*.o",
+    "*.a",
+    "*.so",
+    "*.dylib",
+    "*.lib",
+    "*.obj",
 ]
 
 [lib]
@@ -74,6 +84,7 @@ vergen-gitcl = { version = "9", features = [
 
 [features]
 default = []
+ffi_api = []
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
