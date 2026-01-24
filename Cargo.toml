@@ -59,7 +59,7 @@ incremental = true
 
 [dependencies]
 bincode-next = "2.0.4"
-rssn = { version = "0.2.3", features = ["full", "experimental"] }
+rssn = { version = "0.2.4", features = ["full", "experimental"] }
 serde = "1.0.228"
 serde_json = "1.0.149"
 

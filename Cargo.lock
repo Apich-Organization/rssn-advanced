@@ -3009,9 +3009,9 @@ dependencies = [
 
 [[package]]
 name = "rssn"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e82a240a6ce6214289f6144cf2a01719883a908ff9ac7cbf64508d631439b4a"
+checksum = "311cc2886d65d9f68451ef7aa4b5e926a7716789c66aefbc2000a7ce18329324"
 dependencies = [
  "abi_stable",
  "ahash",
