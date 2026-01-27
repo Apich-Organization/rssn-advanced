@@ -658,9 +658,9 @@ dependencies = [
 
 [[package]]
 name = "cranelift-bitset"
-version = "0.127.2"
+version = "0.127.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42b1ed69fc07ec013f50e8dc9ff019a2cc0bcfcb913bfc57783c0b446ef814d2"
+checksum = "efa84e3a1dba026781d0a24761b072e03bbb404b8015f621d332457f627b3a19"
 
 [[package]]
 name = "cranelift-codegen"
