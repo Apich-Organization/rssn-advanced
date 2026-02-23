@@ -3848,9 +3848,9 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "virtue-next"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "507787017685ff1c8dadaab8ca717bc1145b99163bddc0cbbbd210c3d76cb8b0"
+checksum = "e9e4e09db9fbfa7ab9ee29d3096c1b4b33e86591a777ecb7e0c476891e5c8ffa"
 
 [[package]]
 name = "wait-timeout"
