@@ -57,3 +57,65 @@
     clippy::empty_line_after_outer_attr,
     clippy::empty_line_after_doc_comments
 )]
+
+// =========================================================================
+// Module Declarations
+// =========================================================================
+
+/// Global DAG (Directed Acyclic Graph) storage for symbolic expressions.
+///
+/// Provides hash-consed, structurally-shared storage for all symbol nodes.
+/// The DAG serves as the canonical representation — all expression data
+/// ultimately lives here, deduplicated via structural hashing.
+pub mod dag;
+
+/// Local AST (Abstract Syntax Tree) projection for computation.
+///
+/// Projects a subgraph of the global DAG into a stack-local tree using
+/// relative pointers (`i32` / `i64`). This provides an algorithm-friendly
+/// tree view without duplicating the underlying metadata.
+pub mod ast;
+
+/// Symbolic expression parser.
+///
+/// Parses mathematical expressions (e.g. `"x^2 + 2*x + 1"`) into the
+/// global DAG using `nom`-based combinators with precedence climbing.
+pub mod parser;
+
+/// JIT compilation pipeline for symbolic derivation rules.
+///
+/// Compiles algebraic rewrite rules (add, mul, div, custom) into native
+/// machine code via Cranelift. Gated behind the `cranelift-jit` feature.
+#[cfg(feature = "cranelift-jit")]
+pub mod jit;
+
+/// Parallel computation engine.
+///
+/// Exploits commutativity to split expressions into independent chunks
+/// for async parallel simplification, with staged global merging.
+pub mod parallel;
+
+/// Streaming storage and dynamic caching.
+///
+/// Provides disk-backed spillover for large DAGs and a dynamic hotspot
+/// table that tracks intermediate result frequency for auto-eviction.
+pub mod storage;
+
+/// Heuristic search toolbox for NP-hard pattern matching.
+///
+/// A configurable "knob-based" engine that allows controlled approximate
+/// simplification when exact methods hit symbol explosion.
+pub mod heuristic;
+
+/// SIMD-optimized preset function library.
+///
+/// Hardware-accelerated batch operations (arithmetic, hashing) with
+/// runtime feature detection and scalar fallback.
+pub mod simd;
+
+/// C/C++ Foreign Function Interface.
+///
+/// Exposes a flat, `extern "C"` API surface via `cbindgen`-compatible
+/// types and opaque handles. Includes an async bridge for multi-language
+/// integration.
+pub mod ffi;

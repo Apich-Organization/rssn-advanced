@@ -1,0 +1,170 @@
+//! `extern "C"` entry points for the RSSN-Advanced API.
+//!
+//! Exposes a flat C API, capturing panics securely at the FFI boundary to
+//! avoid undefined behavior (UB).
+
+#![allow(unsafe_code)]
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_void};
+use std::panic::catch_unwind;
+use crate::dag::builder::DagBuilder;
+use crate::dag::node::DagNodeId;
+use crate::heuristic::{HeuristicEngine, HeuristicConfig, SearchStrategy};
+use super::types::RssnStatus;
+
+/// Creates a new `DagBuilder` context.
+///
+/// Returns a raw pointer to the builder, or NULL if creation failed or panicked.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_new() -> *mut DagBuilder {
+    let result = catch_unwind(|| {
+        Box::into_raw(Box::new(DagBuilder::new()))
+    });
+    result.unwrap_or(std::ptr::null_mut())
+}
+
+/// Releases the memory of a previously allocated `DagBuilder`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_free(builder: *mut DagBuilder) {
+    if builder.is_null() {
+        return;
+    }
+    let _ = catch_unwind(|| {
+        let _ = unsafe { Box::from_raw(builder) };
+    });
+}
+
+/// Allocates a new variable node in the DAG.
+///
+/// Returns the index of the variable node, or `u32::MAX` if a panic occurred or builder was null.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_variable(builder: *mut DagBuilder, name: *const c_char) -> u32 {
+    if builder.is_null() || name.is_null() {
+        return u32::MAX;
+    }
+    let result = catch_unwind(|| {
+        let builder_ref = unsafe { &mut *builder };
+        let c_str = unsafe { CStr::from_ptr(name) };
+        let name_str = c_str.to_string_lossy();
+        builder_ref.variable(&name_str).value()
+    });
+    result.unwrap_or(u32::MAX)
+}
+
+/// Allocates a new constant node in the DAG.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_constant(builder: *mut DagBuilder, val: f64) -> u32 {
+    if builder.is_null() {
+        return u32::MAX;
+    }
+    let result = catch_unwind(|| {
+        let builder_ref = unsafe { &mut *builder };
+        builder_ref.constant(val).value()
+    });
+    result.unwrap_or(u32::MAX)
+}
+
+/// Allocates a new addition node in the DAG: `lhs + rhs`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_add(builder: *mut DagBuilder, lhs: u32, rhs: u32) -> u32 {
+    if builder.is_null() {
+        return u32::MAX;
+    }
+    let result = catch_unwind(|| {
+        let builder_ref = unsafe { &mut *builder };
+        builder_ref.add(DagNodeId::new(lhs), DagNodeId::new(rhs)).value()
+    });
+    result.unwrap_or(u32::MAX)
+}
+
+/// Simplifies a target expression using the default heuristic engine.
+///
+/// Returns the new root node index of the simplified expression.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_simplify(builder: *mut DagBuilder, root: u32) -> u32 {
+    if builder.is_null() {
+        return u32::MAX;
+    }
+    let result = catch_unwind(|| {
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+
+        let config = HeuristicConfig::default();
+        let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
+        
+        engine.simplify(builder_ref.arena_mut(), root_id).value()
+    });
+    result.unwrap_or(u32::MAX)
+}
+
+/// JIT compiles a target expression and writes the native function pointer to `out_fn`.
+///
+/// `out_fn` can be called via `rssn_dag_execute` or cast directly as `double (*)(const double*)`.
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_compile(
+    builder: *mut DagBuilder,
+    root: u32,
+    out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    if builder.is_null() || out_fn.is_null() {
+        return RssnStatus::NullPointer;
+    }
+
+    let result = catch_unwind(|| {
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+        
+        // Project root node to AST
+        let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
+
+        // JIT compile
+        let mut compiler = crate::jit::compiler::JitCompiler::new();
+        match compiler.compile(&ast) {
+            Ok(compiled_fn) => {
+                let ptr = compiled_fn as *mut c_void;
+                unsafe { *out_fn = ptr };
+                RssnStatus::Success
+            }
+            Err(_) => RssnStatus::CompilationError,
+        }
+    });
+
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// JIT compiles a target expression and writes the native function pointer to `out_fn`.
+///
+/// `out_fn` can be called via `rssn_dag_execute` or cast directly as `double (*)(const double*)`.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_compile(
+    _builder: *mut DagBuilder,
+    _root: u32,
+    _out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
+/// Executes a previously compiled JIT function with the given variable input array.
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_execute(func: *const c_void, variables: *const f64) -> f64 {
+    if func.is_null() || variables.is_null() {
+        return 0.0;
+    }
+    let result = catch_unwind(|| {
+        let compiled_fn: crate::jit::compiler::CompiledExprFn = unsafe { std::mem::transmute(func) };
+        compiled_fn(variables)
+    });
+    result.unwrap_or(0.0)
+}
+
+/// Executes a previously compiled JIT function with the given variable input array.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_execute(_func: *const c_void, _variables: *const f64) -> f64 {
+    0.0
+}
