@@ -73,6 +73,7 @@ cranelift-native = { version = "0.131", optional = true }
 cranelift-codegen = { version = "0.131", optional = true }
 cranelift-module = { version = "0.131", optional = true }
 cranelift-jit = { version = "0.131", optional = true }
+dtact = "0.2"
 
 [build-dependencies]
 cbindgen = "0.29"
