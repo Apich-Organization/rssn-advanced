@@ -2,28 +2,23 @@
 
 /// The date the library was built.
 
-pub const BUILD_DATE: &str =
-    env!("VERGEN_BUILD_DATE");
+pub const BUILD_DATE: &str = env!("VERGEN_BUILD_DATE");
 
 /// The Git commit SHA the library was built from.
 
-pub const COMMIT_SHA: &str =
-    env!("VERGEN_GIT_SHA");
+pub const COMMIT_SHA: &str = env!("VERGEN_GIT_SHA");
 
 /// The version of the Rust compiler used to build the library.
 
-pub const RUSTC_VERSION: &str =
-    env!("VERGEN_RUSTC_SEMVER");
+pub const RUSTC_VERSION: &str = env!("VERGEN_RUSTC_SEMVER");
 
 /// The target triple for which the library was built.
 
-pub const CARGO_TARGET_TRIPLE: &str =
-    env!("VERGEN_CARGO_TARGET_TRIPLE");
+pub const CARGO_TARGET_TRIPLE: &str = env!("VERGEN_CARGO_TARGET_TRIPLE");
 
 /// Operating system and version information of the build environment.
 
-pub const SYSTEM_INFO: &str =
-    env!("VERGEN_SYSINFO_OS_VERSION");
+pub const SYSTEM_INFO: &str = env!("VERGEN_SYSINFO_OS_VERSION");
 
 // --- Getter functions ---
 
@@ -32,7 +27,7 @@ pub const SYSTEM_INFO: &str =
 /// # Examples
 ///
 /// ```
-/// 
+///
 /// use rssn::constant::get_build_date;
 ///
 /// let date = get_build_date();
@@ -42,9 +37,7 @@ pub const SYSTEM_INFO: &str =
 #[must_use]
 #[inline(always)]
 
-pub const fn get_build_date()
--> &'static str {
-
+pub const fn get_build_date() -> &'static str {
     BUILD_DATE
 }
 
@@ -53,7 +46,7 @@ pub const fn get_build_date()
 /// # Examples
 ///
 /// ```
-/// 
+///
 /// use rssn::constant::get_commit_sha;
 ///
 /// let sha = get_commit_sha();
@@ -63,9 +56,7 @@ pub const fn get_build_date()
 #[must_use]
 #[inline(always)]
 
-pub const fn get_commit_sha()
--> &'static str {
-
+pub const fn get_commit_sha() -> &'static str {
     COMMIT_SHA
 }
 
@@ -74,7 +65,7 @@ pub const fn get_commit_sha()
 /// # Examples
 ///
 /// ```
-/// 
+///
 /// use rssn::constant::get_rustc_version;
 ///
 /// let version = get_rustc_version();
@@ -84,9 +75,7 @@ pub const fn get_commit_sha()
 #[must_use]
 #[inline(always)]
 
-pub const fn get_rustc_version()
--> &'static str {
-
+pub const fn get_rustc_version() -> &'static str {
     RUSTC_VERSION
 }
 
@@ -95,7 +84,7 @@ pub const fn get_rustc_version()
 /// # Examples
 ///
 /// ```
-/// 
+///
 /// use rssn::constant::get_cargo_target_triple;
 ///
 /// let triple = get_cargo_target_triple();
@@ -105,9 +94,7 @@ pub const fn get_rustc_version()
 #[must_use]
 #[inline(always)]
 
-pub const fn get_cargo_target_triple()
--> &'static str {
-
+pub const fn get_cargo_target_triple() -> &'static str {
     CARGO_TARGET_TRIPLE
 }
 
@@ -116,7 +103,7 @@ pub const fn get_cargo_target_triple()
 /// # Examples
 ///
 /// ```
-/// 
+///
 /// use rssn::constant::get_system_info;
 ///
 /// let sys_info = get_system_info();
@@ -126,9 +113,7 @@ pub const fn get_cargo_target_triple()
 #[must_use]
 #[inline(always)]
 
-pub const fn get_system_info()
--> &'static str {
-
+pub const fn get_system_info() -> &'static str {
     SYSTEM_INFO
 }
 
@@ -554,14 +539,20 @@ nist_const!(
 ); // [cite: 188-189]
 
 nist_const!(
-    PROTON_MAGNETIC_SHIELDING_CORRECTION, get_proton_magnetic_shielding_correction,
-    2.567_15e-5, "dimensionless", "0.000_41e-5",
+    PROTON_MAGNETIC_SHIELDING_CORRECTION,
+    get_proton_magnetic_shielding_correction,
+    2.567_15e-5,
+    "dimensionless",
+    "0.000_41e-5",
     "proton magnetic shielding correction (H2O sphere, 25°C)"
 ); // [cite: 77-78, 81]
 
 nist_const!(
-    SHIELDED_PROTON_GYROMAGNETIC_RATIO, get_shielded_proton_gyromagnetic_ratio,
-    2.675_153_194e8, "s⁻¹ T⁻¹", "0.000_000_011e8",
+    SHIELDED_PROTON_GYROMAGNETIC_RATIO,
+    get_shielded_proton_gyromagnetic_ratio,
+    2.675_153_194e8,
+    "s⁻¹ T⁻¹",
+    "0.000_000_011e8",
     "shielded proton gyromagnetic ratio (H2O, sphere, 25°C)"
 ); // [cite: 104-106, 108]
 
@@ -594,8 +585,11 @@ nist_const!(
 ); // [cite: 200-201]
 
 nist_const!(
-    ELECTRON_CHARGE_TO_MASS_QUOTIENT, get_electron_charge_to_mass_quotient,
-    -1.758_820_008_38e11, "C kg⁻¹", "0.000_000_000_55e11",
+    ELECTRON_CHARGE_TO_MASS_QUOTIENT,
+    get_electron_charge_to_mass_quotient,
+    -1.758_820_008_38e11,
+    "C kg⁻¹",
+    "0.000_000_000_55e11",
     "electron charge to mass quotient"
 ); // [cite: 163-164, 170-171]
 

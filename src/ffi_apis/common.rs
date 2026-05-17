@@ -27,7 +27,6 @@ impl BincodeBuffer {
     #[must_use]
 
     pub const fn empty() -> Self {
-
         Self {
             data: std::ptr::null_mut(),
             len: 0,
@@ -38,33 +37,20 @@ impl BincodeBuffer {
 
     #[must_use]
 
-    pub fn from_vec(
-        bytes: Vec<u8>
-    ) -> Self {
-
+    pub fn from_vec(bytes: Vec<u8>) -> Self {
         let len = bytes.len();
 
-        let data = Box::into_raw(
-            bytes.into_boxed_slice(),
-        )
-        .cast::<u8>();
+        let data = Box::into_raw(bytes.into_boxed_slice()).cast::<u8>();
 
-        Self {
-            data,
-            len,
-        }
+        Self { data, len }
     }
 
     /// Checks if the buffer is null/empty.
 
     #[must_use]
 
-    pub const fn is_null(
-        &self
-    ) -> bool {
-
-        self.data.is_null()
-            || self.len == 0
+    pub const fn is_null(&self) -> bool {
+        self.data.is_null() || self.len == 0
     }
 
     /// Converts the buffer to a slice (unsafe).
@@ -81,21 +67,12 @@ impl BincodeBuffer {
     /// 2. The memory layout of passed structures matches the expected C-ABI layout.
     /// 3. Any pointers returned by this function are managed according to the API's ownership rules.
 
-    pub const unsafe fn as_slice(
-        &self
-    ) -> &[u8] {
-
+    pub const unsafe fn as_slice(&self) -> &[u8] {
         unsafe {
-
             if self.is_null() {
-
                 &[]
             } else {
-
-                std::slice::from_raw_parts(
-                self.data,
-                self.len,
-            )
+                std::slice::from_raw_parts(self.data, self.len)
             }
         }
     }
@@ -108,16 +85,10 @@ impl BincodeBuffer {
 /// This function should only be called once per string.
 #[unsafe(no_mangle)]
 
-pub extern "C" fn rssn_free_string(
-    s: *mut c_char
-) {
-
+pub extern "C" fn rssn_free_string(s: *mut c_char) {
     if !s.is_null() {
-
         unsafe {
-
-            let _ =
-                CString::from_raw(s);
+            let _ = CString::from_raw(s);
         }
     }
 }
@@ -129,17 +100,10 @@ pub extern "C" fn rssn_free_string(
 /// This function should only be called once per buffer.
 #[unsafe(no_mangle)]
 
-pub extern "C" fn rssn_free_bincode_buffer(
-    buffer: BincodeBuffer
-) {
-
+pub extern "C" fn rssn_free_bincode_buffer(buffer: BincodeBuffer) {
     if !buffer.is_null() {
-
         unsafe {
-
-            let _ = Box::from_raw(
-                std::ptr::slice_from_raw_parts_mut(buffer.data, buffer.len),
-            );
+            let _ = Box::from_raw(std::ptr::slice_from_raw_parts_mut(buffer.data, buffer.len));
         }
     }
 }
@@ -150,15 +114,10 @@ pub extern "C" fn rssn_free_bincode_buffer(
 
 #[must_use]
 
-pub fn to_c_string(
-    s: String
-) -> *mut c_char {
-
+pub fn to_c_string(s: String) -> *mut c_char {
     match CString::new(s) {
-        | Ok(c_str) => c_str.into_raw(),
-        | Err(_) => {
-            std::ptr::null_mut()
-        },
+        Ok(c_str) => c_str.into_raw(),
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
@@ -166,17 +125,10 @@ pub fn to_c_string(
 ///
 /// Returns null on error.
 
-pub fn to_json_string<
-    T: serde::Serialize,
->(
-    value: &T
-) -> *mut c_char {
-
+pub fn to_json_string<T: serde::Serialize>(value: &T) -> *mut c_char {
     match serde_json::to_string(value) {
-        | Ok(json) => to_c_string(json),
-        | Err(_) => {
-            std::ptr::null_mut()
-        },
+        Ok(json) => to_c_string(json),
+        Err(_) => std::ptr::null_mut(),
     }
 }
 
@@ -186,32 +138,18 @@ pub fn to_json_string<
 
 #[must_use]
 
-pub fn from_json_string<
-    T: serde::de::DeserializeOwned,
->(
-    json: *const c_char
-) -> Option<T> {
-
+pub fn from_json_string<T: serde::de::DeserializeOwned>(json: *const c_char) -> Option<T> {
     if json.is_null() {
-
         return None;
     }
 
     unsafe {
-
-        let c_str =
-            std::ffi::CStr::from_ptr(
-                json,
-            );
+        let c_str = std::ffi::CStr::from_ptr(json);
 
         c_str
             .to_str()
             .ok()
-            .and_then(|s| {
-
-                serde_json::from_str(s)
-                    .ok()
-            })
+            .and_then(|s| serde_json::from_str(s).ok())
     }
 }
 
@@ -219,18 +157,10 @@ pub fn from_json_string<
 ///
 /// Returns empty buffer on error.
 
-pub fn to_bincode_buffer<
-    T: serde::Serialize,
->(
-    value: &T
-) -> BincodeBuffer {
-
-    match bincode_next::serde::encode_to_vec(
-        value,
-        bincode_next::config::standard(),
-    ) {
-        | Ok(bytes) => BincodeBuffer::from_vec(bytes),
-        | Err(_) => BincodeBuffer::empty(),
+pub fn to_bincode_buffer<T: serde::Serialize>(value: &T) -> BincodeBuffer {
+    match bincode_next::serde::encode_to_vec(value, bincode_next::config::standard()) {
+        Ok(bytes) => BincodeBuffer::from_vec(bytes),
+        Err(_) => BincodeBuffer::empty(),
     }
 }
 
@@ -240,27 +170,17 @@ pub fn to_bincode_buffer<
 
 #[must_use]
 
-pub fn from_bincode_buffer<
-    T: serde::de::DeserializeOwned,
->(
-    buffer: &BincodeBuffer
-) -> Option<T> {
-
+pub fn from_bincode_buffer<T: serde::de::DeserializeOwned>(buffer: &BincodeBuffer) -> Option<T> {
     if buffer.is_null() {
-
         return None;
     }
 
     unsafe {
-
         let slice = buffer.as_slice();
 
-        bincode_next::serde::decode_from_slice(
-            slice,
-            bincode_next::config::standard(),
-        )
-        .ok()
-        .map(|(v, _)| v)
+        bincode_next::serde::decode_from_slice(slice, bincode_next::config::standard())
+            .ok()
+            .map(|(v, _)| v)
     }
 }
 
@@ -281,20 +201,12 @@ pub fn from_bincode_buffer<
 /// 2. The memory layout of passed structures matches the expected C-ABI layout.
 /// 3. Any pointers returned by this function are managed according to the API's ownership rules.
 
-pub unsafe fn c_str_to_str<'a>(
-    s: *const c_char
-) -> Option<&'a str> {
-
+pub unsafe fn c_str_to_str<'a>(s: *const c_char) -> Option<&'a str> {
     unsafe {
-
         if s.is_null() {
-
             None
         } else {
-
-            std::ffi::CStr::from_ptr(s)
-                .to_str()
-                .ok()
+            std::ffi::CStr::from_ptr(s).to_str().ok()
         }
     }
 }
@@ -308,9 +220,7 @@ mod tests {
     #[test]
 
     fn test_bincode_buffer_empty() {
-
-        let buffer =
-            BincodeBuffer::empty();
+        let buffer = BincodeBuffer::empty();
 
         assert!(buffer.is_null());
     }
@@ -318,37 +228,25 @@ mod tests {
     #[test]
 
     fn test_bincode_buffer_from_vec() {
-
         let vec = vec![1, 2, 3, 4];
 
-        let buffer =
-            BincodeBuffer::from_vec(
-                vec,
-            );
+        let buffer = BincodeBuffer::from_vec(vec);
 
         assert!(!buffer.is_null());
 
         assert_eq!(buffer.len, 4);
 
         unsafe {
-
-            assert_eq!(
-                buffer.as_slice(),
-                &[1, 2, 3, 4]
-            );
+            assert_eq!(buffer.as_slice(), &[1, 2, 3, 4]);
         }
 
-        rssn_free_bincode_buffer(
-            buffer,
-        );
+        rssn_free_bincode_buffer(buffer);
     }
 
     #[test]
 
     fn test_to_c_string() {
-
-        let s =
-            "Hello, World!".to_string();
+        let s = "Hello, World!".to_string();
 
         let c_str = to_c_string(s);
 
