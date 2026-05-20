@@ -73,13 +73,25 @@ cranelift-native = { version = "0.131", optional = true }
 cranelift-codegen = { version = "0.131", optional = true }
 cranelift-module = { version = "0.131", optional = true }
 cranelift-jit = { version = "0.131", optional = true }
-dtact = "0.2"
+dtact = "0.2.1"
 
 [build-dependencies]
 cbindgen = "0.29"
 
 [features]
 default = []
+# Unified JIT feature: enables the full Cranelift stack required by `src/jit`.
+# Use `cargo build --features jit` from now on; the bare `cranelift-jit`
+# weak-dep alone is not enough.
+jit = [
+    "dep:cranelift-jit",
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+]
+# Backward-compat alias for the previous gating name.
+"cranelift-jit" = ["jit"]
 
 [dev-dependencies]
 loom = "0.7"

@@ -1,17 +1,22 @@
 //! SIMD-optimized preset function library.
 //!
-//! Provides hardware-accelerated batch operations as the default
-//! high-performance execution path. Falls back to scalar implementations
-//! when SIMD is unavailable.
+//! The slice-iterating wrappers in this module dispatch to the 4-lane
+//! kernels under [`crate::asm_presets`]. Every kernel emits explicit
+//! `core::arch::asm!` instructions for its target ISA — there is no
+//! reliance on the compiler's auto-vectorizer (`simd_review §1`).
 //!
-//! - `arithmetic` — Batch coefficient add, mul, and comparison.
-//! - `hash` — Vectorized rapidhash for batch node deduplication.
+//! - `arithmetic` — Batch add, mul, scalar-add, pow, cmp-eq, FMA,
+//!   coefficient-merge.
+//! - `hash` — AES-NI based batch hashing for dedup.
 //! - `detect` — Runtime CPU feature detection (SSE4.2, AVX2, NEON).
 
 pub mod arithmetic;
 pub mod detect;
 pub mod hash;
 
-pub use arithmetic::{batch_add, batch_add_scalar, batch_mul};
+pub use arithmetic::{
+    BatchError, batch_add, batch_add_scalar, batch_cmp_eq, batch_coef_merge, batch_fma,
+    batch_mul, batch_pow,
+};
 pub use detect::{has_avx2, has_sse42};
 pub use hash::batch_hash;

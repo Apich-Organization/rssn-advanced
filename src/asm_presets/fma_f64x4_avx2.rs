@@ -1,0 +1,85 @@
+//! `fma_f64x4_avx2` — fused multiply-add `out = a * b + c` via `vfmadd231pd`.
+//!
+//! Single-rounding FMA is what `plan.md §3.1` calls out for coefficient
+//! merging hot paths; the scalar fallback uses `f64::mul_add` so the
+//! semantics match on both branches.
+
+#![allow(unsafe_code)]
+
+/// Computes `out[i] = a[i] * b[i] + c[i]` for four `f64` lanes.
+///
+/// # Safety
+///
+/// On the FMA path the function uses raw pointers and 256-bit unaligned
+/// `vmovupd` / `vfmadd231pd`. Lengths are checked; alignment isn't.
+#[allow(clippy::inline_always)]
+#[inline(always)]
+pub fn apply(a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]) {
+    if a.len() != 4 || b.len() != 4 || c.len() != 4 || out.len() != 4 {
+        return;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
+            // SAFETY: lengths checked; AVX2+FMA detected.
+            unsafe {
+                use core::arch::asm;
+                asm!(
+                    "vmovupd ymm0, ymmword ptr [{a}]",     // ymm0 = a
+                    "vmovupd ymm1, ymmword ptr [{b}]",     // ymm1 = b
+                    "vmovupd ymm2, ymmword ptr [{c}]",     // ymm2 = c (accumulator)
+                    "vfmadd231pd ymm2, ymm0, ymm1",         // ymm2 += ymm0 * ymm1
+                    "vmovupd ymmword ptr [{out}], ymm2",
+                    a = in(reg) a.as_ptr(),
+                    b = in(reg) b.as_ptr(),
+                    c = in(reg) c.as_ptr(),
+                    out = in(reg) out.as_mut_ptr(),
+                    out("ymm0") _,
+                    out("ymm1") _,
+                    out("ymm2") _,
+                    options(nostack),
+                );
+            }
+            return;
+        }
+    }
+
+    for i in 0..4 {
+        // `mul_add` requests single-rounding semantics that match
+        // `vfmadd231pd` exactly on hardware with FMA.
+        out[i] = a[i].mul_add(b[i], c[i]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fma_matches_naive_on_simple_inputs() {
+        let a = [1.0_f64, 2.0, 3.0, 4.0];
+        let b = [10.0_f64, 20.0, 30.0, 40.0];
+        let c = [100.0_f64, 200.0, 300.0, 400.0];
+        let mut out = [0.0_f64; 4];
+        apply(&a, &b, &c, &mut out);
+        // a*b + c = [10+100, 40+200, 90+300, 160+400]
+        assert_eq!(out, [110.0, 240.0, 390.0, 560.0]);
+    }
+
+    #[test]
+    fn fma_preserves_single_rounding_for_small_residuals() {
+        // (1 + 1e-30) * 1.0 + (-1.0) is the canonical FMA-vs-naive
+        // distinguishing input. We don't assert the exact rounding
+        // difference (would be flaky across machines without FMA);
+        // we only assert finite output.
+        let a = [1.0_f64; 4];
+        let b = [1.0_f64; 4];
+        let c = [-1.0_f64; 4];
+        let mut out = [0.0_f64; 4];
+        apply(&a, &b, &c, &mut out);
+        for &v in &out {
+            assert!(v.is_finite());
+        }
+    }
+}

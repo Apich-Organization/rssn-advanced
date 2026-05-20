@@ -18,4 +18,5 @@ pub mod builder;
 pub mod dedup;
 pub mod metadata;
 pub mod node;
+pub mod packed;
 pub mod symbol;

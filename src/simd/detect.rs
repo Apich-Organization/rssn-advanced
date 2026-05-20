@@ -1,7 +1,8 @@
 //! Runtime CPU feature detection.
 //!
 //! Detects available SIMD instruction sets at runtime
-//! (SSE4.2, AVX2 on x86_64; NEON on AArch64) and selects the optimal path.
+//! (`SSE4.2`, `AVX2` on `x86_64`; NEON on `AArch64`) and selects the
+//! optimal path.
 
 /// Detects if AVX2 is available on the host CPU.
 #[must_use]

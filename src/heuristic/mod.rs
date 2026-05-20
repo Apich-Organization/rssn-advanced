@@ -11,6 +11,7 @@
 
 pub mod engine;
 pub mod knobs;
+pub mod patterns;
 pub mod simplifier;
 pub mod strategy;
 

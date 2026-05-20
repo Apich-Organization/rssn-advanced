@@ -14,7 +14,8 @@ pub mod types;
 
 pub use async_bridge::{rssn_dag_simplify_async, RssnSimplifyCallback};
 pub use c_api::{
-    rssn_dag_add, rssn_dag_compile, rssn_dag_constant, rssn_dag_execute, rssn_dag_free,
-    rssn_dag_new, rssn_dag_simplify, rssn_dag_variable,
+    rssn_dag_add, rssn_dag_add_v2, rssn_dag_compile, rssn_dag_constant, rssn_dag_constant_v2,
+    rssn_dag_execute, rssn_dag_free, rssn_dag_new, rssn_dag_simplify, rssn_dag_simplify_v2,
+    rssn_dag_variable, rssn_dag_variable_v2,
 };
 pub use types::RssnStatus;

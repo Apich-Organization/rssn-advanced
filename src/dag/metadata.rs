@@ -76,6 +76,21 @@ impl NodeFlags {
             bits: self.bits | Self::CANONICAL,
         }
     }
+
+    /// Returns the raw bit pattern — used when packing to the wire
+    /// representation in [`crate::dag::packed`].
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.bits
+    }
+
+    /// Reconstructs flags from a raw bit pattern. Unknown bits are
+    /// preserved; the future-proofing matters for forward compatibility
+    /// when newer encodings carry flags this version doesn't know yet.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self { bits }
+    }
 }
 
 /// Metadata attached to every DAG node.

@@ -38,17 +38,24 @@ pub extern "C" fn rssn_dag_free(builder: *mut DagBuilder) {
 
 /// Allocates a new variable node in the DAG.
 ///
-/// Returns the index of the variable node, or `u32::MAX` if a panic occurred or builder was null.
+/// Returns the index of the variable node, or `u32::MAX` if a panic
+/// occurred, the builder was null, or `name` was not valid UTF-8.
+///
+/// Looks up `name` zero-allocation on the hot path:
+/// [`CStr::to_bytes`] → `SymbolRegistry::intern_bytes`. Only the
+/// first time a given name is interned does an allocation happen
+/// (`ffi_review §2`).
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_variable(builder: *mut DagBuilder, name: *const c_char) -> u32 {
     if builder.is_null() || name.is_null() {
         return u32::MAX;
     }
-    let result = catch_unwind(|| {
+    let result = catch_unwind(|| -> u32 {
         let builder_ref = unsafe { &mut *builder };
         let c_str = unsafe { CStr::from_ptr(name) };
-        let name_str = c_str.to_string_lossy();
-        builder_ref.variable(&name_str).value()
+        builder_ref
+            .variable_bytes(c_str.to_bytes())
+            .map_or(u32::MAX, DagNodeId::value)
     });
     result.unwrap_or(u32::MAX)
 }
@@ -94,7 +101,7 @@ pub extern "C" fn rssn_dag_simplify(builder: *mut DagBuilder, root: u32) -> u32 
         let config = HeuristicConfig::default();
         let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
         
-        engine.simplify(builder_ref.arena_mut(), root_id).value()
+        engine.simplify(builder_ref, root_id).value()
     });
     result.unwrap_or(u32::MAX)
 }
@@ -167,4 +174,107 @@ pub extern "C" fn rssn_dag_execute(func: *const c_void, variables: *const f64) -
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_execute(_func: *const c_void, _variables: *const f64) -> f64 {
     0.0
+}
+
+// =========================================================================
+// T6.2 — status-returning v2 surface
+// =========================================================================
+//
+// Each `*_v2` function takes an `out_id: *mut u32` (or equivalent) and
+// returns [`RssnStatus`]. This replaces the `u32::MAX` sentinel
+// convention used by the original API (`ffi_review §1`). The original
+// functions remain as backward-compat wrappers; new C consumers should
+// prefer the v2 forms.
+
+/// Creates a new variable node. Status-returning variant.
+///
+/// On `Success`, writes the new node id to `*out_id`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_variable_v2(
+    builder: *mut DagBuilder,
+    name: *const c_char,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || name.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let builder_ref = unsafe { &mut *builder };
+        let c_str = unsafe { CStr::from_ptr(name) };
+        builder_ref.variable_bytes(c_str.to_bytes()).map_or(
+            RssnStatus::InvalidUtf8,
+            |id| {
+                unsafe { *out_id = id.value() };
+                RssnStatus::Success
+            },
+        )
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Creates a new constant node. Status-returning variant.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_constant_v2(
+    builder: *mut DagBuilder,
+    val: f64,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let builder_ref = unsafe { &mut *builder };
+        let id = builder_ref.constant(val);
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Creates an addition node. Status-returning variant.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_add_v2(
+    builder: *mut DagBuilder,
+    lhs: u32,
+    rhs: u32,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if lhs == u32::MAX || rhs == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let builder_ref = unsafe { &mut *builder };
+        let id = builder_ref.add(DagNodeId::new(lhs), DagNodeId::new(rhs));
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Simplifies an expression. Status-returning variant.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_simplify_v2(
+    builder: *mut DagBuilder,
+    root: u32,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+        let config = HeuristicConfig::default();
+        let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
+        let id = engine.simplify(builder_ref, root_id);
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
 }

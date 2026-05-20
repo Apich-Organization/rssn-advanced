@@ -5,7 +5,7 @@ use rssn_advanced::dag::builder::DagBuilder;
 use rssn_advanced::parser::parse_expression;
 use rssn_advanced::simd::{batch_add, batch_mul};
 
-#[cfg(feature = "cranelift-jit")]
+#[cfg(feature = "jit")]
 use rssn_advanced::ast::convert::dag_to_ast;
 
 fn bench_parser_and_dag_construction(c: &mut Criterion) {
@@ -33,13 +33,13 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("batch_add", size), size, |b, _| {
             b.iter(|| {
-                batch_add(&lhs, &rhs, &mut result);
+                let _ = batch_add(&lhs, &rhs, &mut result);
             })
         });
 
         group.bench_with_input(BenchmarkId::new("batch_mul", size), size, |b, _| {
             b.iter(|| {
-                batch_mul(&lhs, &rhs, &mut result);
+                let _ = batch_mul(&lhs, &rhs, &mut result);
             })
         });
     }
@@ -47,7 +47,7 @@ fn bench_simd_vs_scalar(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(feature = "cranelift-jit")]
+#[cfg(feature = "jit")]
 fn bench_jit_compilation_and_exec(c: &mut Criterion) {
     let mut group = c.benchmark_group("jit_compiler");
 
@@ -76,7 +76,7 @@ fn bench_jit_compilation_and_exec(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(not(feature = "cranelift-jit"))]
+#[cfg(not(feature = "jit"))]
 fn bench_jit_compilation_and_exec(_c: &mut Criterion) {}
 
 criterion_group!(

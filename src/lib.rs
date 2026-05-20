@@ -62,6 +62,39 @@
 // Module Declarations
 // =========================================================================
 
+/// Inline-assembly preset suite (AVX2 / AES-NI / scalar fallback).
+///
+/// Each preset is a 4-lane `f64` kernel emitted via `core::arch::asm!`
+/// — no reliance on auto-vectorization. Used by both `simd` (slice
+/// wrappers) and indirectly by `jit` (peephole patterns). Lives at the
+/// crate root so neither subsystem has to feature-gate the other.
+pub mod asm_presets;
+
+/// Cold-path error infrastructure.
+///
+/// Hosts the `bincode_error!` macro and the module-level error enums.
+/// Replaces the previous ad-hoc `unwrap()` / `expect()` / `assert_eq!`
+/// pattern with `#[cold] #[inline(never)]` constructors so that error
+/// handling stays off the hot path.
+pub mod error;
+
+/// Zero-copy borrowed containers and `bincode-next` `BorrowDecode` glue.
+///
+/// `BorrowedSlice` / `BorrowedArena` decode by `take_bytes` directly off
+/// the input buffer, and `MmapBuffer` provides file-backed storage with
+/// 8-byte aligned bytes for safe reinterpretation as `&[T: Pod]`.
+pub mod zerocopy;
+
+/// Fiber-based task runtime built on `dtact`.
+///
+/// Replaces `std::thread::spawn` with lightweight fibers throughout the
+/// crate. `parallel_for_each` is the workhorse used by `parallel::solver`
+/// and `ffi::async_bridge`.
+pub mod runtime;
+
+/// Allocator-light shared utilities (worklist traversals, helpers).
+pub mod util;
+
 /// Global DAG (Directed Acyclic Graph) storage for symbolic expressions.
 ///
 /// Provides hash-consed, structurally-shared storage for all symbol nodes.
@@ -85,8 +118,9 @@ pub mod parser;
 /// JIT compilation pipeline for symbolic derivation rules.
 ///
 /// Compiles algebraic rewrite rules (add, mul, div, custom) into native
-/// machine code via Cranelift. Gated behind the `cranelift-jit` feature.
-#[cfg(feature = "cranelift-jit")]
+/// machine code via Cranelift. Gated behind the `jit` feature (alias
+/// `cranelift-jit` kept for backward compatibility).
+#[cfg(feature = "jit")]
 pub mod jit;
 
 /// Parallel computation engine.

@@ -21,23 +21,23 @@ mod simd_ffi_tests {
         let lhs = vec![1.0, 2.0, 3.0, 4.0];
         let rhs = vec![10.0, 20.0, 30.0, 40.0];
         let mut result = vec![0.0; 4];
-        batch_add(&lhs, &rhs, &mut result);
+        batch_add(&lhs, &rhs, &mut result).expect("batch_add");
         assert_eq!(result, vec![11.0, 22.0, 33.0, 44.0]);
 
         // Test batch_mul
         let mut result_mul = vec![0.0; 4];
-        batch_mul(&lhs, &rhs, &mut result_mul);
+        batch_mul(&lhs, &rhs, &mut result_mul).expect("batch_mul");
         assert_eq!(result_mul, vec![10.0, 40.0, 90.0, 160.0]);
 
         // Test batch_add_scalar
         let mut result_scalar = vec![0.0; 4];
-        batch_add_scalar(&lhs, 5.0, &mut result_scalar);
+        batch_add_scalar(&lhs, 5.0, &mut result_scalar).expect("batch_add_scalar");
         assert_eq!(result_scalar, vec![6.0, 7.0, 8.0, 9.0]);
 
         // Test batch_hash
         let keys = vec![100, 200, 300, 400];
         let mut hashes = vec![0; 4];
-        batch_hash(&keys, &mut hashes);
+        batch_hash(&keys, &mut hashes).expect("batch_hash");
         assert_ne!(hashes[0], hashes[1]);
         assert_ne!(hashes[2], hashes[3]);
     }

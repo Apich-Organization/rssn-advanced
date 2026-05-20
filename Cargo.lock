@@ -506,6 +506,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "dtact"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79204e7a9ce6786808da27a0dd060b56defd5fcfb9797051960246fe60b1b7a4"
+dependencies = [
+ "cbindgen",
+ "dtact-macros",
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "dtact-macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9c6011c8f9fa4ca53283ca7c03ad5906dba53869edd35d9353152c4522a297d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1158,6 +1181,7 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "criterion",
+ "dtact",
  "libc",
  "loom",
  "nom",

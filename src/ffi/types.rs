@@ -17,4 +17,9 @@ pub enum RssnStatus {
     CompilationError = 3,
     /// A panic occurred during execution.
     Panic = 4,
+    /// A C string argument was not valid UTF-8.
+    InvalidUtf8 = 5,
+    /// A `DagNodeId` argument referred to an arena slot that doesn't
+    /// exist (or is the null sentinel where one wasn't expected).
+    InvalidNodeId = 6,
 }

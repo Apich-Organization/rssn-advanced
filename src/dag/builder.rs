@@ -61,9 +61,21 @@ impl DagBuilder {
     /// Interns or retrieves a variable name, producing a unique leaf node.
     pub fn variable(&mut self, name: &str) -> DagNodeId {
         let sym_id = self.registry.intern(name);
+        self.variable_with_sym_id(sym_id)
+    }
+
+    /// Like [`Self::variable`] but accepts a raw byte slice — used by
+    /// the FFI surface to skip the `to_string_lossy` allocation.
+    ///
+    /// Returns `None` if `name_bytes` is not valid UTF-8.
+    pub fn variable_bytes(&mut self, name_bytes: &[u8]) -> Option<DagNodeId> {
+        let sym_id = self.registry.intern_bytes(name_bytes)?;
+        Some(self.variable_with_sym_id(sym_id))
+    }
+
+    fn variable_with_sym_id(&mut self, sym_id: crate::dag::symbol::SymbolId) -> DagNodeId {
         let kind = SymbolKind::Variable(sym_id);
         let hash = DedupMap::hash_variable(&kind);
-
         self.dedup.get_or_insert(
             &mut self.arena,
             kind,

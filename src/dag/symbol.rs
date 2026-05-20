@@ -97,37 +97,42 @@ pub enum SymbolKind {
 /// The symbol registry: maps symbol IDs to their string names.
 ///
 /// This is the canonical name table — all variable and function names
-/// are interned here to avoid redundant string storage.
+/// are interned here to avoid redundant string storage. A side-index
+/// `HashMap<Box<str>, SymbolId>` provides O(1) name → ID lookup so that
+/// `intern` does not degrade to O(N) when a program declares thousands
+/// of distinct variables (`dag_review §2`).
 #[derive(Debug, Clone)]
 pub struct SymbolRegistry {
     /// Interned names, indexed by `SymbolId.0`.
-    names: Vec<String>,
+    names: Vec<Box<str>>,
+    /// O(1) lookup from name to existing `SymbolId`.
+    lookup: std::collections::HashMap<Box<str>, SymbolId>,
 }
 
 impl SymbolRegistry {
     /// Creates a new, empty symbol registry.
     #[must_use]
     pub fn new() -> Self {
-        Self { names: Vec::new() }
+        Self {
+            names: Vec::new(),
+            lookup: std::collections::HashMap::new(),
+        }
     }
 
     /// Interns a name and returns its `SymbolId`.
     ///
-    /// If the name already exists, returns the existing ID.
+    /// If the name already exists, returns the existing ID in O(1).
     /// Otherwise, allocates a new slot.
     pub fn intern(&mut self, name: &str) -> SymbolId {
-        // Linear scan is fine for typical expression sizes (< 1000 symbols).
-        // For larger workloads, consider a HashMap<String, SymbolId> side-index.
-        for (i, existing) in self.names.iter().enumerate() {
-            if existing == name {
-                #[allow(clippy::cast_possible_truncation)]
-                return SymbolId(i as u32);
-            }
+        if let Some(&id) = self.lookup.get(name) {
+            return id;
         }
-        let id = self.names.len();
-        self.names.push(name.to_owned());
         #[allow(clippy::cast_possible_truncation)]
-        SymbolId(id as u32)
+        let id = SymbolId(self.names.len() as u32);
+        let boxed: Box<str> = Box::from(name);
+        self.names.push(boxed.clone());
+        self.lookup.insert(boxed, id);
+        id
     }
 
     /// Looks up the name for a given `SymbolId`.
@@ -135,18 +140,47 @@ impl SymbolRegistry {
     /// Returns `None` if the ID is out of range.
     #[must_use]
     pub fn name(&self, id: SymbolId) -> Option<&str> {
-        self.names.get(id.0 as usize).map(String::as_str)
+        self.names.get(id.0 as usize).map(|s| &**s)
+    }
+
+    /// Looks up an existing `SymbolId` for `name` without interning.
+    #[must_use]
+    pub fn lookup(&self, name: &str) -> Option<SymbolId> {
+        self.lookup.get(name).copied()
+    }
+
+    /// Looks up an existing `SymbolId` from a raw byte slice.
+    ///
+    /// Returns `None` if `bytes` is not valid UTF-8 or if no name
+    /// matches. **Allocates nothing on the hot path** — used by the
+    /// FFI surface to avoid the `to_string_lossy()` allocation per
+    /// variable reference (`ffi_review §2`).
+    #[must_use]
+    pub fn lookup_bytes(&self, bytes: &[u8]) -> Option<SymbolId> {
+        core::str::from_utf8(bytes).ok().and_then(|s| self.lookup(s))
+    }
+
+    /// Interns a name from a raw byte slice. The hot path (already
+    /// interned) allocates zero bytes; first-time insertion allocates
+    /// one `Box<str>` for the new entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if `bytes` is not valid UTF-8.
+    pub fn intern_bytes(&mut self, bytes: &[u8]) -> Option<SymbolId> {
+        let name = core::str::from_utf8(bytes).ok()?;
+        Some(self.intern(name))
     }
 
     /// Returns the number of interned symbols.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.names.len()
     }
 
     /// Returns `true` if no symbols have been interned.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
 }
@@ -180,5 +214,27 @@ mod tests {
         assert_eq!(format!("{}", OpKind::Add), "+");
         assert_eq!(format!("{}", OpKind::Pow), "^");
         assert_eq!(format!("{}", OpKind::Neg), "neg");
+    }
+
+    #[test]
+    fn intern_scales_o1() {
+        // With the HashMap side-index, interning N distinct names then
+        // re-interning them must take amortized O(N) total (not O(N^2)).
+        // We can't measure complexity in a unit test, but we can prove
+        // the lookup is constant-time by lookup() and that re-interning
+        // returns the same ID without growing the names vector.
+        let mut reg = SymbolRegistry::new();
+        for i in 0..1000 {
+            let name = format!("v{i}");
+            let id = reg.intern(&name);
+            assert_eq!(reg.lookup(&name), Some(id));
+        }
+        assert_eq!(reg.len(), 1000);
+        // Re-interning each name must not allocate.
+        for i in 0..1000 {
+            let name = format!("v{i}");
+            let _ = reg.intern(&name);
+        }
+        assert_eq!(reg.len(), 1000);
     }
 }

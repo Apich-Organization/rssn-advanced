@@ -54,9 +54,13 @@ mod storage_tests {
         builder.constant(2.0); // id_1
         builder.constant(3.0); // id_2
 
-        // Evict cold nodes with threshold = 2 (only id_0 and leaf node defaults are preserved)
-        let compacted = evict_cold_nodes(builder.arena(), &hotspots, 2);
-        assert!(compacted.len() <= builder.arena().len());
+        // Evict cold nodes with threshold = 2. The result bundles the
+        // compacted arena with an `old → new` remap table.
+        let result = evict_cold_nodes(builder.arena(), &hotspots, 2);
+        assert!(result.arena.len() <= builder.arena().len());
+        // id_0 was the only hot node and has no children; it must
+        // survive and be remappable.
+        assert!(result.translate(id_0).is_some());
     }
 
     #[test]
@@ -75,13 +79,18 @@ mod storage_tests {
             .max_depth(3);
 
         let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
-        let simplified = engine.simplify(builder.arena_mut(), current);
+        let simplified = engine.simplify(&mut builder, current);
 
         assert!(simplified.index() < builder.arena().len());
     }
 
     #[test]
     fn test_approximate_simplification_folding() {
+        // Post-Phase 4: `approximate_simplify` now does coefficient
+        // pruning (not the previous unsound "fold to 1.0"). For an
+        // additive chain of variable terms whose coefficients all
+        // equal 1.0, the pruner keeps every term — so the simplified
+        // root remains structurally non-trivial.
         let mut builder = DagBuilder::new();
         let x = builder.variable("x");
         let mut current = x;
@@ -89,16 +98,16 @@ mod storage_tests {
             current = builder.add(current, x);
         }
 
-        // High aggressiveness (0.7) triggering folding of deep branches to constant 1.0
         let config = HeuristicConfig::default()
             .simplification_aggressiveness(0.7)
             .max_depth(10);
 
         let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
-        let simplified = engine.simplify(builder.arena_mut(), current);
+        let simplified = engine.simplify(&mut builder, current);
 
-        // Assert that the returned simplified expression contains the folded 1.0 constant node!
-        let node = builder.arena().get(simplified).unwrap();
-        assert!(node.children.len() > 0 || node.value == Some(1.0));
+        // The output is a valid arena id and the arena did not
+        // explode (dedup is preserved).
+        let node = builder.arena().get(simplified).expect("simplified node");
+        assert!(node.children.len() > 0 || node.value.is_some());
     }
 }

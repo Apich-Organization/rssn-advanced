@@ -1,64 +1,232 @@
 //! Dynamic hotspot table for frequency-based caching.
 //!
-//! Tracks how often each `DagNodeId` is referenced during computation.
-//! High-frequency nodes are promoted to pinned memory; cold nodes are
-//! candidates for eviction.
+//! Per `storage_review §2`, the previous single `RwLock<HashMap>`
+//! design serialized every `record_access` call across every worker
+//! thread, defeating the parallelism the runtime gives us. This
+//! rewrite shards the table over [`NUM_SHARDS`] independent
+//! cache-line-aligned slots, dispatched by `id.0 % NUM_SHARDS`.
+//!
+//! Each shard holds its own `RwLock<HashMap<DagNodeId, u64>>` plus an
+//! [`AtomicU64`] for an Acquire/Release-ordered total-access counter.
+//! `#[repr(align(128))]` keeps adjacent shards on distinct cache
+//! lines so writes from one core do not invalidate another's read
+//! state.
+
+#![allow(unsafe_code)]
 
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::dag::node::DagNodeId;
 
-/// Dynamic frequency table tracking node access patterns.
+/// Number of independent shards. Picked to be ≥ a typical core count
+/// (32–128 cores on modern servers) while remaining cheap to
+/// allocate. 32 means each shard owns ~3 % of the keyspace on average.
+pub const NUM_SHARDS: usize = 32;
+
+/// One shard of the sharded hotspot table.
+///
+/// `#[repr(align(128))]` lifts each shard onto a fresh cache line,
+/// killing false sharing between adjacent shards (`storage_review §2`).
 #[derive(Debug, Default)]
-pub struct DynamicHotspotTable {
-    // Thread-safe map tracking raw access frequency counts.
+#[repr(align(128))]
+struct Shard {
     frequencies: RwLock<HashMap<DagNodeId, u64>>,
+    /// Per-shard total accesses (sum of frequency values written).
+    /// Useful for cheap whole-table aggregates without taking every
+    /// `RwLock`. Uses Acquire/Release ordering per `plan.md §4.2`.
+    total_accesses: AtomicU64,
+}
+
+/// Dynamic frequency table tracking node access patterns.
+///
+/// Internally sharded; per-shard locking limits contention to ~1/N of
+/// the original single-lock design.
+#[derive(Debug)]
+pub struct DynamicHotspotTable {
+    shards: Box<[Shard; NUM_SHARDS]>,
+}
+
+impl Default for DynamicHotspotTable {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DynamicHotspotTable {
     /// Creates a new, empty hotspot table.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            frequencies: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Records an access to a given `DagNodeId`, incrementing its frequency count.
     ///
     /// # Panics
-    /// Panics if the internal lock is poisoned.
+    /// Panics only if `Box<[Shard]>::try_into::<Box<[Shard; N]>>` fails,
+    /// which can't happen because we just allocated exactly N entries.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut shards: Vec<Shard> = Vec::with_capacity(NUM_SHARDS);
+        for _ in 0..NUM_SHARDS {
+            shards.push(Shard::default());
+        }
+        let array: Box<[Shard; NUM_SHARDS]> = shards
+            .into_boxed_slice()
+            .try_into()
+            .unwrap_or_else(|_| {
+                unreachable!("Vec length is exactly NUM_SHARDS by construction")
+            });
+        Self { shards: array }
+    }
+
+    /// Picks the shard index for `id`. Stable across runs.
+    const fn shard_idx(id: DagNodeId) -> usize {
+        // `% NUM_SHARDS` is OK because NUM_SHARDS is small. Using the
+        // raw u32 avoids a `to_le_bytes` allocation.
+        id.0 as usize % NUM_SHARDS
+    }
+
+    fn shard(&self, id: DagNodeId) -> &Shard {
+        &self.shards[Self::shard_idx(id)]
+    }
+
+    /// Records an access to a given `DagNodeId`.
+    ///
+    /// Only the one shard holding `id` is locked; other shards stay
+    /// fully concurrent.
+    ///
+    /// # Panics
+    /// Panics if the shard's lock is poisoned.
     pub fn record_access(&self, id: DagNodeId) {
-        let mut guard = self.frequencies.write().expect("Hotspot lock poisoned");
+        let shard = self.shard(id);
+        let mut guard = shard.frequencies.write().expect("Shard lock poisoned");
         let count = guard.entry(id).or_insert(0);
         *count += 1;
+        drop(guard);
+        shard.total_accesses.fetch_add(1, Ordering::Release);
     }
 
     /// Retrieves the access count for a given `DagNodeId`.
     ///
     /// # Panics
-    /// Panics if the internal lock is poisoned.
+    /// Panics if the shard's lock is poisoned.
     #[must_use]
     pub fn get_frequency(&self, id: DagNodeId) -> u64 {
-        let guard = self.frequencies.read().expect("Hotspot lock poisoned");
+        let shard = self.shard(id);
+        let guard = shard.frequencies.read().expect("Shard lock poisoned");
         guard.get(&id).copied().unwrap_or(0)
     }
 
     /// Returns whether the access count for `id` meets or exceeds the `threshold`.
-    ///
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn is_hot(&self, id: DagNodeId, threshold: u64) -> bool {
         self.get_frequency(id) >= threshold
     }
 
-    /// Resets all frequency counters.
+    /// Aggregate total accesses across every shard, using
+    /// [`Ordering::Acquire`] loads.
+    #[must_use]
+    pub fn total_accesses(&self) -> u64 {
+        self.shards
+            .iter()
+            .map(|s| s.total_accesses.load(Ordering::Acquire))
+            .sum()
+    }
+
+    /// Collects every `(DagNodeId, frequency)` pair across every shard.
+    ///
+    /// Snapshot — concurrent updates after the call do not appear.
+    /// O(N + S) where N = total live entries, S = `NUM_SHARDS`.
     ///
     /// # Panics
-    /// Panics if the internal lock is poisoned.
+    /// Panics if any shard's lock is poisoned.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<(DagNodeId, u64)> {
+        let mut out = Vec::new();
+        for shard in self.shards.iter() {
+            let guard = shard.frequencies.read().expect("Shard lock poisoned");
+            out.extend(guard.iter().map(|(k, v)| (*k, *v)));
+        }
+        out
+    }
+
+    /// Resets every frequency counter and total-access tally.
+    ///
+    /// # Panics
+    /// Panics if any shard's lock is poisoned.
     pub fn clear(&self) {
-        let mut guard = self.frequencies.write().expect("Hotspot lock poisoned");
-        guard.clear();
+        for shard in self.shards.iter() {
+            shard
+                .frequencies
+                .write()
+                .expect("Shard lock poisoned")
+                .clear();
+            shard.total_accesses.store(0, Ordering::Release);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shards_are_cache_line_aligned() {
+        assert_eq!(core::mem::align_of::<Shard>(), 128);
+    }
+
+    #[test]
+    fn records_and_reads_consistently() {
+        let table = DynamicHotspotTable::new();
+        let id = DagNodeId::new(7);
+        for _ in 0..10 {
+            table.record_access(id);
+        }
+        assert_eq!(table.get_frequency(id), 10);
+        assert!(table.is_hot(id, 10));
+        assert!(!table.is_hot(id, 11));
+        assert_eq!(table.total_accesses(), 10);
+    }
+
+    #[test]
+    fn distinct_ids_land_on_distinct_shards_modulo_n() {
+        // For ids 0..NUM_SHARDS, every shard gets exactly one entry.
+        let table = DynamicHotspotTable::new();
+        for i in 0..NUM_SHARDS {
+            #[allow(clippy::cast_possible_truncation)]
+            let id = DagNodeId::new(i as u32);
+            table.record_access(id);
+        }
+        let snap = table.snapshot();
+        assert_eq!(snap.len(), NUM_SHARDS);
+    }
+
+    #[test]
+    fn parallel_record_accesses_count_correctly() {
+        use std::sync::Arc;
+        let table = Arc::new(DynamicHotspotTable::new());
+        let id = DagNodeId::new(42);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let table = Arc::clone(&table);
+                std::thread::spawn(move || {
+                    for _ in 0..1000 {
+                        table.record_access(id);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("thread joined");
+        }
+        assert_eq!(table.get_frequency(id), 8 * 1000);
+        assert_eq!(table.total_accesses(), 8 * 1000);
+    }
+
+    #[test]
+    fn clear_resets_everything() {
+        let table = DynamicHotspotTable::new();
+        for i in 0..50_u32 {
+            table.record_access(DagNodeId::new(i));
+        }
+        table.clear();
+        assert_eq!(table.total_accesses(), 0);
+        assert_eq!(table.snapshot().len(), 0);
     }
 }
