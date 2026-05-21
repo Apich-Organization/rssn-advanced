@@ -11,6 +11,9 @@
 
 #![allow(unsafe_code)]
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::FloatCC;
 use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Signature, TrapCode, Value, types};
@@ -19,7 +22,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 
 use crate::ast::projection::{AstNode, AstProjection};
-use crate::dag::symbol::{OpKind, SymbolKind};
+use crate::dag::symbol::{FnId, OpKind, SymbolKind};
 use crate::jit::codegen::emit_prefetch_hint;
 
 /// A JIT-compiled expression function pointer.
@@ -28,14 +31,35 @@ use crate::jit::codegen::emit_prefetch_hint;
 /// ordered by their `SymbolId` values, and returns the computed float result.
 pub type CompiledExprFn = extern "C" fn(*const f64) -> f64;
 
+/// User-supplied native function exposed to the JIT.
+///
+/// Takes one `f64` and returns one `f64` — the common math-library
+/// signature (`sin`, `cos`, `log`, …). Registered via
+/// [`JitCompiler::register_custom_function`].
+pub type CustomFn1 = extern "C" fn(f64) -> f64;
+
 extern "C" fn jit_powf(base: f64, exp: f64) -> f64 {
     base.powf(exp)
 }
+
+/// Shared registry of custom function pointers, keyed by `FnId.0`.
+///
+/// Stored as `usize` (not `*const u8`) so the type is `Send`/`Sync`
+/// without unsafe markers. The closure registered with
+/// `JITBuilder::symbol_lookup_fn` (see [`JitCompiler::new`]) queries
+/// this map at link time, so [`Self::register_custom_function`] may
+/// be called any time **before the next `compile()`**.
+type CustomFnRegistry = Arc<Mutex<HashMap<u32, usize>>>;
 
 /// The primary compiler context for compiling symbolic expressions to native code.
 pub struct JitCompiler {
     module: JITModule,
     builder_ctx: FunctionBuilderContext,
+    /// Shared with the symbol-lookup closure baked into the
+    /// `JITModule`. Late `register_custom_function` calls update this
+    /// map; the closure consults it whenever Cranelift needs to
+    /// resolve an unknown symbol.
+    custom_fns: CustomFnRegistry,
 }
 
 impl std::fmt::Debug for JitCompiler {
@@ -57,14 +81,17 @@ impl JitCompiler {
     /// Panics if the host native target cannot be built.
     #[must_use]
     pub fn new() -> Self {
+        // allow-panic: init-only — the JIT cannot operate without a target ISA.
         let isa_builder =
             cranelift_native::builder().expect("Failed to detect native host platform");
 
         // Optimizing compiler flags.
         let mut flag_builder = cranelift_codegen::settings::builder();
+        // allow-panic: init-only — `opt_level` is a fixed string literal.
         cranelift_codegen::settings::Configurable::set(&mut flag_builder, "opt_level", "speed")
             .expect("Failed to set opt_level");
 
+        // allow-panic: init-only — Cranelift backend setup failure is non-recoverable.
         let isa = isa_builder
             .finish(cranelift_codegen::settings::Flags::new(flag_builder))
             .expect("Failed to build target ISA");
@@ -73,11 +100,44 @@ impl JitCompiler {
 
         builder.symbol("powf", jit_powf as *const u8);
 
+        // Custom function registry: shared between the JitCompiler
+        // and the lookup-fn closure baked into the JITModule. The
+        // closure runs whenever Cranelift hits an unknown symbol
+        // during link/finalize; we map our `rssn_custom_fn_<id>`
+        // naming convention back to the raw function pointer.
+        let custom_fns: CustomFnRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let lookup_registry = Arc::clone(&custom_fns);
+        builder.symbol_lookup_fn(Box::new(move |name: &str| -> Option<*const u8> {
+            let id_str = name.strip_prefix("rssn_custom_fn_")?;
+            let id: u32 = id_str.parse().ok()?;
+            let guard = lookup_registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.get(&id).map(|addr| *addr as *const u8)
+        }));
+
         let module = JITModule::new(builder);
         Self {
             module,
             builder_ctx: FunctionBuilderContext::new(),
+            custom_fns,
         }
+    }
+
+    /// Registers a user-defined `extern "C" fn(f64) -> f64` so the JIT
+    /// can resolve `SymbolKind::Function(fn_id)` references at link
+    /// time. May be called any time before the next [`Self::compile`].
+    ///
+    /// The `fn_id` must match whatever the symbolic layer assigned to
+    /// the corresponding function name (typically via `DagBuilder`).
+    pub fn register_custom_function(&self, fn_id: FnId, func: CustomFn1) {
+        // The cast `func as usize` is a no-op pointer cast; the value
+        // is later cast back to `*const u8` inside the lookup closure.
+        let mut guard = self
+            .custom_fns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(fn_id.0, func as usize);
     }
 
     /// Compiles an `AstProjection` expression into a native callable function.
@@ -118,11 +178,54 @@ impl JitCompiler {
             .module
             .declare_func_in_func(powf_name, func_builder.func);
 
+        // Walk the AST once and import every distinct custom function
+        // it references. Refuse to compile if any referenced id was
+        // not registered via `register_custom_function`.
+        let mut custom_sig = Signature::new(self.module.target_config().default_call_conv);
+        custom_sig.params.push(AbiParam::new(types::F64));
+        custom_sig.returns.push(AbiParam::new(types::F64));
+        let mut custom_refs: HashMap<u32, cranelift_codegen::ir::FuncRef> = HashMap::new();
+
+        // Snapshot the registry under the lock, then drop it before
+        // doing any module work — keeps the lock window minimal.
+        let registered_ids: std::collections::HashSet<u32> = {
+            let guard = self
+                .custom_fns
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.keys().copied().collect()
+        };
+        for node in &ast.nodes {
+            if let SymbolKind::Function(fn_id) = node.kind {
+                if custom_refs.contains_key(&fn_id.0) {
+                    continue;
+                }
+                if !registered_ids.contains(&fn_id.0) {
+                    return Err(format!(
+                        "AST references custom function id {} but no \
+                         implementation was registered via \
+                         JitCompiler::register_custom_function()",
+                        fn_id.0
+                    ));
+                }
+                let sym = format!("rssn_custom_fn_{}", fn_id.0);
+                let fid = self
+                    .module
+                    .declare_function(&sym, Linkage::Import, &custom_sig)
+                    .map_err(|e| {
+                        format!("Failed to declare custom function {sym} import: {e:?}")
+                    })?;
+                let fr = self.module.declare_func_in_func(fid, func_builder.func);
+                custom_refs.insert(fn_id.0, fr);
+            }
+        }
+
         let root_val = compile_ast_iterative(
             ast,
             &mut func_builder,
             vars_ptr,
             powf_func_ref,
+            &custom_refs,
         )?;
 
         func_builder.ins().return_(&[root_val]);
@@ -173,41 +276,52 @@ fn compile_ast_iterative(
     builder: &mut FunctionBuilder<'_>,
     vars_ptr: Value,
     powf_func_ref: cranelift_codegen::ir::FuncRef,
+    custom_refs: &HashMap<u32, cranelift_codegen::ir::FuncRef>,
 ) -> Result<Value, String> {
     let mut stack: Vec<Frame> = Vec::with_capacity(64);
     let mut values: Vec<Value> = Vec::with_capacity(64);
 
     // Seed with the root.
+    let root_node = ast
+        .nodes
+        .first()
+        .ok_or_else(|| "AST projection has no root node".to_owned())?;
     stack.push(Frame {
         idx: 0,
-        arity: ast.nodes[0].children.len(),
+        arity: root_node.children.len(),
         cursor: 0,
     });
 
-    while !stack.is_empty() {
+    while let Some(top) = stack.last_mut() {
         // Decide whether to push a child or emit this node, then act —
-        // splitting the decision from the action keeps the borrow checker
-        // happy when we go from `last_mut()` to `push()` / `pop()`.
-        let action = {
-            let top = stack.last_mut().expect("non-empty stack");
-            if top.cursor < top.arity {
-                let node = &ast.nodes[top.idx];
-                let child_ptr = node.children.as_slice()[top.cursor];
-                let child_idx = child_ptr.resolve(top.idx).ok_or_else(|| {
-                    "Failed to resolve relative pointer in JIT codegen".to_owned()
-                })?;
-                top.cursor += 1;
-                Action::Descend(child_idx)
-            } else {
-                Action::Emit(top.idx, top.arity)
-            }
+        // splitting the decision from the action keeps the borrow
+        // checker happy when we go from `last_mut()` to `push/pop`.
+        let action = if top.cursor < top.arity {
+            let Some(node) = ast.nodes.get(top.idx) else {
+                return Err(format!("JIT codegen: AST index {} out of range", top.idx));
+            };
+            let Some(&child_ptr) = node.children.as_slice().get(top.cursor) else {
+                return Err("JIT codegen: child cursor past child list end".to_owned());
+            };
+            let child_idx = child_ptr.resolve(top.idx).ok_or_else(|| {
+                "Failed to resolve relative pointer in JIT codegen".to_owned()
+            })?;
+            top.cursor += 1;
+            Action::Descend(child_idx)
+        } else {
+            Action::Emit(top.idx, top.arity)
         };
 
         match action {
             Action::Descend(child_idx) => {
+                let Some(child_node) = ast.nodes.get(child_idx) else {
+                    return Err(format!(
+                        "JIT codegen: child AST index {child_idx} out of range"
+                    ));
+                };
                 stack.push(Frame {
                     idx: child_idx,
-                    arity: ast.nodes[child_idx].children.len(),
+                    arity: child_node.children.len(),
                     cursor: 0,
                 });
             }
@@ -220,20 +334,24 @@ fn compile_ast_iterative(
                     builder,
                     vars_ptr,
                     powf_func_ref,
+                    custom_refs,
                     &mut values,
                 )?;
             }
         }
     }
 
-    if values.len() != 1 {
+    let result = values.pop().ok_or_else(|| {
+        "JIT codegen value-stack ended empty; expected exactly one result".to_owned()
+    })?;
+    if !values.is_empty() {
         return Err(format!(
-            "JIT codegen value-stack invariant violated: ended with {} values \
-             but expected exactly 1",
+            "JIT codegen value-stack invariant violated: \
+             {} leftover values after compilation",
             values.len()
         ));
     }
-    Ok(values.pop().expect("value stack invariant"))
+    Ok(result)
 }
 
 enum Action {
@@ -241,6 +359,7 @@ enum Action {
     Emit(usize, usize),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_one_node(
     ast: &AstProjection,
     idx: usize,
@@ -248,6 +367,7 @@ fn emit_one_node(
     builder: &mut FunctionBuilder<'_>,
     vars_ptr: Value,
     powf_func_ref: cranelift_codegen::ir::FuncRef,
+    custom_refs: &HashMap<u32, cranelift_codegen::ir::FuncRef>,
     values: &mut Vec<Value>,
 ) -> Result<(), String> {
     let node = &ast.nodes[idx];
@@ -271,17 +391,34 @@ fn emit_one_node(
             let result = emit_operator(builder, op, &child_vals, powf_func_ref, node)?;
             values.push(result);
         }
-        SymbolKind::Function(_) => {
-            // T2.6 (custom JIT functions) is deferred — see dev_plan.md.
-            // It needs a `symbol_lookup_fn` on the JITBuilder which can
-            // only be registered at construction time, so the runtime
-            // `register_custom_function` API is being redesigned. Until
-            // then, AST nodes carrying `SymbolKind::Function` cannot be
-            // JIT-compiled.
-            return Err(
-                "JIT compilation of custom Functions is not yet supported (T2.6 follow-up)"
-                    .to_owned(),
-            );
+        SymbolKind::Function(fn_id) => {
+            // T2.6: resolve `SymbolKind::Function(fn_id)` to the
+            // FuncRef declared in `compile()` and emit a single call.
+            let func_ref = custom_refs.get(&fn_id.0).copied().ok_or_else(|| {
+                format!(
+                    "Missing FuncRef for custom function id {} during \
+                     codegen — should have been pre-declared in compile()",
+                    fn_id.0
+                )
+            })?;
+            let split_at = values.len().checked_sub(arity).ok_or_else(|| {
+                "JIT codegen value-stack underflow at custom function".to_owned()
+            })?;
+            let child_vals: Vec<Value> = values.drain(split_at..).collect();
+            if child_vals.len() != 1 {
+                return Err(format!(
+                    "Custom JIT functions take exactly one f64 argument; \
+                     symbol got {} children",
+                    child_vals.len()
+                ));
+            }
+            let call = builder.ins().call(func_ref, &child_vals);
+            let result = builder
+                .inst_results(call)
+                .first()
+                .copied()
+                .ok_or_else(|| "Custom function call returned no value".to_owned())?;
+            values.push(result);
         }
     }
     Ok(())
@@ -533,5 +670,49 @@ mod tests {
         let f = compiler.compile(&ast).unwrap();
         let r = f([].as_ptr());
         assert!((r - 7.0).abs() < f64::EPSILON);
+    }
+
+    extern "C" fn rssn_test_double(x: f64) -> f64 {
+        x * 2.0
+    }
+
+    #[test]
+    fn test_custom_function_jit_round_trip() {
+        use crate::dag::metadata::NodeFlags;
+        use crate::dag::symbol::{FnId, SymbolKind as SK};
+
+        let mut b = DagBuilder::new();
+        let x = b.variable("x");
+        // Build `double(x)` via a custom function id #42.
+        let fn_id = FnId(42);
+        let expr = b.operator(SK::Function(fn_id), &[x], NodeFlags::EMPTY);
+        let ast = dag_to_ast(b.arena(), expr);
+
+        let mut compiler = JitCompiler::new();
+        compiler.register_custom_function(fn_id, rssn_test_double);
+        let f = compiler.compile(&ast).expect("compile with custom fn");
+
+        let vars = vec![3.5_f64];
+        let r = f(vars.as_ptr());
+        assert!((r - 7.0).abs() < f64::EPSILON, "expected 3.5 * 2 = 7.0");
+    }
+
+    #[test]
+    fn test_custom_function_unregistered_fails_cleanly() {
+        use crate::dag::metadata::NodeFlags;
+        use crate::dag::symbol::{FnId, SymbolKind as SK};
+
+        let mut b = DagBuilder::new();
+        let x = b.variable("x");
+        let expr = b.operator(SK::Function(FnId(99)), &[x], NodeFlags::EMPTY);
+        let ast = dag_to_ast(b.arena(), expr);
+
+        let mut compiler = JitCompiler::new();
+        // No `register_custom_function` call → compile must error.
+        let err = compiler.compile(&ast).expect_err("must error");
+        assert!(
+            err.contains("99"),
+            "error must mention the unregistered fn id; got: {err}"
+        );
     }
 }

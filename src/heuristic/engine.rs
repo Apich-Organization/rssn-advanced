@@ -83,10 +83,11 @@ impl HeuristicEngine {
         let mut stack: Vec<Frame> = Vec::with_capacity(64);
         let mut values: Vec<DagNodeId> = Vec::with_capacity(64);
 
-        let root_node = builder
-            .arena()
-            .get(root)
-            .expect("root must exist in arena");
+        // If the root doesn't resolve we treat the call as a no-op
+        // instead of panicking (`storage_review §4` / Phase 7).
+        let Some(root_node) = builder.arena().get(root) else {
+            return root;
+        };
         stack.push(Frame {
             node_id: root,
             depth: 0,
@@ -98,8 +99,7 @@ impl HeuristicEngine {
         while let Some(top) = stack.last_mut() {
             // Budget enforcement: depth + timeout.
             if top.depth >= self.config.max_depth || start_time.elapsed() >= self.config.timeout {
-                let frame = stack.pop().expect("non-empty stack");
-                // Push the un-rewritten id and unwind any partial children.
+                let Some(frame) = stack.pop() else { break };
                 values.truncate(values.len().saturating_sub(frame.cursor));
                 values.push(frame.node_id);
                 continue;
@@ -112,7 +112,6 @@ impl HeuristicEngine {
                 top.cursor += 1;
                 let parent_depth = top.depth;
 
-                // Look up the child id without holding the frame borrow.
                 let child_id = builder
                     .arena()
                     .get(parent_id)
@@ -120,19 +119,19 @@ impl HeuristicEngine {
                     .unwrap_or(DagNodeId::NONE);
 
                 if child_id.is_none() {
-                    // Defensive: malformed arena.
                     values.push(DagNodeId::NONE);
                     continue;
                 }
 
-                let child_node = builder
-                    .arena()
-                    .get(child_id)
-                    .expect("child must exist");
+                // Defensive: corrupt child reference becomes a leaf-id
+                // pushed onto the value stack instead of a panic.
+                let Some(child_node) = builder.arena().get(child_id) else {
+                    values.push(child_id);
+                    continue;
+                };
                 let child_kind = child_node.kind;
                 let child_arity = child_node.children.len();
 
-                // Leaves go straight onto the value stack — no rewrite.
                 if child_arity == 0 {
                     values.push(child_id);
                     continue;
@@ -146,11 +145,9 @@ impl HeuristicEngine {
                     kind: child_kind,
                 });
             } else {
-                // All children processed → reduce this frame.
-                let frame = stack.pop().expect("non-empty stack");
+                let Some(frame) = stack.pop() else { break };
                 let split_at = values.len().saturating_sub(frame.arity);
                 let new_children: Vec<DagNodeId> = values.drain(split_at..).collect();
-
                 let rebuilt = rebuild_or_match(builder, frame.kind, &new_children, frame.node_id);
                 values.push(rebuilt);
             }

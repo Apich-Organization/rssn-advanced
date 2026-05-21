@@ -21,7 +21,7 @@
 
 ### **Macro Non-Compliance**
 - **Issue**: `ParseError` and the parsing logic do not use the requested cold-path error macro.
-- **Recommendation**: Use the `bincode_error!`-style macro for reporting parser failures to keep the hot path clean.
+- **Recommendation**: Use the `rssn_error!`-style macro for reporting parser failures to keep the hot path clean.
 
 ### **Incomplete Span Information**
 - **Observation**: `ParseError` captures the `span` as a `String` of the remaining input. This is less helpful for large inputs.

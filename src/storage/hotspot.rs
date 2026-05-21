@@ -66,6 +66,9 @@ impl DynamicHotspotTable {
         for _ in 0..NUM_SHARDS {
             shards.push(Shard::default());
         }
+        // allow-panic: init-only — `shards.len() == NUM_SHARDS` is a
+        // structural invariant of the loop above; the conversion
+        // cannot fail.
         let array: Box<[Shard; NUM_SHARDS]> = shards
             .into_boxed_slice()
             .try_into()
@@ -89,13 +92,16 @@ impl DynamicHotspotTable {
     /// Records an access to a given `DagNodeId`.
     ///
     /// Only the one shard holding `id` is locked; other shards stay
-    /// fully concurrent.
-    ///
-    /// # Panics
-    /// Panics if the shard's lock is poisoned.
+    /// fully concurrent. A poisoned lock recovers transparently via
+    /// `PoisonError::into_inner` — we don't maintain any cross-thread
+    /// invariant that a panic would have damaged, so poisoning is
+    /// just noise.
     pub fn record_access(&self, id: DagNodeId) {
         let shard = self.shard(id);
-        let mut guard = shard.frequencies.write().expect("Shard lock poisoned");
+        let mut guard = shard
+            .frequencies
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let count = guard.entry(id).or_insert(0);
         *count += 1;
         drop(guard);
@@ -103,13 +109,13 @@ impl DynamicHotspotTable {
     }
 
     /// Retrieves the access count for a given `DagNodeId`.
-    ///
-    /// # Panics
-    /// Panics if the shard's lock is poisoned.
     #[must_use]
     pub fn get_frequency(&self, id: DagNodeId) -> u64 {
         let shard = self.shard(id);
-        let guard = shard.frequencies.read().expect("Shard lock poisoned");
+        let guard = shard
+            .frequencies
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.get(&id).copied().unwrap_or(0)
     }
 
@@ -133,29 +139,26 @@ impl DynamicHotspotTable {
     ///
     /// Snapshot — concurrent updates after the call do not appear.
     /// O(N + S) where N = total live entries, S = `NUM_SHARDS`.
-    ///
-    /// # Panics
-    /// Panics if any shard's lock is poisoned.
     #[must_use]
     pub fn snapshot(&self) -> Vec<(DagNodeId, u64)> {
         let mut out = Vec::new();
         for shard in self.shards.iter() {
-            let guard = shard.frequencies.read().expect("Shard lock poisoned");
+            let guard = shard
+                .frequencies
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             out.extend(guard.iter().map(|(k, v)| (*k, *v)));
         }
         out
     }
 
     /// Resets every frequency counter and total-access tally.
-    ///
-    /// # Panics
-    /// Panics if any shard's lock is poisoned.
     pub fn clear(&self) {
         for shard in self.shards.iter() {
             shard
                 .frequencies
                 .write()
-                .expect("Shard lock poisoned")
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clear();
             shard.total_accesses.store(0, Ordering::Release);
         }

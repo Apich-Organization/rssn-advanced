@@ -87,11 +87,8 @@ pub fn parallel_evaluate_shared(
 /// iterative codegen in Phase 2). Depth is limited by heap, not by OS
 /// stack, so a million-deep expression no longer overflows.
 ///
-/// # Panics
-///
-/// Panics if the internal stack/value-stack invariant is broken — this
-/// would indicate either arena corruption or a logic error inside this
-/// function.
+/// Panic-free: if the arena is corrupt the function returns whatever
+/// partial result it has built so far (typically `0.0`).
 #[must_use]
 pub fn evaluate_node(arena: &DagArena, id: DagNodeId, vars: &[f64]) -> f64 {
     if id.is_none() {
@@ -124,8 +121,12 @@ pub fn evaluate_node(arena: &DagArena, id: DagNodeId, vars: &[f64]) -> f64 {
                 cursor: 0,
             });
         } else {
-            // All children evaluated → reduce this frame.
-            let frame = stack.pop().expect("non-empty stack");
+            // All children evaluated → reduce this frame. The `Some`
+            // here is guaranteed by the outer `while let Some(top)`
+            // we just exited; if it somehow isn't, we treat it as
+            // "no more work" and return whatever we have on the
+            // value stack.
+            let Some(frame) = stack.pop() else { break };
             let v = reduce_frame(arena, frame.id, frame.arity, &mut values, vars);
             values.push(v);
         }

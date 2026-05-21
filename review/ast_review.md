@@ -38,11 +38,11 @@
 ## **4. Error Handling**
 
 ### **Missing Cold-Path Error Macro**
-- **Issue**: The project is instructed to use a specific `bincode_error!`-style macro for cold-path error handling.
+- **Issue**: The project is instructed to use a specific `rssn_error!`-style macro for cold-path error handling.
 ```rust
 #[doc(hidden)]
 #[macro_export]
-macro_rules! bincode_error {
+macro_rules! rssn_error {
     (
         $(#[$meta:meta])*
         $vis:vis enum $name:ident {

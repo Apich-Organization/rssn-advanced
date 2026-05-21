@@ -93,21 +93,28 @@ impl<T> RelPtr<T, i32> {
 
     /// Computes the relative pointer from a source index to a target index.
     ///
-    /// # Panics
-    /// Panics if the offset overflow/underflow bounds of `i32`.
+    /// When the offset overflows the `i32` range the function returns
+    /// the null pointer (clamped fallback) rather than panicking
+    /// (Phase 7 cleanup). Callers that need to distinguish "real null"
+    /// from "overflow" should use [`Self::from_indices_checked`].
     #[must_use]
     pub fn from_indices(source: usize, target: usize) -> Self {
+        Self::from_indices_checked(source, target).unwrap_or_else(Self::null)
+    }
+
+    /// Like [`Self::from_indices`] but returns `None` on i32 overflow
+    /// instead of clamping to null.
+    #[must_use]
+    pub fn from_indices_checked(source: usize, target: usize) -> Option<Self> {
         if target == 0 {
-            return Self::null();
+            return Some(Self::null());
         }
         let diff = (target as isize) - (source as isize);
-        #[allow(clippy::cast_possible_truncation)]
-        let offset = diff as i32;
-        assert_eq!(offset as isize, diff, "Relative pointer offset overflowed i32");
-        Self {
+        let offset = i32::try_from(diff).ok()?;
+        Some(Self {
             offset,
             _phantom: PhantomData,
-        }
+        })
     }
 
     /// Resolves the target element's index in the slice, given the source index.

@@ -10,11 +10,11 @@
 
 这些是所有上层模块都会依赖的"地基"，必须最先完成。
 
-### T0.1 🔴 `bincode_error!` 冷路径错误宏 — `src/error/mod.rs`
+### T0.1 🔴 `rssn_error!` 冷路径错误宏 — `src/error/mod.rs`
 - **来源**：`ast_review §4`、`dag/ffi/heuristic/jit/parallel/parser/simd/storage_review §4`（全员违规）。
 - **任务**：
-  1. 新建 `src/error/mod.rs`，实现审查文档中给出的 `bincode_error!` macro_rules（带 `#[cold]` `#[inline(never)]` `#[track_caller]` 的 `cold_*` 构造函数）。
-  2. 在 `lib.rs` 暴露 `pub use error::bincode_error;`。
+  1. 新建 `src/error/mod.rs`，实现审查文档中给出的 `rssn_error!` macro_rules（带 `#[cold]` `#[inline(never)]` `#[track_caller]` 的 `cold_*` 构造函数）。
+  2. 在 `lib.rs` 暴露 `pub use error::rssn_error;`。
   3. 定义模块级错误枚举：`AstError`、`DagError`、`JitError`、`ParallelError`、`ParserError`、`StorageError`、`FfiError`。
   4. 编写单元测试，验证宏展开后 `cold_*` 函数存在且确实带 `#[cold]`。
 - **验收**：所有 `.expect()` / `.unwrap()` / `.assert_eq!` 在后续阶段被替换为 `cold_*` 调用。
@@ -280,4 +280,4 @@
 3. ✅ SIMD/JIT 至少 6 个 `inline_asm!` 预设可用（T2.4 + T3.1）。
 4. ✅ 启发式模块 100% 走 `DagBuilder::get_or_insert`（T4.2）。
 5. ✅ 全部递归遍历路径替换为 worklist（T1.4 + T2.1 + T4.1 + T4.2 + T6.4）。
-6. ✅ `bincode_error!` 宏存在且全仓库无裸 `unwrap`（T0.1 + T7.1）。
+6. ✅ `rssn_error!` 宏存在且全仓库无裸 `unwrap`（T0.1 + T7.1）。

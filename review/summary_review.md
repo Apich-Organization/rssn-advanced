@@ -15,7 +15,7 @@ The current implementation provides a functional baseline for symbolic computati
 | **Zero-copy (`bincode-next`)** | **FAIL** | All data structures use owned `Vec` and standard `Decode`. No `BorrowDecode` or zero-copy streaming implemented. |
 | **Async-Fiber (`dtact`)** | **FAIL** | Uses heavy `std::thread::spawn` instead of lightweight fibers/`dtact`. |
 | **Naked/Inline ASM Presets** | **FAIL** | Zero use of assembly. Relies on compiler auto-vectorization and high-level JIT IR. |
-| **Cold-Path Error Handling** | **FAIL** | The requested `bincode_error!`-style macro is missing. Uses standard `unwrap`/`expect`/`Result`. |
+| **Cold-Path Error Handling** | **FAIL** | The requested `rssn_error!`-style macro is missing. Uses standard `unwrap`/`expect`/`Result`. |
 
 ---
 
@@ -42,4 +42,4 @@ The current implementation provides a functional baseline for symbolic computati
 3.  **Implement Assembly Presets**: Write explicit `inline_asm!` blocks for core SIMD arithmetic and JIT kernels to ensure peak performance and stability.
 4.  **Fix Dedup logic**: Ensure the `HeuristicEngine` uses the `DagBuilder` to maintain structural deduplication at all times.
 5.  **Linearize Traversals**: Convert recursive functions in `compiler.rs`, `convert.rs`, and `simplify.rs` to iterative work-list patterns.
-6.  **Implement Error Macro**: Create the `bincode_error!` macro and adopt it across the codebase to optimize hot-path branch prediction.
+6.  **Implement Error Macro**: Create the `rssn_error!` macro and adopt it across the codebase to optimize hot-path branch prediction.

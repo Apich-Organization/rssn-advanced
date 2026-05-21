@@ -96,23 +96,26 @@ impl JitCache {
 
     /// Inserts a compiled function into the cache.
     ///
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
+    /// A poisoned lock is recovered via `PoisonError::into_inner` —
+    /// the map's internal state survives panics in unrelated threads.
     pub fn insert(&self, key: String, func: CompiledExprFn) {
         let addr = func as usize;
         {
-            let mut write_guard = self.cache.write().expect("JIT cache lock poisoned");
+            let mut write_guard = self
+                .cache
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             write_guard.insert(key, addr);
         }
         self.stats.inserts.fetch_add(1, Ordering::Release);
     }
 
     /// Clears all compiled functions from the cache.
-    ///
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     pub fn clear(&self) {
-        let mut write_guard = self.cache.write().expect("JIT cache lock poisoned");
+        let mut write_guard = self
+            .cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         write_guard.clear();
     }
 

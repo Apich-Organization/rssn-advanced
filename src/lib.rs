@@ -72,7 +72,7 @@ pub mod asm_presets;
 
 /// Cold-path error infrastructure.
 ///
-/// Hosts the `bincode_error!` macro and the module-level error enums.
+/// Hosts the `rssn_error!` macro and the module-level error enums.
 /// Replaces the previous ad-hoc `unwrap()` / `expect()` / `assert_eq!`
 /// pattern with `#[cold] #[inline(never)]` constructors so that error
 /// handling stays off the hot path.
