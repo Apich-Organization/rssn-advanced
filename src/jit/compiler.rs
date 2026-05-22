@@ -28,12 +28,23 @@ use crate::dag::symbol::{FnId, OpKind, SymbolKind};
 /// ordered by their `SymbolId` values, and returns the computed float result.
 pub type CompiledExprFn = extern "C" fn(*const f64) -> f64;
 
-/// User-supplied native function exposed to the JIT.
+/// User-supplied native function: one `f64` argument, one `f64` return.
 ///
-/// Takes one `f64` and returns one `f64` — the common math-library
-/// signature (`sin`, `cos`, `log`, …). Registered via
+/// The common math-library signature (`sin`, `cos`, `log`, …). Registered via
 /// [`JitCompiler::register_custom_function`].
 pub type CustomFn1 = extern "C" fn(f64) -> f64;
+
+/// User-supplied native function: two `f64` arguments, one `f64` return.
+///
+/// Suitable for two-argument math functions (`pow`, `atan2`, …). Registered
+/// via [`JitCompiler::register_custom_function_2`].
+pub type CustomFn2 = extern "C" fn(f64, f64) -> f64;
+
+/// User-supplied native function: three `f64` arguments, one `f64` return.
+///
+/// Suitable for three-argument operations (`fma`, `clamp`, …). Registered
+/// via [`JitCompiler::register_custom_function_3`].
+pub type CustomFn3 = extern "C" fn(f64, f64, f64) -> f64;
 
 extern "C" fn jit_powf(base: f64, exp: f64) -> f64 {
     base.powf(exp)
@@ -43,13 +54,22 @@ extern "C" fn jit_fmod(lhs: f64, rhs: f64) -> f64 {
     lhs % rhs
 }
 
+/// Entry in the custom function registry: function pointer + argument count.
+#[derive(Clone, Copy)]
+struct CustomFnEntry {
+    /// Raw function pointer (cast to `usize` for `Send`/`Sync` safety).
+    ptr: usize,
+    /// Number of `f64` arguments the function accepts (1, 2, or 3).
+    arity: u8,
+}
+
 /// Shared registry of custom function pointers, keyed by `FnId.0`.
 ///
 /// Stored as `usize` (not `*const u8`) so the type is `Send`/`Sync`
 /// without unsafe markers. Uses `RwLock` so concurrent readers (the
 /// symbol-lookup closure) never block each other; only `register_custom_function`
 /// takes a write lock.
-type CustomFnRegistry = Arc<RwLock<HashMap<u32, usize>>>;
+type CustomFnRegistry = Arc<RwLock<HashMap<u32, CustomFnEntry>>>;
 
 /// The primary compiler context for compiling symbolic expressions to native code.
 pub struct JitCompiler {
@@ -81,37 +101,34 @@ impl Default for JitCompiler {
 }
 
 impl JitCompiler {
-    /// Creates a new `JitCompiler` instance initialized for the host target.
+    /// Attempts to create a new `JitCompiler` for the host target.
     ///
-    /// # Panics
-    /// Panics if the host native target cannot be built.
-    #[must_use]
-    pub fn new() -> Self {
-        // allow-panic: init-only — the JIT cannot operate without a target ISA.
-        let isa_builder =
-            cranelift_native::builder().expect("Failed to detect native host platform");
+    /// Returns `Err(JitError::InitFailed)` if the Cranelift backend or
+    /// native ISA cannot be initialised — for example, on an unsupported
+    /// architecture or in a cross-compilation environment without a
+    /// registered native target (`error_review §4`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::JitError::InitFailed`] if any step of the
+    /// Cranelift backend initialisation fails.
+    pub fn try_new() -> Result<Self, crate::error::JitError> {
+        let isa_builder = cranelift_native::builder()
+            .map_err(|_| crate::error::JitError::InitFailed)?;
 
-        // Optimizing compiler flags.
         let mut flag_builder = cranelift_codegen::settings::builder();
-        // allow-panic: init-only — `opt_level` is a fixed string literal.
         cranelift_codegen::settings::Configurable::set(&mut flag_builder, "opt_level", "speed")
-            .expect("Failed to set opt_level");
+            .map_err(|_| crate::error::JitError::InitFailed)?;
 
-        // allow-panic: init-only — Cranelift backend setup failure is non-recoverable.
         let isa = isa_builder
             .finish(cranelift_codegen::settings::Flags::new(flag_builder))
-            .expect("Failed to build target ISA");
+            .map_err(|_| crate::error::JitError::InitFailed)?;
 
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
         builder.symbol("powf", jit_powf as *const u8);
         builder.symbol("fmod", jit_fmod as *const u8);
 
-        // Custom function registry: shared between the JitCompiler
-        // and the lookup-fn closure baked into the JITModule. The
-        // closure runs whenever Cranelift hits an unknown symbol
-        // during link/finalize; we map our `rssn_custom_fn_<id>`
-        // naming convention back to the raw function pointer.
         let custom_fns: CustomFnRegistry = Arc::new(RwLock::new(HashMap::new()));
         let lookup_registry = Arc::clone(&custom_fns);
         builder.symbol_lookup_fn(Box::new(move |name: &str| -> Option<*const u8> {
@@ -120,17 +137,27 @@ impl JitCompiler {
             let guard = lookup_registry
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.get(&id).map(|addr| *addr as *const u8)
+            guard.get(&id).map(|entry| entry.ptr as *const u8)
         }));
 
         let module = JITModule::new(builder);
-        Self {
+        Ok(Self {
             module,
             builder_ctx: FunctionBuilderContext::new(),
             custom_fns,
             work_stack: Vec::with_capacity(64),
             work_values: Vec::with_capacity(64),
-        }
+        })
+    }
+
+    /// Creates a new `JitCompiler` instance initialized for the host target.
+    ///
+    /// # Panics
+    /// Panics if the host native target cannot be built. For a fallible
+    /// variant, use [`Self::try_new`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::try_new().expect("JIT compiler initialization failed")
     }
 
     /// Registers a user-defined `extern "C" fn(f64) -> f64` so the JIT
@@ -146,7 +173,34 @@ impl JitCompiler {
             .custom_fns
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.insert(fn_id.0, func as usize);
+        guard.insert(fn_id.0, CustomFnEntry { ptr: func as usize, arity: 1 });
+    }
+
+    /// Registers a user-defined `extern "C" fn(f64, f64) -> f64` so the JIT
+    /// can resolve `SymbolKind::Function(fn_id)` references at link time.
+    ///
+    /// Two-argument variant of [`Self::register_custom_function`], suitable
+    /// for functions like `pow`, `atan2`, or user-defined binary operators
+    /// (`jit_review §3.1`).
+    pub fn register_custom_function_2(&self, fn_id: FnId, func: CustomFn2) {
+        let mut guard = self
+            .custom_fns
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(fn_id.0, CustomFnEntry { ptr: func as usize, arity: 2 });
+    }
+
+    /// Registers a user-defined `extern "C" fn(f64, f64, f64) -> f64` so the JIT
+    /// can resolve `SymbolKind::Function(fn_id)` references at link time.
+    ///
+    /// Three-argument variant of [`Self::register_custom_function`], suitable
+    /// for `fma`, `clamp`, and similar ternary operations (`jit_review §3.1`).
+    pub fn register_custom_function_3(&self, fn_id: FnId, func: CustomFn3) {
+        let mut guard = self
+            .custom_fns
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(fn_id.0, CustomFnEntry { ptr: func as usize, arity: 3 });
     }
 
     /// Compiles an `AstProjection` expression into a native callable function.
@@ -199,37 +253,49 @@ impl JitCompiler {
         // Walk the AST once and import every distinct custom function
         // it references. Refuse to compile if any referenced id was
         // not registered via `register_custom_function`.
-        let mut custom_sig = Signature::new(self.module.target_config().default_call_conv);
-        custom_sig.params.push(AbiParam::new(types::F64));
-        custom_sig.returns.push(AbiParam::new(types::F64));
         let mut custom_refs: HashMap<u32, cranelift_codegen::ir::FuncRef> = HashMap::new();
 
-        // Snapshot the registry under a read lock, then drop it before
-        // doing any module work — keeps the lock window minimal.
-        let registered_ids: std::collections::HashSet<u32> = {
+        // Snapshot the registry (id → arity) under a read lock, then drop
+        // it before any module work — keeps the lock window minimal.
+        let registered_entries: HashMap<u32, u8> = {
             let guard = self
                 .custom_fns
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.keys().copied().collect()
+            guard.iter().map(|(&id, e)| (id, e.arity)).collect()
         };
+
+        // Capture call_conv before any mutable borrows of self.module.
+        let default_call_conv = self.module.target_config().default_call_conv;
+
+        // Build per-arity signatures (1-, 2-, 3-arg f64→f64).
+        let make_fn_sig = |arity: u8| -> Signature {
+            let mut sig = Signature::new(default_call_conv);
+            for _ in 0..arity {
+                sig.params.push(AbiParam::new(types::F64));
+            }
+            sig.returns.push(AbiParam::new(types::F64));
+            sig
+        };
+
         for node in &ast.nodes {
             if let SymbolKind::Function(fn_id) = node.kind {
                 if custom_refs.contains_key(&fn_id.0) {
                     continue;
                 }
-                if !registered_ids.contains(&fn_id.0) {
-                    return Err(format!(
+                let arity = registered_entries.get(&fn_id.0).copied().ok_or_else(|| {
+                    format!(
                         "AST references custom function id {} but no \
                          implementation was registered via \
-                         JitCompiler::register_custom_function()",
+                         JitCompiler::register_custom_function*()",
                         fn_id.0
-                    ));
-                }
+                    )
+                })?;
+                let sig = make_fn_sig(arity);
                 let sym = format!("rssn_custom_fn_{}", fn_id.0);
                 let fid = self
                     .module
-                    .declare_function(&sym, Linkage::Import, &custom_sig)
+                    .declare_function(&sym, Linkage::Import, &sig)
                     .map_err(|e| {
                         format!("Failed to declare custom function {sym} import: {e:?}")
                     })?;
@@ -326,6 +392,11 @@ fn compile_ast_iterative(
 ) -> Result<Value, String> {
     // Callers clear these before passing — guaranteed by `compile()`.
 
+    // FMA peephole: maps each Mul-result Value to its two input factors so
+    // that when an enclosing Add is emitted we can fold `a*b + c` into one
+    // `fma(a, b, c)` instruction (jit_review §4 / simd_review §4).
+    let mut mul_factors: HashMap<Value, (Value, Value)> = HashMap::new();
+
     // Seed with the root.
     let root_node = ast
         .nodes
@@ -382,6 +453,7 @@ fn compile_ast_iterative(
                     fmod_func_ref,
                     custom_refs,
                     &mut values,
+                    &mut mul_factors,
                 )?;
             }
         }
@@ -416,6 +488,7 @@ fn emit_one_node(
     fmod_func_ref: cranelift_codegen::ir::FuncRef,
     custom_refs: &HashMap<u32, cranelift_codegen::ir::FuncRef>,
     values: &mut Vec<Value>,
+    mul_factors: &mut HashMap<Value, (Value, Value)>,
 ) -> Result<(), String> {
     let node = &ast.nodes[idx];
 
@@ -434,12 +507,14 @@ fn emit_one_node(
             // Take children out in order — the iterative walker pushes
             // left-to-right, so children[0..arity] are already correct.
             let child_vals: Vec<Value> = values.drain(split_at..).collect();
-            let result = emit_operator(builder, op, &child_vals, powf_func_ref, fmod_func_ref, node)?;
+            let result = emit_operator(builder, op, &child_vals, powf_func_ref, fmod_func_ref, node, mul_factors)?;
             values.push(result);
         }
         SymbolKind::Function(fn_id) => {
             // T2.6: resolve `SymbolKind::Function(fn_id)` to the
-            // FuncRef declared in `compile()` and emit a single call.
+            // FuncRef declared in `compile()` and emit a call with
+            // 1, 2, or 3 f64 arguments depending on the registration
+            // arity (`jit_review §3.1`).
             let func_ref = custom_refs.get(&fn_id.0).copied().ok_or_else(|| {
                 format!(
                     "Missing FuncRef for custom function id {} during \
@@ -451,9 +526,9 @@ fn emit_one_node(
                 "JIT codegen value-stack underflow at custom function".to_owned()
             })?;
             let child_vals: Vec<Value> = values.drain(split_at..).collect();
-            if child_vals.len() != 1 {
+            if child_vals.is_empty() || child_vals.len() > 3 {
                 return Err(format!(
-                    "Custom JIT functions take exactly one f64 argument; \
+                    "Custom JIT functions support 1–3 f64 arguments; \
                      symbol got {} children",
                     child_vals.len()
                 ));
@@ -486,6 +561,10 @@ fn emit_variable_load(
 /// constant arguments here are whatever the codegen walker materialised
 /// into `child_vals`, which may include `f64const` instructions we
 /// emitted moments ago.
+///
+/// `mul_factors` tracks the two inputs of each recently-emitted `fmul`
+/// result; this enables the FMA peephole in `OpKind::Add` that folds
+/// `a*b + c` into a single `fma(a, b, c)` instruction (jit_review §4).
 fn emit_operator(
     builder: &mut FunctionBuilder<'_>,
     op: OpKind,
@@ -493,6 +572,7 @@ fn emit_operator(
     powf_func_ref: cranelift_codegen::ir::FuncRef,
     fmod_func_ref: cranelift_codegen::ir::FuncRef,
     ast_node: &AstNode,
+    mul_factors: &mut HashMap<Value, (Value, Value)>,
 ) -> Result<Value, String> {
     use crate::jit::primitives::{simplify_add, simplify_mul};
 
@@ -518,7 +598,20 @@ fn emit_operator(
                 }
                 (Some(0.0), _) => Ok(child_vals[1]),
                 (_, Some(0.0)) => Ok(child_vals[0]),
-                _ => Ok(builder.ins().fadd(child_vals[0], child_vals[1])),
+                _ => {
+                    // FMA peephole (jit_review §4 / simd_review §4):
+                    // If the left child is a Mul result whose two factors
+                    // were recorded in `mul_factors`, fold `(a*b) + c`
+                    // → `fma(a, b, c)`.  Check right side too for
+                    // commutativity: `c + (a*b)` → `fma(a, b, c)`.
+                    if let Some(&(a, b)) = mul_factors.get(&child_vals[0]) {
+                        Ok(builder.ins().fma(a, b, child_vals[1]))
+                    } else if let Some(&(a, b)) = mul_factors.get(&child_vals[1]) {
+                        Ok(builder.ins().fma(a, b, child_vals[0]))
+                    } else {
+                        Ok(builder.ins().fadd(child_vals[0], child_vals[1]))
+                    }
+                }
             }
         }
         OpKind::Sub => {
@@ -535,7 +628,9 @@ fn emit_operator(
             if arity != 2 {
                 return Err("Mul operator must have exactly 2 children".to_owned());
             }
-            // Peephole: `x * 0 → 0`, `x * 1 → x`, `c1 * c2 → const`.
+            // Peephole: `x * 0 → 0`, `x * 1 → x`, `c1 * c2 → const`,
+            // `x * 2.0 → x + x` (single fadd is often faster than fmul
+            // by a literal 2.0 on modern FP pipelines — jit_review §4).
             match (constants[0], constants[1]) {
                 (Some(l), Some(r)) => {
                     let folded = simplify_mul(l, r).unwrap_or(l * r);
@@ -544,7 +639,19 @@ fn emit_operator(
                 (Some(0.0), _) | (_, Some(0.0)) => Ok(builder.ins().f64const(0.0)),
                 (Some(1.0), _) => Ok(child_vals[1]),
                 (_, Some(1.0)) => Ok(child_vals[0]),
-                _ => Ok(builder.ins().fmul(child_vals[0], child_vals[1])),
+                // `x * 2.0 → x + x` and `2.0 * x → x + x`: replacing a
+                // multiply by a power-of-two constant with an additive
+                // self-addition avoids an FP multiply unit stall on CPUs
+                // where FADD has lower latency than FMUL.
+                (Some(2.0), _) => Ok(builder.ins().fadd(child_vals[1], child_vals[1])),
+                (_, Some(2.0)) => Ok(builder.ins().fadd(child_vals[0], child_vals[0])),
+                _ => {
+                    // Record this Mul's factors so an enclosing Add can
+                    // optionally fold into FMA instead of separate mul+add.
+                    let result = builder.ins().fmul(child_vals[0], child_vals[1]);
+                    mul_factors.insert(result, (child_vals[0], child_vals[1]));
+                    Ok(result)
+                }
             }
         }
         OpKind::Div => {

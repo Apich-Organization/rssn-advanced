@@ -78,7 +78,7 @@ mod storage_tests {
             .timeout(std::time::Duration::from_millis(5))
             .max_depth(3);
 
-        let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
+        let mut engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
         let simplified = engine.simplify(&mut builder, current);
 
         assert!(simplified.index() < builder.arena().len());
@@ -102,7 +102,7 @@ mod storage_tests {
             .simplification_aggressiveness(0.7)
             .max_depth(10);
 
-        let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
+        let mut engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
         let simplified = engine.simplify(&mut builder, current);
 
         // The output is a valid arena id and the arena did not

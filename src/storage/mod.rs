@@ -11,5 +11,5 @@ pub mod eviction;
 pub mod hotspot;
 
 pub use cache::DiskCache;
-pub use eviction::evict_cold_nodes;
+pub use eviction::{evict_cold_nodes, evict_nodes_with_policy, EvictionPolicy, FrequencyPolicy};
 pub use hotspot::DynamicHotspotTable;

@@ -147,54 +147,6 @@ impl<T> RelPtr<T, i32> {
     }
 }
 
-impl<T> RelPtr<T, i64> {
-    /// Null sentinel for the i64 variant.
-    pub const NULL_OFFSET_I64: i64 = i64::MIN;
-
-    /// Creates a null relative pointer (i64 variant).
-    #[must_use]
-    pub const fn null_i64() -> Self {
-        Self {
-            offset: Self::NULL_OFFSET_I64,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Returns `true` if this relative pointer is null.
-    #[must_use]
-    pub const fn is_null_i64(self) -> bool {
-        self.offset == Self::NULL_OFFSET_I64
-    }
-
-    /// Computes the relative pointer from a source index to a target index.
-    #[must_use]
-    pub fn from_indices_i64(source: usize, target: usize) -> Self {
-        let offset = (target as i64) - (source as i64);
-        if offset == Self::NULL_OFFSET_I64 {
-            return Self::null_i64();
-        }
-        Self {
-            offset,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Resolves the target element's index in the slice, given the source index.
-    ///
-    /// Returns `None` if the relative pointer is null.
-    #[must_use]
-    pub fn resolve_i64(self, source: usize) -> Option<usize> {
-        if self.is_null_i64() {
-            return None;
-        }
-        let target = (source as isize) + (self.offset as isize);
-        if target < 0 {
-            None
-        } else {
-            Some(target as usize)
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

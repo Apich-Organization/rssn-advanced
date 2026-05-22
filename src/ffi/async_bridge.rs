@@ -9,19 +9,13 @@
 //!
 //! # Safety and lifetimes
 //!
-//! The v1 API (`rssn_dag_simplify_async`) fires and forgets the fiber,
-//! returning before completion. Callers **must** guarantee the `DagBuilder`
-//! pointer stays valid until the callback fires; otherwise a use-after-free
-//! occurs.
-//!
-//! The v2 API (`rssn_dag_simplify_async_v2`) returns an opaque handle that
+//! [`rssn_dag_simplify_async_v2`] returns an opaque handle that
 //! can be passed to [`rssn_async_join`] to block until the fiber completes.
 //! This makes the safety requirement explicit and verifiable: join the handle
 //! before freeing the builder.
 
 #![allow(unsafe_code)]
 
-use std::os::raw::c_void;
 use std::panic::catch_unwind;
 
 use super::types::RssnStatus;
@@ -29,65 +23,6 @@ use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
 use crate::heuristic::{HeuristicConfig, HeuristicEngine, SearchStrategy};
 use crate::runtime::{TaskHandle, ensure_runtime, join, spawn_task};
-
-/// Callback signature for asynchronous simplification completion.
-///
-/// Parameters:
-/// - `simplified_root`: The index of the simplified root node.
-/// - `status`: The return status code.
-/// - `user_data`: The raw user data context pointer passed to the async function.
-pub type RssnSimplifyCallback =
-    unsafe extern "C" fn(simplified_root: u32, status: RssnStatus, user_data: *mut c_void);
-
-/// Simplifies a target expression asynchronously on a background fiber.
-///
-/// Upon completion, the given `callback` is executed with the simplified
-/// root node and status code.
-///
-/// # Safety
-///
-/// The caller **must** keep `builder` valid until `callback` fires.
-/// Use [`rssn_dag_simplify_async_v2`] + [`rssn_async_join`] for an
-/// explicit, auditable join-before-free contract.
-#[unsafe(no_mangle)]
-#[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn rssn_dag_simplify_async(
-    builder: *mut DagBuilder,
-    root: u32,
-    callback: RssnSimplifyCallback,
-    user_data: *mut c_void,
-) {
-    if builder.is_null() {
-        unsafe { callback(u32::MAX, RssnStatus::NullPointer, user_data) };
-        return;
-    }
-
-    let builder_addr = builder as usize;
-    let callback_addr = callback as usize;
-    let user_data_addr = user_data as usize;
-
-    let gate = ensure_runtime();
-    let handle = spawn_task(gate, move || {
-        let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let builder_ref = unsafe { &mut *(builder_addr as *mut DagBuilder) };
-            let root_id = DagNodeId::new(root);
-            let config = HeuristicConfig::default();
-            let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
-            engine.simplify(builder_ref, root_id).value()
-        }));
-
-        let raw_callback: RssnSimplifyCallback =
-            unsafe { std::mem::transmute(callback_addr) };
-        let raw_user_data = user_data_addr as *mut c_void;
-
-        match result {
-            Ok(simplified) => unsafe { raw_callback(simplified, RssnStatus::Success, raw_user_data) },
-            Err(_) => unsafe { raw_callback(u32::MAX, RssnStatus::Panic, raw_user_data) },
-        }
-    });
-    // Detach: completion is signalled through the callback.
-    let _ = handle;
-}
 
 // =========================================================================
 // v2: joinable async handle
@@ -113,9 +48,8 @@ pub struct RssnAsyncHandle {
 
 /// Fires a simplification fiber and returns an opaque handle.
 ///
-/// Unlike [`rssn_dag_simplify_async`], this variant requires the caller to
-/// call [`rssn_async_join`] before freeing `builder`, making the
-/// use-after-free hazard explicit and auditable from C.
+/// The caller must call [`rssn_async_join`] before freeing `builder`, making
+/// the use-after-free hazard explicit and auditable from C.
 ///
 /// The returned [`RssnAsyncHandle`] must be freed with [`rssn_async_join`].
 #[unsafe(no_mangle)]
@@ -145,7 +79,7 @@ pub extern "C" fn rssn_dag_simplify_async_v2(
             let builder_ref = unsafe { &mut *(builder_addr as *mut DagBuilder) };
             let root_id = DagNodeId::new(root);
             let config = HeuristicConfig::default();
-            let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
+            let mut engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
             engine.simplify(builder_ref, root_id).value()
         }));
 

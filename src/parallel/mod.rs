@@ -15,3 +15,5 @@ pub mod permission;
 pub mod simplify;
 pub mod solver;
 pub mod splitter;
+
+pub use solver::FnEvalRegistry;

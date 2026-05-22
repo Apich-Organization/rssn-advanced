@@ -4,12 +4,11 @@
 mod simd_ffi_tests {
     use std::ffi::CString;
     use std::os::raw::c_void;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
     use rssn_advanced::simd::{batch_add, batch_add_scalar, batch_hash, batch_mul, has_avx2};
     use rssn_advanced::ffi::{
-        rssn_dag_add, rssn_dag_compile, rssn_dag_constant, rssn_dag_execute, rssn_dag_free,
-        rssn_dag_new, rssn_dag_simplify, rssn_dag_simplify_async, rssn_dag_variable, RssnStatus,
+        rssn_async_join, rssn_dag_add, rssn_dag_compile, rssn_dag_constant, rssn_dag_execute,
+        rssn_dag_free, rssn_dag_new, rssn_dag_simplify, rssn_dag_simplify_async_v2,
+        rssn_dag_variable, RssnStatus,
     };
 
     #[test]
@@ -78,24 +77,6 @@ mod simd_ffi_tests {
         rssn_dag_free(builder);
     }
 
-    struct AsyncState {
-        simplified_root: u32,
-        status: RssnStatus,
-        fired: bool,
-    }
-
-    unsafe extern "C" fn ffi_callback(
-        simplified_root: u32,
-        status: RssnStatus,
-        user_data: *mut c_void,
-    ) {
-        let state_lock = unsafe { &*(user_data as *const Mutex<AsyncState>) };
-        let mut state = state_lock.lock().unwrap();
-        state.simplified_root = simplified_root;
-        state.status = status;
-        state.fired = true;
-    }
-
     #[test]
     fn test_ffi_async_simplification() {
         let builder = rssn_dag_new();
@@ -104,32 +85,15 @@ mod simd_ffi_tests {
         let y = rssn_dag_constant(builder, 4.0);
         let expr = rssn_dag_add(builder, x, y);
 
-        let state = Arc::new(Mutex::new(AsyncState {
-            simplified_root: u32::MAX,
-            status: RssnStatus::NullPointer,
-            fired: false,
-        }));
+        // Use v2 joinable handle — no callback, no use-after-free hazard.
+        let handle = unsafe { rssn_dag_simplify_async_v2(builder, expr) };
+        assert!(!handle.is_null());
 
-        let raw_state = Arc::as_ptr(&state) as *mut c_void;
+        let mut out_root: u32 = u32::MAX;
+        let status = unsafe { rssn_async_join(handle, &mut out_root) };
 
-        rssn_dag_simplify_async(builder, expr, ffi_callback, raw_state);
-
-        // Wait up to 500ms for thread completion
-        let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_millis(500) {
-            {
-                let lock = state.lock().unwrap();
-                if lock.fired {
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        let lock = state.lock().unwrap();
-        assert!(lock.fired);
-        assert_eq!(lock.status, RssnStatus::Success);
-        assert_ne!(lock.simplified_root, u32::MAX);
+        assert_eq!(status, RssnStatus::Success);
+        assert_ne!(out_root, u32::MAX);
 
         rssn_dag_free(builder);
     }

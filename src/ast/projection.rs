@@ -134,3 +134,53 @@ impl AstProjection {
         self.nodes.is_empty()
     }
 }
+
+/// Trait for visiting nodes of an [`AstProjection`] tree.
+///
+/// Implement this trait to process AST nodes without modifying the library.
+/// Call [`AstProjection::visit`] to drive the traversal.
+///
+/// The visitor is called in **post-order** (children before parent), which is
+/// the natural order for bottom-up transformations (e.g. constant folding,
+/// type inference).
+pub trait AstVisitor {
+    /// Called once for each node in post-order traversal.
+    ///
+    /// `node` is the current node; `node_idx` is its index in the flat buffer.
+    /// Return `true` to continue traversal, `false` to halt early.
+    fn visit(&mut self, node: &AstNode, node_idx: usize) -> bool;
+}
+
+impl AstProjection {
+    /// Drives a post-order traversal of this projection, calling
+    /// [`AstVisitor::visit`] for each node.
+    ///
+    /// Traversal is iterative (stack-based), so arbitrarily deep trees do
+    /// not overflow the OS stack. The visitor can halt early by returning
+    /// `false` from [`AstVisitor::visit`].
+    pub fn visit<V: AstVisitor>(&self, visitor: &mut V) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        // Iterative post-order using an explicit stack of (node_idx, visited).
+        let mut stack: Vec<(usize, bool)> = vec![(0, false)];
+        while let Some((idx, visited)) = stack.pop() {
+            let Some(node) = self.nodes.get(idx) else { continue };
+            if visited {
+                if !visitor.visit(node, idx) {
+                    return;
+                }
+            } else {
+                // Push self again with visited=true, then push children.
+                stack.push((idx, true));
+                for ptr in node.children.as_slice().iter().rev() {
+                    if let Some(child_idx) = ptr.resolve(idx) {
+                        if child_idx < self.nodes.len() {
+                            stack.push((child_idx, false));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,41 +1,27 @@
-# Module Review: `jit`
+# Module Review: `jit` (Post-Upgrade)
 
-## 1. Performance Issues (High Severity)
+## 1. Performance & Memory
 
-### 1.1 Ineffective Prefetching
-In `emit_variable_load`, the compiler emits a prefetch hint for an address immediately before loading from it:
-```rust
-let _hint = emit_prefetch_hint(builder, addr);
-builder.ins().load(types::F64, MemFlags::new(), addr, 0)
-```
-Prefetching is only beneficial when performed significantly in advance of the load to hide memory latency. Emitting it immediately before the load provides zero benefit and adds the overhead of the prefetch instruction itself.
+### 1.1 Effective Resource Reuse
+The `JitCompiler` now correctly reuses `work_stack` and `work_values` buffers, eliminating per-compilation allocation overhead for the iterative walker. The `RssnJitContext` in the FFI layer also addresses the expensive ISA initialization issue.
 
-### 1.2 Global Lock Contention in Linker
-The `JitCompiler` uses an `Arc<Mutex<HashMap<u32, usize>>>` for custom function lookups. The `symbol_lookup_fn` closure locks this mutex during the linking phase of every compilation. In a multi-threaded environment where many expressions are being compiled in parallel, this will become a significant bottleneck.
+### 1.2 Branch-Free Division
+The use of `select` in `emit_operator` for division by zero ensures that the generated code is branch-free and numerically consistent with standard floating-point behavior (returning `NaN`).
 
-### 1.3 Per-Node SSA Management Overhead
-The iterative codegen uses `Vec<Value>` and `Vec<Frame>` with small initial capacities. For large expressions, these vectors will undergo numerous reallocations.
+## 2. Dead Code & Functionality
 
-## 2. Correctness & Numerical Issues
+### 2.1 Unfinished `CustomRule`
+The `CustomRule` struct in `src/jit/custom.rs` is currently **dead code**. It is defined but not referenced anywhere in the `JitCompiler` or the `codegen` logic. The "User-defined pattern-rewrite derivation rules" mentioned in the module header are not implemented.
 
-### 2.1 Dangerous Identity Folding with `EPSILON`
-The JIT primitives (`simplify_add`, `simplify_mul`) use `f64::EPSILON` to perform identity folding:
-```rust
-if lhs.abs() < f64::EPSILON { Some(rhs) }
-```
-This is **incorrect** for a symbolic engine. If a user provides a very small but non-zero value (e.g., `1e-20`), the engine will silently treat it as zero. Symbolic computation should typically only fold exact `0.0` or `1.0` unless a fuzzy matching mode is explicitly enabled. This can lead to significant precision loss.
+## 3. Extensibility
 
-### 2.2 Non-Recoverable Division by Zero
-Runtime division by zero is handled via `TrapCode::unwrap_user(1)`. This triggers a machine-level trap (e.g., `SIGILL` or `SIGFPE` on Linux), which typically terminates the process. There is no mechanism in the current FFI/C-API to catch these traps and return an error code to the user, making the engine "brittle" in production environments.
+### 3.1 Limited Custom Function Support
+`register_custom_function` only supports `extern "C" fn(f64) -> f64`. There is no support for functions with multiple arguments or specialized signatures (e.g. SIMD vectors) without modifying the `emit_one_node` logic.
 
-## 3. Deviations from Plan
-
-### 3.1 "Peephole Pass" Implementation
-The plan mentions a "peephole pass over the per-node IR emission". While some folding exists in `emit_operator`, it is very limited and suffers from the numerical issues mentioned above. It doesn't handle more complex identities or algebraic simplifications that the plan implies.
+### 3.2 Closed Peephole Pass
+The `emit_operator` peephole simplifications are hardcoded. Users cannot define their own IR-level folding rules (e.g. `x * 2.0 -> x + x`).
 
 ## 4. Suggestions
-- Remove the ineffective prefetch hints or implement a proper look-ahead prefetching strategy for expression evaluation.
-- Change identity folding to use exact equality (`== 0.0`) to preserve numerical precision.
-- Use an `AtomicPtr` array or a lock-free map for the custom function registry to avoid linker contention.
-- Implement a signal handler or use Cranelift's trap handling features to convert machine traps into recoverable `Result::Err` values.
-- Pre-allocate or reuse work buffers for the iterative codegen to reduce allocation pressure.
+- Implement the `CustomRule` logic or remove the shell if it was a discarded idea.
+- Provide a way to register custom IR emission handlers for specific `SymbolKind::Function` IDs to enable true extensibility.
+- Expand the peephole pass to be more comprehensive or programmable.

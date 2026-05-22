@@ -12,4 +12,4 @@ pub mod error;
 pub mod expr;
 pub mod lexer;
 
-pub use expr::parse_expression;
+pub use expr::{parse_expression, parse_with_table, PrecedenceTable};

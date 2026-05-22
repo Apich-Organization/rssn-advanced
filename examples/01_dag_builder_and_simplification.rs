@@ -46,8 +46,8 @@ fn main() {
     // Constant folding (5.0 + 3.0 = 8.0) and term aggregation (xy + xy = 2 * xy)
     println!("Applying Heuristic Algebraic Simplification...");
     let config = HeuristicConfig::default();
-    let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
-    
+    let mut engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
+
     let simplified_id = engine.simplify(&mut builder, root_id);
     println!("Simplification completed.");
     println!("  Original root node index       : {:?}", root_id);

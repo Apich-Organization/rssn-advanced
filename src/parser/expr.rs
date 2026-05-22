@@ -22,6 +22,65 @@ use crate::dag::node::DagNodeId;
 /// the recursive depth ≈ 400 frames, which is safe on every target.
 pub const MAX_PAREN_DEPTH: u16 = 200;
 
+/// A runtime-extensible operator precedence table for the expression parser.
+///
+/// The built-in table handles `+`, `-`, `*`, `/`, `%`, and `^`. Additional
+/// infix operators with custom precedence levels can be registered at runtime
+/// without modifying the parser source.
+///
+/// Higher precedence numbers bind more tightly (e.g. `*` before `+`).
+/// Right-associative operators (currently only `^`) are marked separately.
+///
+/// The `parse_with_table` function uses a `PrecedenceTable` instead of the
+/// hardcoded `op_precedence` / `op_right_associative` functions.
+#[derive(Debug, Clone)]
+pub struct PrecedenceTable {
+    /// Maps operator character → (precedence, is_right_associative).
+    entries: std::collections::HashMap<char, (u8, bool)>,
+}
+
+impl PrecedenceTable {
+    /// Creates the default table matching the built-in parser behaviour.
+    #[must_use]
+    pub fn default_table() -> Self {
+        let mut t = Self { entries: std::collections::HashMap::new() };
+        t.entries.insert('+', (1, false));
+        t.entries.insert('-', (1, false));
+        t.entries.insert('*', (2, false));
+        t.entries.insert('/', (2, false));
+        t.entries.insert('%', (2, false));
+        t.entries.insert('^', (3, true));
+        t
+    }
+
+    /// Creates an empty table (no operators registered).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self { entries: std::collections::HashMap::new() }
+    }
+
+    /// Registers a new infix operator.
+    ///
+    /// - `op`: the operator character (e.g. `'|'` for bitwise-or).
+    /// - `precedence`: binding strength; higher binds tighter.
+    /// - `right_associative`: `true` for right-to-left evaluation (like `^`).
+    pub fn register(&mut self, op: char, precedence: u8, right_associative: bool) {
+        self.entries.insert(op, (precedence, right_associative));
+    }
+
+    /// Returns the precedence of `op`, or `None` if `op` is not a registered operator.
+    #[must_use]
+    pub fn precedence(&self, op: char) -> Option<u8> {
+        self.entries.get(&op).map(|&(prec, _)| prec)
+    }
+
+    /// Returns `true` if `op` is right-associative.
+    #[must_use]
+    pub fn is_right_associative(&self, op: char) -> bool {
+        self.entries.get(&op).is_some_and(|&(_, ra)| ra)
+    }
+}
+
 /// Returns the precedence of an operator. Higher number means higher precedence.
 const fn op_precedence(op: char) -> Option<u8> {
     match op {
@@ -179,6 +238,202 @@ fn parse_expr_climbing<'a>(
     }
 
     Ok((rem, lhs))
+}
+
+// ---------------------------------------------------------------------------
+// Table-driven parsing (public API)
+// ---------------------------------------------------------------------------
+
+fn parse_atom_with_table<'a>(
+    input: &'a str,
+    builder: &mut DagBuilder,
+    depth: u16,
+    table: &PrecedenceTable,
+) -> IResult<&'a str, DagNodeId, nom::error::Error<&'a str>> {
+    // 1. Parenthesized expression — bounded recursion.
+    if let Ok((rem, _)) = ws(parse_char('('))(input) {
+        if depth >= MAX_PAREN_DEPTH {
+            return Err(too_deep(input));
+        }
+        let (rem, expr) = parse_expr_climbing_with_table(rem, builder, 0, depth + 1, table)?;
+        let (rem, _) = ws(parse_char(')'))(rem)?;
+        return Ok((rem, expr));
+    }
+
+    // 2. Unary minus.
+    if let Ok((rem, _)) = ws(parse_char('-'))(input) {
+        let (rem, atom) = parse_expr_climbing_with_table(rem, builder, 4, depth, table)?;
+        let neg = builder.neg(atom);
+        return Ok((rem, neg));
+    }
+
+    // 3. Numeric constant.
+    if let Ok((rem, val)) = ws(parse_constant)(input) {
+        let node_id = builder.constant(val);
+        return Ok((rem, node_id));
+    }
+
+    // 4. Function call `identifier '(' args ')'` or plain variable.
+    if let Ok((rem, name)) = ws(parse_identifier)(input) {
+        if let Ok((mut cur, _)) = ws(parse_char('('))(rem) {
+            if depth >= MAX_PAREN_DEPTH {
+                return Err(too_deep(input));
+            }
+            let mut args: Vec<DagNodeId> = Vec::new();
+            if let Ok((after_close, _)) = ws(parse_char(')'))(cur) {
+                cur = after_close;
+            } else {
+                loop {
+                    let (r, arg) =
+                        parse_expr_climbing_with_table(cur, builder, 0, depth + 1, table)?;
+                    args.push(arg);
+                    cur = r;
+                    if let Ok((r2, _)) = ws(parse_char(','))(cur) {
+                        cur = r2;
+                    } else if let Ok((r2, _)) = ws(parse_char(')'))(cur) {
+                        cur = r2;
+                        break;
+                    } else {
+                        return Err(nom::Err::Error(nom::error::Error::new(
+                            cur,
+                            nom::error::ErrorKind::Tag,
+                        )));
+                    }
+                }
+            }
+            let fn_id = builder.intern_function(name);
+            let node_id = builder.function_call(fn_id, &args);
+            return Ok((cur, node_id));
+        }
+        let node_id = builder.variable(name);
+        return Ok((rem, node_id));
+    }
+
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Char,
+    )))
+}
+
+fn parse_expr_climbing_with_table<'a>(
+    input: &'a str,
+    builder: &mut DagBuilder,
+    min_prec: u8,
+    depth: u16,
+    table: &PrecedenceTable,
+) -> IResult<&'a str, DagNodeId, nom::error::Error<&'a str>> {
+    if depth >= MAX_PAREN_DEPTH {
+        return Err(too_deep(input));
+    }
+
+    let (mut rem, mut lhs) = parse_atom_with_table(input, builder, depth, table)?;
+
+    loop {
+        let next_input = rem;
+        let mut chars = next_input.trim_start().chars();
+        let Some(op_char) = chars.next() else {
+            break;
+        };
+
+        let Some(op_prec) = table.precedence(op_char) else {
+            break;
+        };
+
+        if op_prec < min_prec {
+            break;
+        }
+
+        let (rem_after_op, _) = ws(parse_char(op_char))(rem)?;
+        rem = rem_after_op;
+
+        let ra = table.is_right_associative(op_char);
+        let next_min_prec = if ra { op_prec } else { op_prec + 1 };
+        let next_depth = if ra { depth.saturating_add(1) } else { depth };
+
+        let (rem_after_rhs, rhs) =
+            parse_expr_climbing_with_table(rem, builder, next_min_prec, next_depth, table)?;
+        rem = rem_after_rhs;
+
+        lhs = match op_char {
+            '+' => builder.add(lhs, rhs),
+            '-' => builder.sub(lhs, rhs),
+            '*' => builder.mul(lhs, rhs),
+            '/' => builder.div(lhs, rhs),
+            '%' => builder.modulo(lhs, rhs),
+            '^' => builder.pow(lhs, rhs),
+            _ => return Err(too_deep(input)),
+        };
+    }
+
+    Ok((rem, lhs))
+}
+
+/// Parses `input` using a caller-supplied [`PrecedenceTable`].
+///
+/// This is the runtime-extensible counterpart to [`parse_expression`].  Where
+/// [`parse_expression`] always uses the six built-in operators (`+`, `-`, `*`,
+/// `/`, `%`, `^`), this function consults `table` for every infix token it
+/// encounters.  Custom operators registered via [`PrecedenceTable::register`]
+/// are fully supported.
+///
+/// # Errors
+///
+/// Returns a [`ParseError`] on syntax errors, unexpected trailing tokens, or
+/// paren-depth overflow — identical semantics to [`parse_expression`].
+pub fn parse_with_table(
+    input: &str,
+    builder: &mut DagBuilder,
+    table: &PrecedenceTable,
+) -> Result<DagNodeId, super::error::ParseError> {
+    match parse_expr_climbing_with_table(input, builder, 0, 0, table) {
+        Ok((remaining, id)) => {
+            let trimmed = remaining.trim_start();
+            if !trimmed.is_empty() {
+                let offset = offset_in(input, trimmed).unwrap_or(input.len());
+                return Err(super::error::ParseError {
+                    message: "Unexpected trailing tokens".to_owned(),
+                    span: super::error::Span::from_offset(input, offset, trimmed.len()),
+                });
+            }
+            Ok(id)
+        }
+        Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
+            let offset = offset_in(input, e.input).unwrap_or(input.len());
+            let len = e.input.len().min(input.len().saturating_sub(offset));
+            let msg = match e.code {
+                nom::error::ErrorKind::TooLarge => {
+                    format!("Parenthesis depth exceeded {MAX_PAREN_DEPTH}")
+                }
+                nom::error::ErrorKind::Char => {
+                    if e.input.trim_start().is_empty() {
+                        "Unexpected end of input; expected closing ')'".to_owned()
+                    } else {
+                        let bad = e.input.trim_start().chars().next().unwrap_or('?');
+                        format!(
+                            "Unexpected character {bad:?}; expected a number, variable, or '('"
+                        )
+                    }
+                }
+                nom::error::ErrorKind::Tag => {
+                    "Expected ',' or ')' to close function argument list".to_owned()
+                }
+                nom::error::ErrorKind::Eof => {
+                    "Unexpected end of input; expression is incomplete".to_owned()
+                }
+                _ => {
+                    format!("Syntax error near {:?}", &e.input[..e.input.len().min(8)])
+                }
+            };
+            Err(super::error::ParseError {
+                message: msg,
+                span: super::error::Span::from_offset(input, offset, len),
+            })
+        }
+        Err(nom::Err::Incomplete(_)) => Err(super::error::ParseError {
+            message: "Incomplete input".to_owned(),
+            span: super::error::Span::from_offset(input, input.len(), 0),
+        }),
+    }
 }
 
 /// Byte offset of `slice` within `whole`, or `None` if `slice` isn't

@@ -177,7 +177,7 @@ pub fn run_staged_simplification(
         return root;
     }
 
-    let engine = HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
+    let mut engine = HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
     let mut current = root;
     let mut prev = DagNodeId::NONE;
 

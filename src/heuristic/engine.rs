@@ -11,10 +11,12 @@
 //!    falling back to a "rebuild from rewritten children" loop.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::knobs::HeuristicConfig;
 use super::patterns;
+use super::rule_registry::RuleRegistry;
 use super::simplifier::approximate_simplify;
 use super::strategy::SearchStrategy;
 use crate::dag::builder::DagBuilder;
@@ -33,19 +35,38 @@ struct Frame {
 }
 
 /// A rule-based pattern matching and algebraic simplification engine.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct HeuristicEngine {
     /// Budget parameters (depth, branching limit, timeouts).
     pub config: HeuristicConfig,
     /// Search path strategy.
     pub strategy: SearchStrategy,
+    /// Canonical cache: nodes already fully simplified in previous calls.
+    /// Persists across `simplify` calls to avoid re-processing shared subtrees.
+    canonical_cache: HashSet<DagNodeId>,
+    /// User-supplied rewrite rules, tried before the built-in patterns.
+    rule_registry: Arc<RuleRegistry>,
 }
 
 impl HeuristicEngine {
     /// Creates a new `HeuristicEngine` with the given knobs and strategy.
     #[must_use]
-    pub const fn new(config: HeuristicConfig, strategy: SearchStrategy) -> Self {
-        Self { config, strategy }
+    pub fn new(config: HeuristicConfig, strategy: SearchStrategy) -> Self {
+        Self {
+            config,
+            strategy,
+            canonical_cache: HashSet::new(),
+            rule_registry: Arc::new(RuleRegistry::new()),
+        }
+    }
+
+    /// Returns a new `HeuristicEngine` that uses the given rule registry.
+    ///
+    /// Rules in the registry are tried before the engine's built-in patterns.
+    #[must_use]
+    pub fn with_rule_registry(mut self, registry: Arc<RuleRegistry>) -> Self {
+        self.rule_registry = registry;
+        self
     }
 
     /// Simplifies the target expression iteratively, respecting the
@@ -53,8 +74,11 @@ impl HeuristicEngine {
     ///
     /// Every replacement node flows through `DagBuilder`, so structural
     /// deduplication is preserved across the entire rewrite.
+    ///
+    /// The persistent `canonical_cache` accumulates across calls so that
+    /// shared subtrees are never re-processed in subsequent invocations.
     #[must_use]
-    pub fn simplify(&self, builder: &mut DagBuilder, root: DagNodeId) -> DagNodeId {
+    pub fn simplify(&mut self, builder: &mut DagBuilder, root: DagNodeId) -> DagNodeId {
         let start_time = Instant::now();
 
         // 1. Optional approximate pre-pruning for high-aggressiveness configs.
@@ -69,7 +93,7 @@ impl HeuristicEngine {
     }
 
     fn rewrite_iterative(
-        &self,
+        &mut self,
         builder: &mut DagBuilder,
         root: DagNodeId,
         start_time: Instant,
@@ -83,10 +107,9 @@ impl HeuristicEngine {
 
         let mut stack: Vec<Frame> = Vec::with_capacity(64);
         let mut values: Vec<DagNodeId> = Vec::with_capacity(64);
-        // Tracks nodes that have been fully simplified this pass.
-        // Stored separately (not as an arena flag) so it never interferes
-        // with the dedup map's flag-equality check.
-        let mut canonical: HashSet<DagNodeId> = HashSet::new();
+        // `self.canonical_cache` persists across calls: nodes already proven
+        // fully simplified are never re-walked, even across separate `simplify`
+        // invocations on the same engine instance.
 
         // If the root doesn't resolve we treat the call as a no-op
         // instead of panicking (`storage_review §4` / Phase 7).
@@ -143,9 +166,9 @@ impl HeuristicEngine {
                 }
 
                 // Skip already-simplified subtrees: if the child was marked
-                // canonical earlier in this same simplify call, recurse is
+                // canonical in a previous or current simplify call, recurse is
                 // unnecessary — push it directly onto the value stack.
-                if canonical.contains(&child_id) {
+                if self.canonical_cache.contains(&child_id) {
                     values.push(child_id);
                     continue;
                 }
@@ -163,12 +186,11 @@ impl HeuristicEngine {
                 // Borrow the children as a slice instead of collecting into
                 // a Vec — avoids a heap allocation per node. NLL guarantees
                 // the immutable borrow ends before `truncate`.
-                let rebuilt = rebuild_or_match(builder, frame.kind, &values[split_at..], frame.node_id);
+                let rebuilt = rebuild_or_match(&self.rule_registry, builder, frame.kind, &values[split_at..], frame.node_id);
                 values.truncate(split_at);
-                // Record the rebuilt node as canonical for the rest of this
-                // simplify call. Stored in a local HashSet rather than as an
-                // arena flag so it never disturbs the dedup map's flag check.
-                canonical.insert(rebuilt);
+                // Record the rebuilt node as canonical. Persists across calls
+                // in self.canonical_cache so re-processing is avoided globally.
+                self.canonical_cache.insert(rebuilt);
                 values.push(rebuilt);
             }
         }
@@ -177,20 +199,25 @@ impl HeuristicEngine {
     }
 }
 
-/// Rebuilds a node from rewritten children, applying pattern rules
-/// from [`super::patterns`] before falling back to `DagBuilder`
-/// constructors.
+/// Rebuilds a node from rewritten children, applying user-registered rules
+/// first, then pattern rules from [`super::patterns`], before falling back
+/// to `DagBuilder` constructors.
 ///
 /// Returns `original` unchanged if the rewritten children are
 /// identical to the source children (the no-op fast path).
 fn rebuild_or_match(
+    registry: &RuleRegistry,
     builder: &mut DagBuilder,
     kind: SymbolKind,
     new_children: &[DagNodeId],
     original: DagNodeId,
 ) -> DagNodeId {
-    // Patterns take priority — `x + 0`, `x * 1`, etc. fire even when
-    // the children themselves are structurally unchanged.
+    // User-registered rules take highest priority.
+    if let Some(replacement) = registry.try_apply(builder, kind, new_children) {
+        return replacement;
+    }
+
+    // Built-in patterns — `x + 0`, `x * 1`, etc. — fire next.
     if let Some(replacement) = patterns::try_apply(builder, kind, new_children) {
         return replacement;
     }
@@ -251,7 +278,7 @@ mod tests {
         }
         let pre_size = b.arena().len();
 
-        let engine =
+        let mut engine =
             HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
         let out = engine.simplify(&mut b, acc);
 
@@ -283,7 +310,7 @@ mod tests {
         let zero = b.constant(0.0);
         let expr = b.add(x, zero);
 
-        let engine =
+        let mut engine =
             HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
         let result = engine.simplify(&mut b, expr);
 
@@ -301,7 +328,7 @@ mod tests {
         let inner = b.add(x, zero);
         let outer = b.mul(inner, one);
 
-        let engine =
+        let mut engine =
             HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
         let result = engine.simplify(&mut b, outer);
         assert_eq!(

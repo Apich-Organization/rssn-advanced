@@ -114,6 +114,8 @@ rssn_error! {
         BudgetExhausted,
         /// Codegen visited a node whose shape contradicts its `SymbolKind`.
         MalformedNode,
+        /// The Cranelift backend or native target failed to initialize.
+        InitFailed,
     }
 }
 

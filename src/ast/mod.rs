@@ -13,3 +13,5 @@
 pub mod convert;
 pub mod pointer;
 pub mod projection;
+
+pub use projection::AstVisitor;

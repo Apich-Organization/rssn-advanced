@@ -52,6 +52,38 @@ impl EvictionResult {
     }
 }
 
+/// Trait for pluggable node eviction policies.
+///
+/// Implement this to define custom hotness criteria (e.g. LRU, priority-based,
+/// or time-decay). The `is_hot` method is called once per node during the mark
+/// phase; returning `true` seeds a DFS that protects the node's entire
+/// dependency closure.
+pub trait EvictionPolicy {
+    /// Returns `true` if `id` should be retained (protected from eviction).
+    fn is_hot(&self, hotspots: &super::hotspot::DynamicHotspotTable, id: crate::dag::node::DagNodeId) -> bool;
+}
+
+/// Frequency-threshold eviction policy: protect any node whose access count
+/// meets or exceeds `threshold`.
+pub struct FrequencyPolicy {
+    /// Minimum access count to be considered "hot".
+    pub threshold: u64,
+}
+
+impl FrequencyPolicy {
+    /// Creates a new `FrequencyPolicy` with the given threshold.
+    #[must_use]
+    pub fn new(threshold: u64) -> Self {
+        Self { threshold }
+    }
+}
+
+impl EvictionPolicy for FrequencyPolicy {
+    fn is_hot(&self, hotspots: &super::hotspot::DynamicHotspotTable, id: crate::dag::node::DagNodeId) -> bool {
+        hotspots.is_hot(id, self.threshold)
+    }
+}
+
 /// Compacts `arena` by keeping only nodes reachable from a hot root.
 ///
 /// The `keep_threshold` parameter controls hotness: any node whose
@@ -64,18 +96,29 @@ pub fn evict_cold_nodes(
     hotspots: &DynamicHotspotTable,
     keep_threshold: u64,
 ) -> EvictionResult {
-    // ---------------------------------------------------------------
-    // Phase 1 — collect hot roots and walk the reachable closure.
-    // ---------------------------------------------------------------
+    evict_nodes_with_policy(arena, hotspots, FrequencyPolicy::new(keep_threshold))
+}
+
+/// Compacts `arena` using a caller-supplied eviction policy.
+///
+/// The `policy` determines which nodes are "hot" (and thus protected from eviction).
+/// Use [`FrequencyPolicy`] for the classic frequency-threshold behavior, or
+/// provide your own [`EvictionPolicy`] implementation for custom criteria
+/// (e.g. LRU, priority-based, or time-decay weighting).
+#[must_use]
+pub fn evict_nodes_with_policy<P: EvictionPolicy>(
+    arena: &DagArena,
+    hotspots: &DynamicHotspotTable,
+    policy: P,
+) -> EvictionResult {
     let total = arena.len();
     let mut protected: Vec<bool> = vec![false; total];
 
-    // Hot roots: every node whose access frequency >= threshold.
     let mut work: Vec<u32> = Vec::with_capacity(64);
     #[allow(clippy::cast_possible_truncation)]
     for i in 0..total as u32 {
         let id = DagNodeId::new(i);
-        if hotspots.is_hot(id, keep_threshold) {
+        if policy.is_hot(hotspots, id) {
             work.push(i);
         }
     }
@@ -95,14 +138,6 @@ pub fn evict_cold_nodes(
         }
     }
 
-    // ---------------------------------------------------------------
-    // Phase 2 — allocate protected nodes in topological order, build
-    // the remap table, and rewrite each node's ChildList.
-    // ---------------------------------------------------------------
-    // `arena.alloc` writes nodes in the order they're handed in. By
-    // walking 0..N we visit children before parents iff the arena was
-    // built bottom-up — which `DagBuilder` always does. We therefore
-    // get topo order "for free" by iterating in index order.
     let mut compacted = DagArena::new();
     let mut remap: HashMap<DagNodeId, DagNodeId> = HashMap::with_capacity(total / 2);
 
@@ -116,10 +151,6 @@ pub fn evict_cold_nodes(
             continue;
         };
 
-        // Rewrite children through the remap. If any child reference
-        // can't be remapped (which would mean a hot node depends on a
-        // node we somehow failed to mark — should never happen) we
-        // skip that child rather than dangling.
         let new_children: Vec<DagNodeId> = original
             .children
             .iter()
@@ -127,8 +158,6 @@ pub fn evict_cold_nodes(
             .collect();
         let child_list = ChildList::from_slice(&new_children);
 
-        // Re-build the node with the new child list. Other fields are
-        // preserved verbatim.
         let new_node = DagNode {
             kind: original.kind,
             meta: original.meta.clone(),

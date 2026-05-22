@@ -61,7 +61,7 @@ fn main() {
                 let mut builder = DagBuilder::new();
                 let root = parse_expression(formula, &mut builder)
                     .unwrap_or_else(|_| panic!("parse failed for formula {i}"));
-                let engine = HeuristicEngine::new(
+                let mut engine = HeuristicEngine::new(
                     HeuristicConfig::default(),
                     SearchStrategy::Greedy,
                 );
@@ -77,13 +77,15 @@ fn main() {
 
     println!("  {:<5} {:<35} {:<15} {}", "Task", "Formula", "Simplified ID", "Arena nodes");
     println!("  {}", "-".repeat(75));
-    for (i, formula, simplified_id, node_count) in &results {
-        let id_str = format!("{simplified_id:?}");
-        println!("  {i:<5} {formula:<35} {id_str:<15} {node_count}");
+    for result in &results {
+        if let Some((i, formula, simplified_id, node_count)) = result {
+            let id_str = format!("{simplified_id:?}");
+            println!("  {i:<5} {formula:<35} {id_str:<15} {node_count}");
+        }
     }
 
     // 4. Aggregate: sum node counts across all parallel results
-    let total_nodes: usize = results.iter().map(|(_, _, _, n)| n).sum();
+    let total_nodes: usize = results.iter().filter_map(|r| r.as_ref()).map(|(_, _, _, n)| n).sum();
     println!("\n  Total arena nodes across all parallel tasks: {}", total_nodes);
 
     println!("\n===================================================================");

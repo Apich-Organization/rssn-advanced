@@ -124,8 +124,8 @@ pub extern "C" fn rssn_dag_simplify(builder: *mut DagBuilder, root: u32) -> u32 
         let root_id = DagNodeId::new(root);
 
         let config = HeuristicConfig::default();
-        let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
-        
+        let mut engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
+
         engine.simplify(builder_ref, root_id).value()
     });
     result.unwrap_or(u32::MAX)
@@ -378,10 +378,62 @@ pub extern "C" fn rssn_dag_simplify_v2(
         let builder_ref = unsafe { &mut *builder };
         let root_id = DagNodeId::new(root);
         let config = HeuristicConfig::default();
-        let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
+        let mut engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
         let id = engine.simplify(builder_ref, root_id);
         unsafe { *out_id = id.value() };
         RssnStatus::Success
     });
     result.unwrap_or(RssnStatus::Panic)
+}
+
+/// JIT compiles a target expression. Status-returning variant.
+///
+/// On `Success`, writes the compiled function pointer to `*out_fn`.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+/// - `out_fn` must be a valid, non-null, writable `*mut c_void` pointer.
+/// - The compiled function pointer remains valid until the `JITModule` is dropped.
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_compile_v2(
+    builder: *mut DagBuilder,
+    root: u32,
+    out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    if builder.is_null() || out_fn.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(|| {
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+        let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
+        let mut compiler = crate::jit::compiler::JitCompiler::new();
+        match compiler.compile(&ast) {
+            Ok(compiled_fn) => {
+                unsafe { *out_fn = compiled_fn as *mut c_void };
+                RssnStatus::Success
+            }
+            Err(_) => RssnStatus::CompilationError,
+        }
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// JIT compiles a target expression (stub for non-JIT builds).
+///
+/// Always returns [`RssnStatus::CompilationError`] when the `cranelift-jit`
+/// feature is not enabled.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_compile_v2(
+    _builder: *mut DagBuilder,
+    _root: u32,
+    _out_fn: *mut *mut *mut c_void,
+) -> RssnStatus {
+    RssnStatus::CompilationError
 }

@@ -189,8 +189,8 @@ pub fn join(handle: TaskHandle) {
 /// into the returned `Vec` in input order.
 ///
 /// Panics inside individual tasks are caught via [`std::panic::catch_unwind`]
-/// and mapped to `None` in the output; the returned `Vec` contains only the
-/// successfully produced values (preserving order of non-panicking tasks).
+/// and mapped to `None` in the output; the returned `Vec` contains all slots
+/// including `None` values for panicking tasks, preserving input order.
 ///
 /// Uses a lock-free write path: each fiber writes directly into its own
 /// pre-allocated slot in an `UnsafeCell<Vec<Option<T>>>` using the slot
@@ -200,7 +200,7 @@ pub fn join(handle: TaskHandle) {
 ///
 /// This is the workhorse used by `parallel::solver` and `ffi::async_bridge`
 /// to replace the `std::thread::spawn` pattern.
-pub fn parallel_for_each<I, F, T>(gate: RuntimeGate, tasks: I) -> Vec<T>
+pub fn parallel_for_each<I, F, T>(gate: RuntimeGate, tasks: I) -> Vec<Option<T>>
 where
     I: IntoIterator<Item = F>,
     F: FnOnce() -> T + Send + 'static,
@@ -248,7 +248,7 @@ where
     // to `slots`. Unwrapping the Arc gives exclusive access to the inner Vec.
     let inner = Arc::try_unwrap(slots)
         .unwrap_or_else(|_| unreachable!("all fibers have been joined; Arc is unique"));
-    inner.0.into_inner().into_iter().flatten().collect()
+    inner.0.into_inner()
 }
 
 #[cfg(test)]
@@ -286,7 +286,7 @@ mod tests {
             gate,
             (0u32..8).map(|i| move || i * i),
         );
-        assert_eq!(results, alloc::vec![0, 1, 4, 9, 16, 25, 36, 49]);
+        assert_eq!(results, alloc::vec![Some(0), Some(1), Some(4), Some(9), Some(16), Some(25), Some(36), Some(49)]);
     }
 
     #[test]

@@ -12,10 +12,12 @@
 pub mod engine;
 pub mod knobs;
 pub mod patterns;
+pub mod rule_registry;
 pub mod simplifier;
 pub mod strategy;
 
 pub use engine::HeuristicEngine;
 pub use knobs::HeuristicConfig;
+pub use rule_registry::RuleRegistry;
 pub use simplifier::approximate_simplify;
 pub use strategy::SearchStrategy;

@@ -23,6 +23,39 @@ use crate::dag::node::DagNodeId;
 use crate::dag::symbol::{OpKind, SymbolKind};
 use crate::runtime::{ensure_runtime, parallel_for_each};
 
+/// Registry of function-pointer callbacks for parallel evaluation of
+/// `SymbolKind::Function` nodes.
+///
+/// Keys are [`crate::dag::symbol::FnId`] values. The registered function
+/// receives a pointer to the variable array (same layout as JIT functions)
+/// and returns an `f64`.
+///
+/// Pass a `&FnEvalRegistry` to [`evaluate_node_with_fns`] to enable
+/// function-node evaluation in the parallel path.
+#[derive(Default)]
+pub struct FnEvalRegistry {
+    fns: std::collections::HashMap<u32, fn(*const f64) -> f64>,
+}
+
+impl FnEvalRegistry {
+    /// Creates an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { fns: std::collections::HashMap::new() }
+    }
+
+    /// Registers a function callback for `fn_id`.
+    pub fn register(&mut self, fn_id: crate::dag::symbol::FnId, f: fn(*const f64) -> f64) {
+        self.fns.insert(fn_id.0, f);
+    }
+
+    /// Looks up the callback for `fn_id`.
+    #[must_use]
+    pub fn get(&self, fn_id: crate::dag::symbol::FnId) -> Option<fn(*const f64) -> f64> {
+        self.fns.get(&fn_id.0).copied()
+    }
+}
+
 /// Solves and evaluates a set of expression-leaf chunks in parallel.
 ///
 /// Convenience wrapper: if you already hold an `Arc<DagArena>`, call
@@ -74,7 +107,7 @@ pub fn parallel_evaluate_shared(
         .collect();
 
     let partials = parallel_for_each(gate, tasks);
-    partials.into_iter().sum()
+    partials.into_iter().flatten().sum()
 }
 
 // =========================================================================
@@ -166,6 +199,80 @@ fn reduce_frame(
             let split_at = values.len().saturating_sub(arity);
             // Borrow as slice to avoid a per-node Vec allocation. NLL
             // guarantees the immutable borrow ends before `truncate`.
+            let result = apply_op(op, &values[split_at..]);
+            values.truncate(split_at);
+            result
+        }
+    }
+}
+
+/// Variant of [`evaluate_node`] that supports `SymbolKind::Function` nodes
+/// via a user-supplied [`FnEvalRegistry`].
+///
+/// When a `Function` node is encountered the registry is consulted; if a
+/// matching callback is found it is called with the variable pointer.
+/// Unregistered functions fall back to `0.0` (consistent with the JIT
+/// behaviour for unresolved symbols).
+#[must_use]
+pub fn evaluate_node_with_fns(
+    arena: &DagArena,
+    id: DagNodeId,
+    vars: &[f64],
+    registry: &FnEvalRegistry,
+) -> f64 {
+    if id.is_none() {
+        return 0.0;
+    }
+
+    let mut stack: Vec<Frame> = Vec::with_capacity(64);
+    let mut values: Vec<f64> = Vec::with_capacity(64);
+
+    let root_arity = arena.get(id).map_or(0, |n| n.children.len());
+    stack.push(Frame { id, arity: root_arity, cursor: 0 });
+
+    while let Some(top) = stack.last_mut() {
+        let next_child: Option<DagNodeId> = arena.get(top.id).and_then(|node| {
+            let kids = node.children.as_slice();
+            kids.get(top.cursor).copied()
+        });
+
+        if let Some(child_id) = next_child {
+            top.cursor += 1;
+            let child_arity = arena.get(child_id).map_or(0, |c| c.children.len());
+            stack.push(Frame { id: child_id, arity: child_arity, cursor: 0 });
+        } else {
+            let Some(frame) = stack.pop() else { break };
+            let v = reduce_frame_with_fns(arena, frame.id, frame.arity, &mut values, vars, registry);
+            values.push(v);
+        }
+    }
+
+    values.pop().unwrap_or(0.0)
+}
+
+fn reduce_frame_with_fns(
+    arena: &DagArena,
+    id: DagNodeId,
+    arity: usize,
+    values: &mut Vec<f64>,
+    vars: &[f64],
+    registry: &FnEvalRegistry,
+) -> f64 {
+    let Some(node) = arena.get(id) else {
+        values.truncate(values.len().saturating_sub(arity));
+        return 0.0;
+    };
+
+    match node.kind {
+        SymbolKind::Constant => node.value.unwrap_or(0.0),
+        SymbolKind::Variable(sym_id) => vars.get(sym_id.0 as usize).copied().unwrap_or(0.0),
+        SymbolKind::Function(fn_id) => {
+            values.truncate(values.len().saturating_sub(arity));
+            // Invoke the registered callback with the variable pointer.
+            registry.get(fn_id).map_or(0.0, |f| f(vars.as_ptr()))
+        }
+        SymbolKind::Operator(op) => {
+            let split_at = values.len().saturating_sub(arity);
             let result = apply_op(op, &values[split_at..]);
             values.truncate(split_at);
             result

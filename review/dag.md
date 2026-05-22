@@ -1,49 +1,27 @@
-# Module Review: `dag`
+# Module Review: `dag` (Post-Upgrade)
 
-## 1. Performance Issues (High Severity)
+## 1. Performance & Memory
 
-### 1.1 Bloated In-Memory Node Representation
-The `DagNode` struct is approximately **80 bytes** in size.
-- `SymbolKind`: 8 bytes.
-- `NodeMetadata`: 24 bytes (includes 8 bytes for `f64` coefficient and 5 bytes padding).
-- `ChildList`: 32 bytes (due to `Vec` variant alignment/size).
-- `value`: `Option<f64>`: 16 bytes.
-This size is excessive for a symbolic computation engine where nodes are created by the millions. The 80-byte stride will cause severe cache misses during graph traversals. Most nodes are simple binary operators and do not need the `value` field or the heap-allocated `Vec` in `ChildList`.
+### 1.1 Persistently Bloated Node Representation
+Despite improvements in other areas, the core `DagNode` remains **80 bytes** in size.
+- The `ChildList` enum, although optimized with inline arrays, still forces the variant size to be large due to the `Many(Vec<DagNodeId>)` variant.
+- The `value: Option<f64>` field adds 16 bytes to every node, even though it's only used for constants.
+This 80-byte stride is the primary bottleneck for cache-heavy graph traversals.
 
-### 1.2 Suboptimal Hash-Consing (`DedupMap`)
-- **Incomplete Hashing:** `DedupMap::hash_operator` fails to include the `coefficient` and `flags` in the hash computation. This leads to guaranteed hash collisions for nodes that differ only by coefficient (e.g., `2*x` vs `3*x` if implemented via metadata coefficients), forcing an $O(N)$ linear scan of the collision bucket.
-- **Bucket Overhead:** Using `HashMap<u64, Vec<DagNodeId>>` adds an unnecessary layer of indirection. A specialized hash table with open addressing would be significantly faster.
+## 2. Dead Code & Unfinished Updates
 
-### 1.3 `SymbolRegistry` Allocation Overhead
-- Interning a new string performs two allocations: one for the `names` vector and one for the `lookup` map key.
-- It uses standard `std::collections::HashMap`, which involves locking if wrapped for thread-safety, or prevents parallel interning if not.
+### 2.1 Unused `NodeFlags::CANONICAL`
+The `CANONICAL` flag is defined in `metadata.rs` and can be set via `with_canonical()`. However, the `HeuristicEngine` in `src/heuristic/engine.rs` uses a local `HashSet<DagNodeId>` to track simplified nodes instead of utilizing this bit. This leads to redundant memory usage during simplification and misses an opportunity to persist the "simplified" state across different engine calls.
 
-## 2. Correctness Issues
+### 2.2 Hash-Consing "Wait-and-See"
+The `DedupMap` still uses `HashMap<u64, Vec<DagNodeId>>`. While `rapidhash` makes the hashing fast, the bucket-based approach with `Vec` per collision is still less efficient than a flat, open-addressed hash table which would further reduce allocations.
 
-### 2.1 Packed Node Arity Overflow
-In `src/dag/packed.rs`, nodes with arity > 255 are marked with `arity = 255`. The decoding logic in `BorrowedArenaView::children` assumes such nodes extend to the end of the `children_pool`:
-```rust
-let len = if arity == 255 {
-    self.children_pool.as_slice().len().saturating_sub(start)
-} else {
-    arity
-};
-```
-This is **broken** if more than one node has 255+ children or if a node with 255+ children is not the last one to use the pool.
+## 3. Extensibility
 
-## 3. Deviations from Plan
+### 3.1 Hardcoded Operator Set
+The `OpKind` enum is fixed. There is no mechanism for users to define "Custom Operators" that carry their own algebraic properties (commutativity, associativity) or evaluation logic without modifying the core `dag` and `symbol` modules. This limits the library's use in domains with specialized mathematical operators (e.g. quantum gates, tensor contractions).
 
-### 3.1 "Compact Pointers" vs 80-byte Nodes
-The `plan.md` mentions that "DAG node metadata is huge" and "AST projection uses relative pointers to compress storage". However, the current in-memory DAG storage is extremely bloated. While `PackedDagNode` (32 bytes) exists, it is only used for serialization/zerocopy, not for primary computation.
-
-## 4. Engineering Standards
-
-### 4.1 Heavy Standard API Usage
-- Reliance on `std::collections::HashMap` for performance-critical deduplication and interning.
-- Use of `Vec` inside an enum (`ChildList`) makes every instance of the enum as large as the `Vec` variant.
-
-## 5. Suggestions
-- Implement a `SmallVec`-like optimization for `ChildList` or use a dedicated children pool even in the rich representation.
-- Use a "Struct of Arrays" (SoA) approach in `DagArena` to improve cache locality for common operations (e.g., hashing, type checking).
-- Fix the `arity == 255` logic by storing the actual length in the pool for large nodes.
-- Include all identifying metadata in the node hash.
+## 4. Suggestions
+- Use a "Struct of Arrays" (SoA) or a more compact `DagNode` (e.g. 32 bytes) for the main arena, moving `value` and `Many` children to side-tables.
+- Integrate `NodeFlags::CANONICAL` into the `HeuristicEngine` to skip redundant work across multiple `simplify` calls.
+- Transition `OpKind` to a more extensible registration system if user-defined operators are a priority.

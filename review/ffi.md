@@ -1,36 +1,23 @@
-# Module Review: `ffi`
+# Module Review: `ffi` (Post-Upgrade)
 
-## 1. Performance Issues (High Severity)
+## 1. Performance & Memory
 
-### 1.1 Excessive Compiler Initialization
-In `rssn_dag_compile`, a new `JitCompiler` is instantiated for every single call:
-```rust
-let mut compiler = crate::jit::compiler::JitCompiler::new();
-```
-`JitCompiler::new()` is an expensive operation that involves hardware feature detection and Cranelift target ISA initialization. This makes the FFI compilation path orders of magnitude slower than necessary.
+### 1.1 JIT Context Persistence
+The introduction of `RssnJitContext` and `rssn_dag_compile_with_ctx` is a major performance win for FFI users, as it amortizes the high cost of Cranelift initialization across many compilation calls.
 
-### 1.2 Redundant AST Conversion
-`rssn_dag_compile` always converts the DAG to an AST before compiling:
-```rust
-let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
-```
-Given the identified performance issues in the AST conversion (per-node allocations), this adds significant latency to the FFI boundary.
+## 2. Dead Code & Unfinished Updates
 
-## 2. Security & Safety Issues
+### 2.1 Persistent Use-After-Free in v1
+The `rssn_dag_simplify_async` (v1) function still captures a raw pointer and returns immediately. While `v2` provides a safe handle approach, the presence of the unsafe v1 variant without sufficient protection (e.g. `Arc`) remains a security risk for legacy integrations.
 
-### 2.1 Use-After-Free in Async API
-`rssn_dag_simplify_async` captures a raw pointer to `DagBuilder` and dereferences it on a background fiber. There is no mechanism to prevent the C caller from freeing the `DagBuilder` (via `rssn_dag_free`) while the async task is still running, leading to a guaranteed Use-After-Free (UAF) and potential memory corruption or process crash.
+### 2.2 Incomplete V2 Transition
+Multiple functions (`rssn_dag_compile`, `rssn_dag_add`, etc.) still exist in their v1 forms which return sentinels like `u32::MAX`. While `v2` variants are being added, the migration is incomplete, leading to an inconsistent API surface.
 
-### 2.2 Unsafe Pointer Dereferencing
-Multiple functions (e.g., `rssn_dag_variable`) use `unsafe { &mut *builder }` and `unsafe { CStr::from_ptr(name) }` without validating that the pointers are valid beyond a simple null check. While expected in C FFI, the lack of safety documentation for the C caller is a concern.
+## 3. Extensibility
 
-## 3. Engineering Standards
-
-### 3.1 Inconsistent v2 API Coverage
-The "v2" status-returning API is only partially implemented. Critical functions like `rssn_dag_compile` and `rssn_dag_execute` do not have v2 equivalents, leading to an inconsistent experience for C developers who must mix-and-match error handling styles (sentinel values vs status codes).
+### 3.1 Closed Handle System
+The FFI is strictly limited to the `DagBuilder` and `JitContext`. There is no way for users to plug in their own handles or extend the FFI with custom types without writing significant Rust glue.
 
 ## 4. Suggestions
-- Provide a persistent `JitContext` or `Compiler` handle in the C API to avoid re-initializing the Cranelift environment on every call.
-- Implement reference counting or a "join" mechanism for the async API to ensure the `DagBuilder` remains valid until all tasks are complete.
-- Complete the v2 API coverage for all FFI functions.
-- Consider providing a way to compile directly from the DAG or a more efficient intermediate form.
+- Complete the V2 transition for all FFI entry points and consider deprecating the V1 functions that use sentinel error values.
+- Use `Arc<DagBuilder>` in the async API to provide genuine safety for the v1 variant, or remove it entirely in favor of the joinable handle.
