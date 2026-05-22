@@ -66,14 +66,25 @@ pub fn batch_add(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
     // Detect once per batch call rather than once per chunk call.
     let use_simd = avx2_available();
     let mut chunk_idx = 0;
+    // 2× unrolled path: two AVX2/scalar chunks per loop body.
+    while chunk_idx + LANES * 2 <= n {
+        let (o1, o2) = result[chunk_idx..chunk_idx + LANES * 2].split_at_mut(LANES);
+        if use_simd {
+            add_f64x4_avx2::apply(&lhs[chunk_idx..chunk_idx + LANES], &rhs[chunk_idx..chunk_idx + LANES], o1);
+            add_f64x4_avx2::apply(&lhs[chunk_idx + LANES..chunk_idx + LANES * 2], &rhs[chunk_idx + LANES..chunk_idx + LANES * 2], o2);
+        } else {
+            for i in 0..LANES { o1[i] = lhs[chunk_idx + i] + rhs[chunk_idx + i]; }
+            for i in 0..LANES { o2[i] = lhs[chunk_idx + LANES + i] + rhs[chunk_idx + LANES + i]; }
+        }
+        chunk_idx += LANES * 2;
+    }
+    // Handle any remaining full chunk.
     while chunk_idx + LANES <= n {
-        let l = &lhs[chunk_idx..chunk_idx + LANES];
-        let r = &rhs[chunk_idx..chunk_idx + LANES];
         let o = &mut result[chunk_idx..chunk_idx + LANES];
         if use_simd {
-            add_f64x4_avx2::apply(l, r, o);
+            add_f64x4_avx2::apply(&lhs[chunk_idx..chunk_idx + LANES], &rhs[chunk_idx..chunk_idx + LANES], o);
         } else {
-            for i in 0..LANES { o[i] = l[i] + r[i]; }
+            for i in 0..LANES { o[i] = lhs[chunk_idx + i] + rhs[chunk_idx + i]; }
         }
         chunk_idx += LANES;
     }
@@ -98,14 +109,23 @@ pub fn batch_mul(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
 
     let use_simd = avx2_available();
     let mut i = 0;
+    while i + LANES * 2 <= n {
+        let (o1, o2) = result[i..i + LANES * 2].split_at_mut(LANES);
+        if use_simd {
+            mul_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], o1);
+            mul_f64x4_avx2::apply(&lhs[i + LANES..i + LANES * 2], &rhs[i + LANES..i + LANES * 2], o2);
+        } else {
+            for j in 0..LANES { o1[j] = lhs[i + j] * rhs[i + j]; }
+            for j in 0..LANES { o2[j] = lhs[i + LANES + j] * rhs[i + LANES + j]; }
+        }
+        i += LANES * 2;
+    }
     while i + LANES <= n {
-        let l = &lhs[i..i + LANES];
-        let r = &rhs[i..i + LANES];
         let o = &mut result[i..i + LANES];
         if use_simd {
-            mul_f64x4_avx2::apply(l, r, o);
+            mul_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], o);
         } else {
-            for j in 0..LANES { o[j] = l[j] * r[j]; }
+            for j in 0..LANES { o[j] = lhs[i + j] * rhs[i + j]; }
         }
         i += LANES;
     }
@@ -129,15 +149,25 @@ pub fn batch_add_scalar(lhs: &[f64], scalar: f64, result: &mut [f64]) -> Result<
     }
 
     let use_simd = avx2_available();
-    let rhs = [scalar; LANES];
+    let rhs_splat = [scalar; LANES];
     let mut i = 0;
+    while i + LANES * 2 <= n {
+        let (o1, o2) = result[i..i + LANES * 2].split_at_mut(LANES);
+        if use_simd {
+            add_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs_splat, o1);
+            add_f64x4_avx2::apply(&lhs[i + LANES..i + LANES * 2], &rhs_splat, o2);
+        } else {
+            for j in 0..LANES { o1[j] = lhs[i + j] + scalar; }
+            for j in 0..LANES { o2[j] = lhs[i + LANES + j] + scalar; }
+        }
+        i += LANES * 2;
+    }
     while i + LANES <= n {
-        let l = &lhs[i..i + LANES];
         let o = &mut result[i..i + LANES];
         if use_simd {
-            add_f64x4_avx2::apply(l, &rhs, o);
+            add_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs_splat, o);
         } else {
-            for j in 0..LANES { o[j] = l[j] + scalar; }
+            for j in 0..LANES { o[j] = lhs[i + j] + scalar; }
         }
         i += LANES;
     }
@@ -189,6 +219,18 @@ pub fn batch_cmp_eq(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) -> Result<(), Bat
 
     let use_simd = avx2_available();
     let mut i = 0;
+    while i + LANES * 2 <= n {
+        if use_simd {
+            cmp_eq_f64x4::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &mut mask[i..i + LANES]);
+            cmp_eq_f64x4::apply(&lhs[i + LANES..i + LANES * 2], &rhs[i + LANES..i + LANES * 2], &mut mask[i + LANES..i + LANES * 2]);
+        } else {
+            #[allow(clippy::float_cmp)]
+            for j in 0..LANES * 2 {
+                mask[i + j] = if lhs[i + j] == rhs[i + j] { 0xFF } else { 0x00 };
+            }
+        }
+        i += LANES * 2;
+    }
     while i + LANES <= n {
         if use_simd {
             cmp_eq_f64x4::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &mut mask[i..i + LANES]);
@@ -275,18 +317,23 @@ pub fn batch_fma(
 
     let use_simd = avx2_available();
     let mut i = 0;
-    while i + LANES <= n {
+    while i + LANES * 2 <= n {
+        let (o1, o2) = out[i..i + LANES * 2].split_at_mut(LANES);
         if use_simd {
-            fma_f64x4_avx2::apply(
-                &lhs[i..i + LANES],
-                &rhs[i..i + LANES],
-                &addend[i..i + LANES],
-                &mut out[i..i + LANES],
-            );
+            fma_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &addend[i..i + LANES], o1);
+            fma_f64x4_avx2::apply(&lhs[i + LANES..i + LANES * 2], &rhs[i + LANES..i + LANES * 2], &addend[i + LANES..i + LANES * 2], o2);
         } else {
-            for j in 0..LANES {
-                out[i + j] = lhs[i + j].mul_add(rhs[i + j], addend[i + j]);
-            }
+            for j in 0..LANES { o1[j] = lhs[i + j].mul_add(rhs[i + j], addend[i + j]); }
+            for j in 0..LANES { o2[j] = lhs[i + LANES + j].mul_add(rhs[i + LANES + j], addend[i + LANES + j]); }
+        }
+        i += LANES * 2;
+    }
+    while i + LANES <= n {
+        let o = &mut out[i..i + LANES];
+        if use_simd {
+            fma_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &addend[i..i + LANES], o);
+        } else {
+            for j in 0..LANES { o[j] = lhs[i + j].mul_add(rhs[i + j], addend[i + j]); }
         }
         i += LANES;
     }

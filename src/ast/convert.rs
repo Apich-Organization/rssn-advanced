@@ -23,13 +23,20 @@ use crate::dag::symbol::{OpKind, SymbolKind};
 
 /// A frame on the explicit traversal stack.
 ///
-/// `cursor` advances from `0` to `arity`; when they're equal the frame
-/// has finished and we back-patch.
+/// `cursor` advances from `0` to `arity` as children are enqueued.
+/// `filled` counts how many completed children have been written back
+/// into this frame's pre-allocated slots in `child_pool`.
+///
+/// `pool_offset` points to the first of `arity` pre-allocated slots in
+/// the shared `child_pool`. Children write their `ast_idx` into
+/// `pool[pool_offset + filled]` as they complete, so no per-frame
+/// `Vec<usize>` allocation is needed.
 struct DagFrame {
     dag_id: DagNodeId,
     ast_idx: usize,
-    child_ast_indices: Vec<usize>,
+    pool_offset: usize,
     cursor: usize,
+    filled: usize,
     arity: usize,
 }
 
@@ -50,7 +57,14 @@ pub fn dag_to_ast(arena: &DagArena, root: DagNodeId) -> AstProjection {
     }
 
     let mut stack: Vec<DagFrame> = Vec::with_capacity(64);
-    if !push_dag_frame(arena, &mut projection, &mut stack, root) {
+    // Single shared pool for all frames' child AST indices.
+    // Each frame pre-reserves `arity` contiguous slots; children write
+    // their ast_idx into the parent's pre-reserved slots as they complete.
+    // Popping a frame truncates the pool back to `frame.pool_offset`,
+    // reclaiming the frame's (and all its children's) pool space.
+    let mut child_pool: Vec<usize> = Vec::with_capacity(128);
+
+    if !push_dag_frame(arena, &mut projection, &mut stack, &mut child_pool, root) {
         return projection;
     }
 
@@ -72,13 +86,21 @@ pub fn dag_to_ast(arena: &DagArena, root: DagNodeId) -> AstProjection {
             // If the child push fails (dangling id), just skip it; the
             // parent will end up with one fewer child but the
             // projection stays internally consistent.
-            let _ = push_dag_frame(arena, &mut projection, &mut stack, child);
+            let _ = push_dag_frame(arena, &mut projection, &mut stack, &mut child_pool, child);
         } else {
-            // All children processed for this frame.
+            // All children enqueued for this frame — pop and back-patch.
             let Some(frame) = stack.pop() else { break };
-            backpatch_children(&mut projection, &frame);
+            let children = &child_pool[frame.pool_offset..frame.pool_offset + frame.filled];
+            backpatch_children(&mut projection, frame.ast_idx, children);
+            // Reclaim the pool: truncate back to this frame's start, which
+            // also removes all deeper frames' pool data (already freed by
+            // their own pops, but truncate is idempotent here).
+            child_pool.truncate(frame.pool_offset);
+            // Tell the parent about this completed child by writing into its
+            // pre-reserved slot.
             if let Some(parent) = stack.last_mut() {
-                parent.child_ast_indices.push(frame.ast_idx);
+                child_pool[parent.pool_offset + parent.filled] = frame.ast_idx;
+                parent.filled += 1;
             }
         }
     }
@@ -92,35 +114,40 @@ fn push_dag_frame(
     arena: &DagArena,
     projection: &mut AstProjection,
     stack: &mut Vec<DagFrame>,
+    child_pool: &mut Vec<usize>,
     dag_id: DagNodeId,
 ) -> bool {
     let Some(node) = arena.get(dag_id) else {
         return false;
     };
     let ast_idx = projection.nodes.len();
+    let arity = node.children.len();
     projection.nodes.push(AstNode {
         kind: node.kind,
         value: node.value,
         dag_id,
         children: AstChildList::Empty,
     });
+    // Pre-reserve `arity` slots in the shared pool for this frame's children.
+    let pool_offset = child_pool.len();
+    child_pool.extend(std::iter::repeat(0).take(arity));
     stack.push(DagFrame {
         dag_id,
         ast_idx,
-        child_ast_indices: Vec::new(),
+        pool_offset,
         cursor: 0,
-        arity: node.children.len(),
+        filled: 0,
+        arity,
     });
     true
 }
 
-fn backpatch_children(projection: &mut AstProjection, frame: &DagFrame) {
-    let ptrs: Vec<RelPtr<AstNode>> = frame
-        .child_ast_indices
+fn backpatch_children(projection: &mut AstProjection, ast_idx: usize, child_indices: &[usize]) {
+    let ptrs: Vec<RelPtr<AstNode>> = child_indices
         .iter()
-        .map(|&child_idx| RelPtr::from_indices(frame.ast_idx, child_idx))
+        .map(|&child_idx| RelPtr::from_indices(ast_idx, child_idx))
         .collect();
-    let slot = &mut projection.nodes[frame.ast_idx];
+    let slot = &mut projection.nodes[ast_idx];
     slot.children = match ptrs.len() {
         0 => AstChildList::Empty,
         1 => AstChildList::One(ptrs[0]),

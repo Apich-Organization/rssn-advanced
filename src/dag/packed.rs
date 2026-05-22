@@ -53,6 +53,7 @@ use crate::dag::arena::DagArena;
 use crate::dag::metadata::{NodeFlags, NodeHash, NodeMetadata};
 use crate::dag::node::{ChildList, DagNode, DagNodeId};
 use crate::dag::symbol::{FnId, OpKind, SymbolId, SymbolKind};
+use bincode_next::enc::write::Writer as BincodeWriter;
 use crate::zerocopy::{AlignedBytes, BorrowedSlice, Pod, decode_zerocopy, encode_zerocopy};
 
 extern crate alloc;
@@ -272,6 +273,32 @@ impl PackedArenaImage {
             children_pool: BorrowedSlice::new(&self.children_pool),
         };
         encode_zerocopy(view)
+    }
+
+    /// Streams the encoded image directly into `writer`, bypassing any
+    /// intermediate `AlignedBytes` allocation.
+    ///
+    /// Use this for spilling to disk (`BufWriter<File>`) where the
+    /// in-process alignment guarantee is irrelevant — the file will be
+    /// mmap-decoded (page-aligned) on the next load.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any `bincode_next` encode error or I/O error.
+    pub fn write_to<W: std::io::Write>(&self, writer: W) -> Result<(), EncodeError> {
+        let view = SerializableView {
+            nodes: BorrowedSlice::new(&self.nodes),
+            children_pool: BorrowedSlice::new(&self.children_pool),
+        };
+        struct IoWriter<W: std::io::Write>(W);
+        impl<W: std::io::Write> BincodeWriter for IoWriter<W> {
+            fn write(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
+                self.0
+                    .write_all(bytes)
+                    .map_err(|e| EncodeError::OtherString(alloc::format!("I/O error: {e}")))
+            }
+        }
+        bincode_next::encode_into_writer(view, &mut IoWriter(writer), crate::zerocopy::zerocopy_config())
     }
 }
 

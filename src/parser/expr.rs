@@ -95,7 +95,7 @@ fn parse_atom<'a>(
                     } else {
                         return Err(nom::Err::Error(nom::error::Error::new(
                             cur,
-                            nom::error::ErrorKind::Fail,
+                            nom::error::ErrorKind::Tag, // "expected ',' or ')'"
                         )));
                     }
                 }
@@ -111,7 +111,7 @@ fn parse_atom<'a>(
 
     Err(nom::Err::Error(nom::error::Error::new(
         input,
-        nom::error::ErrorKind::Fail,
+        nom::error::ErrorKind::Char, // "unexpected character"
     )))
 }
 
@@ -214,10 +214,30 @@ pub fn parse_expression(input: &str, builder: &mut DagBuilder) -> Result<DagNode
         Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
             let offset = offset_in(input, e.input).unwrap_or(input.len());
             let len = e.input.len().min(input.len().saturating_sub(offset));
-            let msg = if matches!(e.code, nom::error::ErrorKind::TooLarge) {
-                format!("Parenthesis depth exceeded {MAX_PAREN_DEPTH}")
-            } else {
-                format!("Parser failed: {:?}", e.code)
+            let msg = match e.code {
+                nom::error::ErrorKind::TooLarge => {
+                    format!("Parenthesis depth exceeded {MAX_PAREN_DEPTH}")
+                }
+                nom::error::ErrorKind::Char => {
+                    // `nom_char(c)` emits Char on mismatch. When input is
+                    // exhausted it means a required character (e.g. `)`) was
+                    // never found; when input has a character it is unexpected.
+                    if e.input.trim_start().is_empty() {
+                        "Unexpected end of input; expected closing ')'".to_owned()
+                    } else {
+                        let bad = e.input.trim_start().chars().next().unwrap_or('?');
+                        format!("Unexpected character {bad:?}; expected a number, variable, or '('")
+                    }
+                }
+                nom::error::ErrorKind::Tag => {
+                    "Expected ',' or ')' to close function argument list".to_owned()
+                }
+                nom::error::ErrorKind::Eof => {
+                    "Unexpected end of input; expression is incomplete".to_owned()
+                }
+                _ => {
+                    format!("Syntax error near {:?}", &e.input[..e.input.len().min(8)])
+                }
             };
             Err(ParseError {
                 message: msg,

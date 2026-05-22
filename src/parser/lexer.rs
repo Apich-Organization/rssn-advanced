@@ -7,16 +7,21 @@ use nom::combinator::recognize;
 use nom::error::ParseError as NomParseError;
 use nom::multi::many0_count;
 use nom::number::complete::double;
-use nom::sequence::{delimited, pair};
+use nom::sequence::{pair, preceded};
 use nom::{IResult, Parser};
 
-/// Strips leading and trailing whitespace around an inner parser.
+/// Strips leading whitespace before the inner parser.
+///
+/// Only leading whitespace is consumed; trailing whitespace is left for
+/// the next token's `ws` call. Stripping both ends (via `delimited`) caused
+/// the lexer to consume whitespace that belongs to the following token,
+/// masking "unexpected token" errors — `parser_review §1.2`.
 pub fn ws<'a, F, O, E>(mut inner: F) -> impl FnMut(&'a str) -> IResult<&'a str, O, E>
 where
     F: FnMut(&'a str) -> IResult<&'a str, O, E>,
     E: NomParseError<&'a str>,
 {
-    move |input| delimited(multispace0, &mut inner, multispace0).parse(input)
+    move |input| preceded(multispace0, &mut inner).parse(input)
 }
 
 /// Parses a numeric constant as an `f64`.

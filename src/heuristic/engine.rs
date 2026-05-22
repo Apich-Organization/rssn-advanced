@@ -10,6 +10,7 @@
 //! 3. Applies real pattern matching from [`super::patterns`] before
 //!    falling back to a "rebuild from rewritten children" loop.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use super::knobs::HeuristicConfig;
@@ -82,6 +83,10 @@ impl HeuristicEngine {
 
         let mut stack: Vec<Frame> = Vec::with_capacity(64);
         let mut values: Vec<DagNodeId> = Vec::with_capacity(64);
+        // Tracks nodes that have been fully simplified this pass.
+        // Stored separately (not as an arena flag) so it never interferes
+        // with the dedup map's flag-equality check.
+        let mut canonical: HashSet<DagNodeId> = HashSet::new();
 
         // If the root doesn't resolve we treat the call as a no-op
         // instead of panicking (`storage_review §4` / Phase 7).
@@ -137,6 +142,14 @@ impl HeuristicEngine {
                     continue;
                 }
 
+                // Skip already-simplified subtrees: if the child was marked
+                // canonical earlier in this same simplify call, recurse is
+                // unnecessary — push it directly onto the value stack.
+                if canonical.contains(&child_id) {
+                    values.push(child_id);
+                    continue;
+                }
+
                 stack.push(Frame {
                     node_id: child_id,
                     depth: parent_depth + 1,
@@ -152,6 +165,10 @@ impl HeuristicEngine {
                 // the immutable borrow ends before `truncate`.
                 let rebuilt = rebuild_or_match(builder, frame.kind, &values[split_at..], frame.node_id);
                 values.truncate(split_at);
+                // Record the rebuilt node as canonical for the rest of this
+                // simplify call. Stored in a local HashSet rather than as an
+                // arena flag so it never disturbs the dedup map's flag check.
+                canonical.insert(rebuilt);
                 values.push(rebuilt);
             }
         }

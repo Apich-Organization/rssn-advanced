@@ -37,17 +37,26 @@ mod parser_tests {
     fn test_parse_error_handling() {
         let mut builder = DagBuilder::new();
 
-        // 1. Missing closing parenthesis
+        // 1. Missing closing parenthesis — should mention end of input or ')'
         let err1 = parse_expression("(x + y", &mut builder).unwrap_err();
-        assert!(err1.message.contains("Parser failed") || err1.message.contains("trailing"));
+        assert!(
+            err1.message.contains("end of input") || err1.message.contains("')'"),
+            "missing ')' error should mention end-of-input or ')': {:?}", err1.message
+        );
 
-        // 2. Invalid character / syntax
+        // 2. Invalid character / syntax — trailing junk after valid expression
         let err2 = parse_expression("x @ y", &mut builder).unwrap_err();
-        assert!(err2.message.contains("Parser failed") || err2.message.contains("trailing"));
+        assert!(
+            err2.message.contains("trailing") || err2.message.contains("Unexpected"),
+            "invalid char error should mention trailing or unexpected: {:?}", err2.message
+        );
 
-        // 3. Consecutive operators
+        // 3. Consecutive operators — unexpected character where operand expected
         let err3 = parse_expression("x ++ y", &mut builder).unwrap_err();
-        assert!(err3.message.contains("Parser failed") || err3.message.contains("trailing"));
+        assert!(
+            err3.message.contains("Unexpected") || err3.message.contains("Syntax"),
+            "consecutive ops error should mention unexpected or syntax: {:?}", err3.message
+        );
     }
 
     #[test]

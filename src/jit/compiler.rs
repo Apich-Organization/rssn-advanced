@@ -10,11 +10,11 @@
 #![allow(unsafe_code)]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use cranelift_codegen::Context;
 use cranelift_codegen::ir::condcodes::FloatCC;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Signature, TrapCode, Value, types};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Signature, Value, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
@@ -42,11 +42,10 @@ extern "C" fn jit_powf(base: f64, exp: f64) -> f64 {
 /// Shared registry of custom function pointers, keyed by `FnId.0`.
 ///
 /// Stored as `usize` (not `*const u8`) so the type is `Send`/`Sync`
-/// without unsafe markers. The closure registered with
-/// `JITBuilder::symbol_lookup_fn` (see [`JitCompiler::new`]) queries
-/// this map at link time, so [`Self::register_custom_function`] may
-/// be called any time **before the next `compile()`**.
-type CustomFnRegistry = Arc<Mutex<HashMap<u32, usize>>>;
+/// without unsafe markers. Uses `RwLock` so concurrent readers (the
+/// symbol-lookup closure) never block each other; only `register_custom_function`
+/// takes a write lock.
+type CustomFnRegistry = Arc<RwLock<HashMap<u32, usize>>>;
 
 /// The primary compiler context for compiling symbolic expressions to native code.
 pub struct JitCompiler {
@@ -57,6 +56,12 @@ pub struct JitCompiler {
     /// map; the closure consults it whenever Cranelift needs to
     /// resolve an unknown symbol.
     custom_fns: CustomFnRegistry,
+    /// Reusable work stack for `compile_ast_iterative`. Cleared at the
+    /// start of each compile call; kept here to amortise allocation cost
+    /// across repeated compilations.
+    work_stack: Vec<Frame>,
+    /// Reusable SSA-value stack for `compile_ast_iterative`.
+    work_values: Vec<Value>,
 }
 
 impl std::fmt::Debug for JitCompiler {
@@ -102,13 +107,13 @@ impl JitCompiler {
         // closure runs whenever Cranelift hits an unknown symbol
         // during link/finalize; we map our `rssn_custom_fn_<id>`
         // naming convention back to the raw function pointer.
-        let custom_fns: CustomFnRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let custom_fns: CustomFnRegistry = Arc::new(RwLock::new(HashMap::new()));
         let lookup_registry = Arc::clone(&custom_fns);
         builder.symbol_lookup_fn(Box::new(move |name: &str| -> Option<*const u8> {
             let id_str = name.strip_prefix("rssn_custom_fn_")?;
             let id: u32 = id_str.parse().ok()?;
             let guard = lookup_registry
-                .lock()
+                .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.get(&id).map(|addr| *addr as *const u8)
         }));
@@ -118,6 +123,8 @@ impl JitCompiler {
             module,
             builder_ctx: FunctionBuilderContext::new(),
             custom_fns,
+            work_stack: Vec::with_capacity(64),
+            work_values: Vec::with_capacity(64),
         }
     }
 
@@ -132,7 +139,7 @@ impl JitCompiler {
         // is later cast back to `*const u8` inside the lookup closure.
         let mut guard = self
             .custom_fns
-            .lock()
+            .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.insert(fn_id.0, func as usize);
     }
@@ -183,12 +190,12 @@ impl JitCompiler {
         custom_sig.returns.push(AbiParam::new(types::F64));
         let mut custom_refs: HashMap<u32, cranelift_codegen::ir::FuncRef> = HashMap::new();
 
-        // Snapshot the registry under the lock, then drop it before
+        // Snapshot the registry under a read lock, then drop it before
         // doing any module work — keeps the lock window minimal.
         let registered_ids: std::collections::HashSet<u32> = {
             let guard = self
                 .custom_fns
-                .lock()
+                .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.keys().copied().collect()
         };
@@ -217,12 +224,18 @@ impl JitCompiler {
             }
         }
 
+        // Clear and reuse the scratch buffers from the previous compile call
+        // to avoid per-call heap allocation for the work-stack and value-stack.
+        self.work_stack.clear();
+        self.work_values.clear();
         let root_val = compile_ast_iterative(
             ast,
             &mut func_builder,
             vars_ptr,
             powf_func_ref,
             &custom_refs,
+            &mut self.work_stack,
+            &mut self.work_values,
         )?;
 
         func_builder.ins().return_(&[root_val]);
@@ -251,6 +264,24 @@ impl JitCompiler {
         let compiled_fn: CompiledExprFn = unsafe { std::mem::transmute(code_ptr) };
         Ok(compiled_fn)
     }
+
+    /// Convenience wrapper: converts the DAG subgraph rooted at `root`
+    /// to an `AstProjection` and compiles it in one call.
+    ///
+    /// This is the idiomatic entry point when the caller already holds a
+    /// `DagArena` and wants a native function without manually calling
+    /// [`crate::ast::convert::dag_to_ast`] first.
+    ///
+    /// # Errors
+    /// Returns a message string if the AST conversion or compilation fails.
+    pub fn compile_dag(
+        &mut self,
+        arena: &crate::dag::arena::DagArena,
+        root: crate::dag::node::DagNodeId,
+    ) -> Result<CompiledExprFn, String> {
+        let ast = crate::ast::convert::dag_to_ast(arena, root);
+        self.compile(&ast)
+    }
 }
 
 // =========================================================================
@@ -274,9 +305,10 @@ fn compile_ast_iterative(
     vars_ptr: Value,
     powf_func_ref: cranelift_codegen::ir::FuncRef,
     custom_refs: &HashMap<u32, cranelift_codegen::ir::FuncRef>,
+    stack: &mut Vec<Frame>,
+    mut values: &mut Vec<Value>,
 ) -> Result<Value, String> {
-    let mut stack: Vec<Frame> = Vec::with_capacity(64);
-    let mut values: Vec<Value> = Vec::with_capacity(64);
+    // Callers clear these before passing — guaranteed by `compile()`.
 
     // Seed with the root.
     let root_node = ast
@@ -504,28 +536,27 @@ fn emit_operator(
             let lhs = child_vals[0];
             let rhs = child_vals[1];
 
-            // If the divisor is a known non-zero constant, fold and skip
-            // the runtime trap. If it is a known zero, force the trap at
-            // codegen time so the caller gets a deterministic abort.
-            if let Some(rval) = constants[1] {
-                if rval == 0.0 {
-                    let zero = builder.ins().f64const(0.0);
-                    let is_zero = builder.ins().fcmp(FloatCC::Equal, rhs, zero);
-                    builder.ins().trapnz(is_zero, TrapCode::unwrap_user(1));
-                }
-                if let Some(lval) = constants[0]
-                    && rval != 0.0
-                {
-                    return Ok(builder.ins().f64const(lval / rval));
-                }
-            } else {
-                // Mandatory runtime divide-by-zero guard (plan.md §3.1).
-                let zero = builder.ins().f64const(0.0);
-                let is_zero = builder.ins().fcmp(FloatCC::Equal, rhs, zero);
-                builder.ins().trapnz(is_zero, TrapCode::unwrap_user(1));
+            // Both operands are compile-time constants: fold entirely.
+            if let (Some(lval), Some(rval)) = (constants[0], constants[1]) {
+                // IEEE-754: x / 0 == ±Inf or NaN — we map to NaN for
+                // consistency with the runtime `select` path below.
+                let result = if rval == 0.0 { f64::NAN } else { lval / rval };
+                return Ok(builder.ins().f64const(result));
+            }
+            // Constant zero denominator: no runtime division needed.
+            if constants[1] == Some(0.0) {
+                return Ok(builder.ins().f64const(f64::NAN));
             }
 
-            Ok(builder.ins().fdiv(lhs, rhs))
+            // Runtime denominator: emit `select(rhs==0, NaN, lhs/rhs)` so
+            // divide-by-zero yields NaN instead of trapping (IEEE-754 §6.2,
+            // matches `parallel::solver` behaviour). Using `select` avoids
+            // a conditional branch and lets the CPU execute both sides.
+            let zero = builder.ins().f64const(0.0);
+            let nan_val = builder.ins().f64const(f64::NAN);
+            let is_zero = builder.ins().fcmp(FloatCC::Equal, rhs, zero);
+            let div_result = builder.ins().fdiv(lhs, rhs);
+            Ok(builder.ins().select(is_zero, nan_val, div_result))
         }
         OpKind::Pow => {
             if arity != 2 {
@@ -600,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn test_jit_divide_by_zero_trap() {
+    fn test_jit_divide_by_zero_yields_nan() {
         let mut builder = DagBuilder::new();
         let id = parse_expression("x / y", &mut builder).unwrap();
         let ast = dag_to_ast(builder.arena(), id);
@@ -611,6 +642,11 @@ mod tests {
         let safe_vars = vec![10.0, 2.0];
         let safe_res = compiled_fn(safe_vars.as_ptr());
         assert!((safe_res - 5.0).abs() < f64::EPSILON);
+
+        // Division by zero must return NaN (not trap).
+        let zero_vars = vec![10.0, 0.0];
+        let nan_res = compiled_fn(zero_vars.as_ptr());
+        assert!(nan_res.is_nan(), "x/0 must be NaN; got {nan_res}");
     }
 
     #[test]

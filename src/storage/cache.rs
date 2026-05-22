@@ -14,7 +14,7 @@
 //!   directly via a callback so the borrow can't escape the mapping.
 
 use std::fs::{File, create_dir_all};
-use std::io::Write;
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use crate::dag::arena::DagArena;
@@ -44,23 +44,22 @@ impl DiskCache {
 
     /// Spills the given `DagArena` to a file on disk.
     ///
-    /// Internally packs the arena to the 32-byte-per-node wire form
-    /// before writing.
+    /// Packs the arena to the 32-byte-per-node wire form, then streams
+    /// the encoded bytes directly into a `BufWriter<File>` — avoiding
+    /// the intermediate `AlignedBytes` copy that the old
+    /// `encode()` + `write_all` path required.
     ///
     /// # Errors
     /// Returns an error if file creation, packing, or write fails.
     pub fn spill(&self, key: &str, arena: &DagArena) -> Result<(), String> {
         let image = PackedArenaImage::from_arena(arena);
-        let bytes = image
-            .encode()
-            .map_err(|e| format!("Packed arena encode failed: {e:?}"))?;
-
         let filepath = self.key_path(key);
-        let mut file = File::create(&filepath)
+        let file = File::create(&filepath)
             .map_err(|e| format!("Failed to create cache file {}: {e:?}", filepath.display()))?;
-        file.write_all(bytes.as_bytes())
-            .map_err(|e| format!("Failed to write cache bytes to file: {e:?}"))?;
-        Ok(())
+        let buf_writer = BufWriter::new(file);
+        image
+            .write_to(buf_writer)
+            .map_err(|e| format!("Failed to stream arena to file: {e:?}"))
     }
 
     /// Restores a previously spilled `DagArena` from disk.
@@ -125,6 +124,78 @@ impl DiskCache {
     }
 }
 
+// =========================================================================
+// LazyDiskArena — deferred materialization of a spilled arena
+// =========================================================================
+
+/// A lazy handle to a spilled arena file.
+///
+/// Opening a spilled cache file and decoding it into a `DagArena` eagerly
+/// pays the full allocation cost even for read-only queries that only
+/// inspect a handful of nodes. `LazyDiskArena` defers that cost:
+///
+/// * `open` stores only the file path.
+/// * `with_view` maps the file, borrow-decodes the packed image, and calls
+///   the user closure — no allocation beyond the mmap itself.
+/// * `load` materialises an owned `DagArena` from the mmap when the caller
+///   needs a fully writable copy.
+#[derive(Debug, Clone)]
+pub struct LazyDiskArena {
+    path: PathBuf,
+}
+
+impl LazyDiskArena {
+    /// Opens a `LazyDiskArena` pointing at `path`.
+    ///
+    /// Does not open or stat the file — defers everything to the first
+    /// [`Self::with_view`] / [`Self::load`] call.
+    #[must_use]
+    pub fn open<P: AsRef<Path>>(path: P) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+        }
+    }
+
+    /// Maps the file and hands the zero-copy [`BorrowedArenaView`] to `f`.
+    ///
+    /// The view's lifetime is bounded to the closure, so it cannot outlive
+    /// the mapping. The mapping is released when `f` returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or decoded.
+    pub fn with_view<R>(
+        &self,
+        f: impl FnOnce(BorrowedArenaView<'_>) -> R,
+    ) -> Result<R, String> {
+        let mm = MmapBuffer::open(&self.path)
+            .map_err(|e| format!("LazyDiskArena: cannot open {}: {e:?}", self.path.display()))?;
+        let out = mm.with_view(|bytes| -> Result<R, String> {
+            let view = crate::zerocopy::decode_zerocopy_raw::<BorrowedArenaView<'_>>(bytes)
+                .map_err(|e| format!("LazyDiskArena: decode failed: {e:?}"))?;
+            Ok(f(view))
+        })?;
+        Ok(out)
+    }
+
+    /// Materialises a fully owned `DagArena` from the spilled file.
+    ///
+    /// Equivalent to [`DiskCache::restore`] but without needing a `DiskCache`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or decoded.
+    pub fn load(&self) -> Result<DagArena, String> {
+        self.with_view(|view| view.to_owned_arena())
+    }
+
+    /// Path to the backing file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +251,30 @@ mod tests {
             .load_borrowed("k", |view| view.len())
             .expect("load");
         assert_eq!(len, b.arena().len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lazy_disk_arena_with_view_and_load() {
+        let dir = tmp_subdir("lazy");
+        let cache = DiskCache::new(&dir).expect("mkdir");
+        let mut b = DagBuilder::new();
+        let x = b.variable("x");
+        let y = b.variable("y");
+        let _ = b.add(x, y);
+
+        cache.spill("k", b.arena()).expect("spill");
+        let path = dir.join("k.bin");
+        let lazy = LazyDiskArena::open(&path);
+
+        // with_view: check node count without full materialisation
+        let len = lazy.with_view(|v| v.len()).expect("with_view");
+        assert_eq!(len, b.arena().len());
+
+        // load: full arena materialisation
+        let arena = lazy.load().expect("load");
+        assert_eq!(arena.len(), b.arena().len());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

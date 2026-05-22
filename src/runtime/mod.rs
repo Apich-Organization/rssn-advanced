@@ -82,15 +82,52 @@ pub fn runtime_gate() -> Result<RuntimeGate, FfiError> {
 // Single fiber spawn
 // =========================================================================
 
-/// Trampoline used by `spawn_task`. `dtact::dtact_fiber_launch` requires a
-/// `extern "C" fn(*mut c_void)`, so we box the closure on the heap and
-/// reconstruct it from the raw pointer here.
+/// Typed envelope for a single closure — packed into one heap allocation.
+///
+/// The old `spawn_task` double-boxed: `Box<Box<dyn FnOnce() + Send>>`. Each
+/// `Box` is a fat pointer (16 bytes), so the outer box stored 16 bytes of
+/// vtable + data pointer plus a fresh allocation for the inner fat pointer.
+/// `TaskEnvelope<F>` stores the closure and the trampoline function pointer
+/// in a single monomorphised struct — one allocation.
+///
+/// `#[repr(C)]` ensures `invoke` is the first field, so the trampoline can
+/// read it from a type-erased pointer without knowing `F`.
+#[repr(C)]
+struct TaskEnvelope<F: FnOnce() + Send + 'static> {
+    /// Monomorphised trampoline — the only field whose offset must be stable.
+    invoke: unsafe fn(*mut ()),
+    /// The closure itself, stored inline.
+    closure: core::mem::ManuallyDrop<F>,
+}
+
+impl<F: FnOnce() + Send + 'static> TaskEnvelope<F> {
+    /// Extracts the closure from `raw`, drops the envelope, then calls `f`.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must be a valid `*mut TaskEnvelope<F>` that was produced by
+    /// `Box::into_raw`. After this call the allocation is freed.
+    unsafe fn invoke_and_drop(raw: *mut ()) {
+        let mut env = unsafe { Box::from_raw(raw.cast::<Self>()) };
+        // Move the closure out before the Box is dropped.
+        // `ManuallyDrop` never runs `F`'s destructor automatically, so
+        // dropping `env` afterwards is safe even though the field was moved.
+        let f = unsafe { core::mem::ManuallyDrop::take(&mut env.closure) };
+        drop(env); // free the allocation (ManuallyDrop<F> drop is a no-op)
+        f();       // run the closure; its destructor fires here
+    }
+}
+
+/// C-ABI trampoline for `dtact_fiber_launch`. `arg` is a raw `TaskEnvelope<F>`
+/// pointer (type-erased). Reads the `invoke` function pointer at offset 0
+/// (`#[repr(C)]` guarantees this) and dispatches to the monomorphised handler.
 extern "C" fn task_trampoline(arg: *mut c_void) {
-    // SAFETY: `arg` was produced by `Box::into_raw` below; the box has not
-    // been touched since.
-    let boxed: Box<Box<dyn FnOnce() + Send + 'static>> =
-        unsafe { Box::from_raw(arg.cast::<Box<dyn FnOnce() + Send + 'static>>()) };
-    (*boxed)();
+    // SAFETY: `arg` was produced by `Box::into_raw::<TaskEnvelope<F>>` for some
+    // `F`. With `#[repr(C)]`, the `invoke` field is at offset 0, so reading it
+    // via a `*const unsafe fn(*mut ())` cast is well-defined.
+    let invoke: unsafe fn(*mut ()) =
+        unsafe { *arg.cast::<unsafe fn(*mut ())>() };
+    unsafe { invoke(arg.cast::<()>()) };
 }
 
 /// Opaque handle for a spawned task. Returned by [`spawn_task`] and
@@ -116,20 +153,23 @@ impl TaskHandle {
     }
 }
 
-/// Spawns `f` onto the fiber pool. The closure is heap-boxed exactly once;
+/// Spawns `f` onto the fiber pool with a single heap allocation.
+///
 /// `dtact` then runs it on whichever worker is currently coldest.
 ///
 /// Returns a [`TaskHandle`] that can be passed to [`join`] later. If you
 /// don't care about completion, drop the handle (the fiber will still
 /// run to completion — fibers are detached by default).
 pub fn spawn_task<F: FnOnce() + Send + 'static>(_gate: RuntimeGate, f: F) -> TaskHandle {
-    // Double-box: the inner `Box<dyn FnOnce>` is a fat pointer, and we need
-    // a thin pointer to round-trip through C FFI.
-    let boxed: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
-    let arg: *mut Box<dyn FnOnce() + Send + 'static> = Box::into_raw(Box::new(boxed));
-    // SAFETY: `task_trampoline` matches the `extern "C" fn(*mut c_void)`
-    // signature; `arg` is non-null heap memory that the trampoline frees
-    // via `Box::from_raw`.
+    // Single allocation: `TaskEnvelope<F>` stores both the trampoline
+    // function pointer and the closure inline, replacing the old double-box.
+    let env = Box::new(TaskEnvelope::<F> {
+        invoke: TaskEnvelope::<F>::invoke_and_drop,
+        closure: core::mem::ManuallyDrop::new(f),
+    });
+    let arg: *mut TaskEnvelope<F> = Box::into_raw(env);
+    // SAFETY: `task_trampoline` reads `arg.invoke` and calls it; `invoke`
+    // reconstructs and drops the `TaskEnvelope` via `Box::from_raw`.
     let handle = unsafe { dtact_fiber_launch(task_trampoline, arg.cast::<c_void>()) };
     TaskHandle(handle)
 }
