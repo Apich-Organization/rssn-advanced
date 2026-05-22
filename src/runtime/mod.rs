@@ -98,6 +98,24 @@ extern "C" fn task_trampoline(arg: *mut c_void) {
 #[derive(Clone, Copy)]
 pub struct TaskHandle(dtact_handle_t);
 
+impl TaskHandle {
+    /// Returns the raw numeric id of the underlying fiber handle.
+    ///
+    /// Used by the async FFI bridge to stash the handle in a C-visible struct.
+    #[must_use]
+    pub fn raw_id(self) -> u64 {
+        self.0.0
+    }
+
+    /// Reconstructs a `TaskHandle` from a raw id previously obtained via
+    /// [`Self::raw_id`]. The caller must ensure the id is still valid (i.e.,
+    /// the fiber has not been joined yet).
+    #[must_use]
+    pub fn from_raw(id: u64) -> Self {
+        Self(dtact_handle_t(id))
+    }
+}
+
 /// Spawns `f` onto the fiber pool. The closure is heap-boxed exactly once;
 /// `dtact` then runs it on whichever worker is currently coldest.
 ///
@@ -130,6 +148,16 @@ pub fn join(handle: TaskHandle) {
 /// to finish before returning. Closures produce a `T` which is collected
 /// into the returned `Vec` in input order.
 ///
+/// Panics inside individual tasks are caught via [`std::panic::catch_unwind`]
+/// and mapped to `None` in the output; the returned `Vec` contains only the
+/// successfully produced values (preserving order of non-panicking tasks).
+///
+/// Uses a lock-free write path: each fiber writes directly into its own
+/// pre-allocated slot in an `UnsafeCell<Vec<Option<T>>>` using the slot
+/// index as the exclusive key — no `Mutex` contention between workers.
+/// The fan-in join barrier (`dtact_await`) provides the happens-before
+/// edge that makes the final read of all slots safe.
+///
 /// This is the workhorse used by `parallel::solver` and `ffi::async_bridge`
 /// to replace the `std::thread::spawn` pattern.
 pub fn parallel_for_each<I, F, T>(gate: RuntimeGate, tasks: I) -> Vec<T>
@@ -138,24 +166,36 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    use std::cell::UnsafeCell;
     use std::sync::Arc;
-    use std::sync::Mutex;
 
     let tasks: Vec<F> = tasks.into_iter().collect();
     let n = tasks.len();
-    // Pre-size with `None` so each fiber writes into its own slot — no
-    // contention between workers, only on the slot for ordered insertion.
-    let slots: Arc<Mutex<Vec<Option<T>>>> = Arc::new(Mutex::new((0..n).map(|_| None).collect()));
+
+    // SAFETY: `UnsafeCell<Vec<Option<T>>>` is not `Sync` by default.
+    // We assert it here because:
+    //   (a) fibers write to disjoint indices (no aliased mutable refs), and
+    //   (b) the join loop below provides the happens-before fence before
+    //       the caller ever reads from `slots`.
+    struct SendSync<T>(T);
+    unsafe impl<T: Send> Send for SendSync<T> {}
+    unsafe impl<T: Send> Sync for SendSync<T> {}
+
+    // Pre-allocate one slot per task. Each fiber owns exactly one index
+    // and writes to it without touching any other slot — no locking needed.
+    let slots: Arc<SendSync<UnsafeCell<Vec<Option<T>>>>> =
+        Arc::new(SendSync(UnsafeCell::new((0..n).map(|_| None).collect())));
 
     let mut handles: Vec<TaskHandle> = Vec::with_capacity(n);
     for (i, task) in tasks.into_iter().enumerate() {
         let slots_arc = Arc::clone(&slots);
         handles.push(spawn_task(gate, move || {
-            let value = task();
-            if let Ok(mut guard) = slots_arc.lock()
-                && let Some(slot) = guard.get_mut(i)
-            {
-                *slot = Some(value);
+            // Catch panics so one failing task doesn't abort the whole fan-out.
+            let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).ok();
+            // SAFETY: `i` is unique per fiber; no two fibers share an index.
+            unsafe {
+                let vec_ptr: *mut Vec<Option<T>> = slots_arc.0.get();
+                (&mut *vec_ptr)[i] = value;
             }
         }));
     }
@@ -164,11 +204,11 @@ where
         join(h);
     }
 
-    let drained = {
-        let mut guard = slots.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        core::mem::take(&mut *guard)
-    };
-    drained.into_iter().flatten().collect()
+    // SAFETY: all fibers have been joined; we hold the only live reference
+    // to `slots`. Unwrapping the Arc gives exclusive access to the inner Vec.
+    let inner = Arc::try_unwrap(slots)
+        .unwrap_or_else(|_| unreachable!("all fibers have been joined; Arc is unique"));
+    inner.0.into_inner().into_iter().flatten().collect()
 }
 
 #[cfg(test)]

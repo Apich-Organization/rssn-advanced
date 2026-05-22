@@ -20,6 +20,12 @@
 #[allow(clippy::inline_always)]
 #[inline(always)]
 pub fn apply(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
+    debug_assert!(
+        lhs.len() == 4 && rhs.len() == 4 && out.len() == 4,
+        "add_f64x4_avx2::apply requires exactly 4-element slices \
+         (got lhs={}, rhs={}, out={})",
+        lhs.len(), rhs.len(), out.len()
+    );
     if lhs.len() != 4 || rhs.len() != 4 || out.len() != 4 {
         return;
     }
@@ -116,11 +122,26 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_lengths_are_no_op() {
+    #[cfg(not(debug_assertions))]
+    fn mismatched_lengths_are_no_op_in_release() {
+        // In debug builds `debug_assert!` panics on length mismatch; in
+        // release builds the kernel silently no-ops. The SIMD arithmetic
+        // wrappers in `simd::arithmetic` always pass correctly-sized
+        // 4-element chunks, so mismatched lengths indicate a caller bug.
         let a = [1.0_f64, 2.0];
         let b = [10.0_f64, 20.0, 30.0, 40.0];
         let mut out = [0.0_f64; 4];
         apply(&a, &b, &mut out);
-        assert_eq!(out, [0.0; 4], "no-op when lengths disagree");
+        assert_eq!(out, [0.0; 4], "no-op when lengths disagree (release only)");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "requires exactly 4-element slices")]
+    fn mismatched_lengths_panic_in_debug() {
+        let a = [1.0_f64, 2.0];
+        let b = [10.0_f64, 20.0, 30.0, 40.0];
+        let mut out = [0.0_f64; 4];
+        apply(&a, &b, &mut out);
     }
 }

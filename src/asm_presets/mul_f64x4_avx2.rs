@@ -16,6 +16,12 @@
 #[allow(clippy::inline_always)]
 #[inline(always)]
 pub fn apply(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
+    debug_assert!(
+        lhs.len() == 4 && rhs.len() == 4 && out.len() == 4,
+        "mul_f64x4_avx2::apply requires exactly 4-element slices \
+         (got lhs={}, rhs={}, out={})",
+        lhs.len(), rhs.len(), out.len()
+    );
     if lhs.len() != 4 || rhs.len() != 4 || out.len() != 4 {
         return;
     }

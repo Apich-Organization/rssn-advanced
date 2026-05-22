@@ -76,11 +76,21 @@ impl<T, O: fmt::Display> fmt::Debug for RelPtr<T, O> {
 }
 
 impl<T> RelPtr<T, i32> {
-    /// Creates a relative pointer pointing to a null target (represented by 0 offset).
+    /// The sentinel value used to represent a null (absent) relative pointer.
+    ///
+    /// `i32::MIN` is chosen because a valid offset of −2 147 483 648 would
+    /// require the source and target indices to differ by exactly 2^31,
+    /// which is impossible for any practical arena (bounded by `u32` ids).
+    /// Using `0` as the sentinel (the previous choice) was incorrect: it
+    /// collided with a valid pointer from any index to itself, and — more
+    /// importantly — from any non-zero index to index 0 (the root).
+    pub const NULL_OFFSET: i32 = i32::MIN;
+
+    /// Creates a null relative pointer.
     #[must_use]
     pub const fn null() -> Self {
         Self {
-            offset: 0,
+            offset: Self::NULL_OFFSET,
             _phantom: PhantomData,
         }
     }
@@ -88,15 +98,15 @@ impl<T> RelPtr<T, i32> {
     /// Returns `true` if this relative pointer is null.
     #[must_use]
     pub const fn is_null(self) -> bool {
-        self.offset == 0
+        self.offset == Self::NULL_OFFSET
     }
 
     /// Computes the relative pointer from a source index to a target index.
     ///
     /// When the offset overflows the `i32` range the function returns
-    /// the null pointer (clamped fallback) rather than panicking
-    /// (Phase 7 cleanup). Callers that need to distinguish "real null"
-    /// from "overflow" should use [`Self::from_indices_checked`].
+    /// the null pointer (clamped fallback) rather than panicking.
+    /// Callers that need to distinguish "real null" from "overflow"
+    /// should use [`Self::from_indices_checked`].
     #[must_use]
     pub fn from_indices(source: usize, target: usize) -> Self {
         Self::from_indices_checked(source, target).unwrap_or_else(Self::null)
@@ -106,11 +116,14 @@ impl<T> RelPtr<T, i32> {
     /// instead of clamping to null.
     #[must_use]
     pub fn from_indices_checked(source: usize, target: usize) -> Option<Self> {
-        if target == 0 {
-            return Some(Self::null());
-        }
         let diff = (target as isize) - (source as isize);
         let offset = i32::try_from(diff).ok()?;
+        // Guard against accidentally encoding the null sentinel as a real
+        // pointer (would require a 2^31-element distance — unreachable in
+        // practice, but we make it explicit).
+        if offset == Self::NULL_OFFSET {
+            return None;
+        }
         Some(Self {
             offset,
             _phantom: PhantomData,
@@ -135,11 +148,14 @@ impl<T> RelPtr<T, i32> {
 }
 
 impl<T> RelPtr<T, i64> {
-    /// Creates a relative pointer pointing to a null target (represented by 0 offset).
+    /// Null sentinel for the i64 variant.
+    pub const NULL_OFFSET_I64: i64 = i64::MIN;
+
+    /// Creates a null relative pointer (i64 variant).
     #[must_use]
     pub const fn null_i64() -> Self {
         Self {
-            offset: 0,
+            offset: Self::NULL_OFFSET_I64,
             _phantom: PhantomData,
         }
     }
@@ -147,20 +163,18 @@ impl<T> RelPtr<T, i64> {
     /// Returns `true` if this relative pointer is null.
     #[must_use]
     pub const fn is_null_i64(self) -> bool {
-        self.offset == 0
+        self.offset == Self::NULL_OFFSET_I64
     }
 
     /// Computes the relative pointer from a source index to a target index.
     #[must_use]
     pub fn from_indices_i64(source: usize, target: usize) -> Self {
-        if target == 0 {
+        let offset = (target as i64) - (source as i64);
+        if offset == Self::NULL_OFFSET_I64 {
             return Self::null_i64();
         }
-        let offset = (target as isize) - (source as isize);
-        #[allow(clippy::cast_possible_truncation)]
-        let offset_val = offset as i64;
         Self {
-            offset: offset_val,
+            offset,
             _phantom: PhantomData,
         }
     }

@@ -254,6 +254,44 @@ pub extern "C" fn rssn_dag_add_v2(
     result.unwrap_or(RssnStatus::Panic)
 }
 
+/// Executes a previously compiled JIT function. Status-returning variant.
+///
+/// On `Success`, writes the result to `*out_val`.
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_execute_v2(
+    func: *const c_void,
+    variables: *const f64,
+    out_val: *mut f64,
+) -> RssnStatus {
+    if func.is_null() || variables.is_null() || out_val.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| {
+        let compiled_fn: crate::jit::compiler::CompiledExprFn =
+            unsafe { std::mem::transmute(func) };
+        compiled_fn(variables)
+    });
+    match result {
+        Ok(val) => {
+            unsafe { *out_val = val };
+            RssnStatus::Success
+        }
+        Err(_) => RssnStatus::Panic,
+    }
+}
+
+/// Executes a previously compiled JIT function (stub for non-JIT builds).
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_execute_v2(
+    _func: *const c_void,
+    _variables: *const f64,
+    _out_val: *mut f64,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
 /// Simplifies an expression. Status-returning variant.
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_simplify_v2(

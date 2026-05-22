@@ -223,14 +223,15 @@ fn build_dag_node(
     match ast_node.kind {
         SymbolKind::Constant => builder.constant(ast_node.value.unwrap_or(0.0)),
         SymbolKind::Variable(sym_id) => {
-            // Round-trip the variable through the builder's registry; if
-            // the same SymbolId was already interned the name lookup
-            // succeeds, otherwise we fall back to a synthetic name.
+            // Round-trip the variable through the builder's registry. If the
+            // SymbolId isn't in the new registry (cross-builder conversion),
+            // synthesize a *unique* name from the id rather than always
+            // falling back to "x", which would merge distinct variables.
             let name = builder
                 .registry()
                 .name(sym_id)
-                .unwrap_or("x")
-                .to_owned();
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("__var{}", sym_id.0));
             builder.variable(&name)
         }
         // Arity mismatches signal a malformed projection. Previously

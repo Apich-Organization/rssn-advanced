@@ -185,6 +185,27 @@ where
     Ok(value)
 }
 
+/// Borrow-decodes `T` directly from a raw byte slice without going through
+/// [`AlignedBytes`].
+///
+/// Use this when the source bytes are already guaranteed to be 8-byte
+/// aligned (e.g. from [`MmapBuffer::with_view`], whose heap-fallback
+/// path always returns a `Box<[u64]>`-backed slice). Skips the copy
+/// that `AlignedBytes::from_slice` would otherwise perform.
+///
+/// # Errors
+///
+/// Returns a `DecodeError` if the bytes are misaligned for the contained
+/// `Pod` types, or if `bincode_next` encounters a structural error.
+pub fn decode_zerocopy_raw<'a, T>(bytes: &'a [u8]) -> Result<T, DecodeError>
+where
+    T: BorrowDecode<'a, ()>,
+{
+    let (value, _read) =
+        bincode_next::borrow_decode_from_slice(bytes, zerocopy_config())?;
+    Ok(value)
+}
+
 // =========================================================================
 // BorrowedSlice
 // =========================================================================

@@ -20,6 +20,12 @@
 #[allow(clippy::inline_always)]
 #[inline(always)]
 pub fn apply(c1: &[f64], c2: &[f64], x: &[f64], y: &[f64], out: &mut [f64]) {
+    debug_assert!(
+        c1.len() == 4 && c2.len() == 4 && x.len() == 4 && y.len() == 4 && out.len() == 4,
+        "coef_merge_f64x4::apply requires exactly 4-element slices \
+         (got c1={}, c2={}, x={}, y={}, out={})",
+        c1.len(), c2.len(), x.len(), y.len(), out.len()
+    );
     if c1.len() != 4
         || c2.len() != 4
         || x.len() != 4

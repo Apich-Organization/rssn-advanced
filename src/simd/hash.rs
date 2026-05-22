@@ -2,19 +2,24 @@
 //!
 //! Uses the AES-NI based 2-lane mix from [`crate::asm_presets::hash_u64x2_aesni`]
 //! to compute high-entropy hashes across an arbitrary-length slice. The
-//! kernel processes two `u64` lanes per call; the wrapper here folds
-//! the results back to a single `u64` per input by xor-mixing the
-//! returned `(lo, hi)` pair.
+//! kernel processes two `u64` lanes simultaneously; the batch wrapper feeds
+//! consecutive key pairs `(keys[i], keys[i+1])` through the kernel together,
+//! halving the number of AES-NI invocations for even-length inputs.
 //!
 //! When AES-NI isn't available the scalar fallback path in
 //! `hash_u64x2_aesni::apply` kicks in transparently — same observable
-//! output, slower clock-to-clock.
+//! throughput improvement from pairing, slower clock-to-clock.
 
 use crate::asm_presets::hash_u64x2_aesni;
 use crate::simd::arithmetic::BatchError;
 
-/// Computes one `u64` hash per input key by folding the AES-NI mix's
-/// `(lo, hi)` pair with xor.
+/// Computes one `u64` hash per input key using the AES-NI 2-lane kernel.
+///
+/// Consecutive keys are processed in pairs: `(keys[i], keys[i+1])` yields
+/// `(lo, hi)` where `lo` is used as `hashes[i]` and `hi` as `hashes[i+1]`.
+/// This halves the kernel call count compared to processing one key at a
+/// time. A trailing odd element is handled with a rotation companion as
+/// the second lane.
 ///
 /// # Errors
 ///
@@ -24,17 +29,24 @@ pub fn batch_hash(keys: &[u64], hashes: &mut [u64]) -> Result<(), BatchError> {
         return Err(BatchError::LengthMismatch);
     }
 
-    // Process two-lane pairs first; the kernel takes one lane per call.
-    // We still call it per element (single-element mix is well-defined:
-    // the second lane gets a `0` seed). For paired performance a future
-    // change can buffer two consecutive keys and use the pair.
-    for (k, h) in keys.iter().zip(hashes.iter_mut()) {
-        // Mix the key with its bitwise-rotated companion to keep the
-        // AES round busy on both halves of the xmm register.
-        let companion = k.rotate_left(31);
-        let (lo, hi) = hash_u64x2_aesni::apply(*k, companion);
-        *h = lo ^ hi;
+    let n = keys.len();
+    let mut i = 0;
+
+    // Process pairs: one AES-NI call yields two independent hashes.
+    while i + 2 <= n {
+        let (lo, hi) = hash_u64x2_aesni::apply(keys[i], keys[i + 1]);
+        hashes[i]     = lo;
+        hashes[i + 1] = hi;
+        i += 2;
     }
+
+    // Tail: 0 or 1 remaining key — use rotation as second lane seed.
+    if i < n {
+        let companion = keys[i].rotate_left(31);
+        let (lo, hi) = hash_u64x2_aesni::apply(keys[i], companion);
+        hashes[i] = lo ^ hi;
+    }
+
     Ok(())
 }
 

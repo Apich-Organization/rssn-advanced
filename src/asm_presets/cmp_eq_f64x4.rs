@@ -21,6 +21,12 @@
 #[allow(clippy::inline_always)]
 #[inline(always)]
 pub fn apply(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) {
+    debug_assert!(
+        lhs.len() == 4 && rhs.len() == 4 && mask.len() == 4,
+        "cmp_eq_f64x4::apply requires exactly 4-element slices \
+         (got lhs={}, rhs={}, mask={})",
+        lhs.len(), rhs.len(), mask.len()
+    );
     if lhs.len() != 4 || rhs.len() != 4 || mask.len() != 4 {
         return;
     }

@@ -159,23 +159,151 @@ pub fn neg_double(builder: &DagBuilder, children: &[DagNodeId]) -> PatternResult
     None
 }
 
+/// Constant folding: when all children of a binary operator are constants,
+/// evaluate at compile time and return the result as a new constant node.
+///
+/// Handles `+`, `-`, `*`, `/` (guarded against zero), and `^`.
+pub fn constant_fold(
+    builder: &mut DagBuilder,
+    kind: SymbolKind,
+    children: &[DagNodeId],
+) -> PatternResult {
+    if children.len() != 2 {
+        return None;
+    }
+    let lv = constant_value(builder, children[0])?;
+    let rv = constant_value(builder, children[1])?;
+    let result = match kind {
+        SymbolKind::Operator(OpKind::Add) => lv + rv,
+        SymbolKind::Operator(OpKind::Sub) => lv - rv,
+        SymbolKind::Operator(OpKind::Mul) => lv * rv,
+        SymbolKind::Operator(OpKind::Div) => {
+            if rv == 0.0 {
+                return None;
+            }
+            lv / rv
+        }
+        SymbolKind::Operator(OpKind::Pow) => lv.powf(rv),
+        _ => return None,
+    };
+    Some(builder.constant(result))
+}
+
+/// Constant merging in products: `(c1 * x) * c2 → (c1*c2) * x`.
+///
+/// This catches the common pattern that arises after repeated symbolic
+/// substitution, where coefficients pile up around a variable.
+pub fn mul_coef_merge(builder: &mut DagBuilder, children: &[DagNodeId]) -> PatternResult {
+    if children.len() != 2 {
+        return None;
+    }
+    let (lhs, rhs) = (children[0], children[1]);
+
+    // Case: `(c1 * x) * c2`
+    if let Some(c2) = constant_value(builder, rhs) {
+        if let Some(lhs_node) = builder.arena().get(lhs) {
+            if lhs_node.kind == SymbolKind::Operator(OpKind::Mul)
+                && lhs_node.children.len() == 2
+            {
+                let inner = lhs_node.children.as_slice().to_owned();
+                if let Some(c1) = constant_value(builder, inner[0]) {
+                    let merged = builder.constant(c1 * c2);
+                    return Some(builder.mul(merged, inner[1]));
+                }
+                if let Some(c1) = constant_value(builder, inner[1]) {
+                    let merged = builder.constant(c1 * c2);
+                    return Some(builder.mul(inner[0], merged));
+                }
+            }
+        }
+    }
+
+    // Case: `c1 * (x * c2)`
+    if let Some(c1) = constant_value(builder, lhs) {
+        if let Some(rhs_node) = builder.arena().get(rhs) {
+            if rhs_node.kind == SymbolKind::Operator(OpKind::Mul)
+                && rhs_node.children.len() == 2
+            {
+                let inner = rhs_node.children.as_slice().to_owned();
+                if let Some(c2) = constant_value(builder, inner[0]) {
+                    let merged = builder.constant(c1 * c2);
+                    return Some(builder.mul(merged, inner[1]));
+                }
+                if let Some(c2) = constant_value(builder, inner[1]) {
+                    let merged = builder.constant(c1 * c2);
+                    return Some(builder.mul(inner[0], merged));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Constant merging in sums: `(c1 + x) + c2 → x + (c1+c2)`.
+pub fn add_coef_merge(builder: &mut DagBuilder, children: &[DagNodeId]) -> PatternResult {
+    if children.len() != 2 {
+        return None;
+    }
+    let (lhs, rhs) = (children[0], children[1]);
+
+    // `(c1 + x) + c2`
+    if let Some(c2) = constant_value(builder, rhs) {
+        if let Some(lhs_node) = builder.arena().get(lhs) {
+            if lhs_node.kind == SymbolKind::Operator(OpKind::Add)
+                && lhs_node.children.len() == 2
+            {
+                let inner = lhs_node.children.as_slice().to_owned();
+                if let Some(c1) = constant_value(builder, inner[0]) {
+                    let merged = builder.constant(c1 + c2);
+                    return Some(builder.add(inner[1], merged));
+                }
+                if let Some(c1) = constant_value(builder, inner[1]) {
+                    let merged = builder.constant(c1 + c2);
+                    return Some(builder.add(inner[0], merged));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Dispatches to the appropriate pattern for `kind`. Returns
 /// `Some(replacement_id)` when a pattern fires, else `None`.
 ///
 /// All replacements go through `DagBuilder` and therefore preserve
-/// structural deduplication.
+/// structural deduplication. Patterns are ordered by expected frequency:
+/// identity rules fire most often, constant folding next, then merging.
 pub fn try_apply(
     builder: &mut DagBuilder,
     kind: SymbolKind,
     children: &[DagNodeId],
 ) -> PatternResult {
-    match kind {
+    // Identity rules.
+    let identity = match kind {
         SymbolKind::Operator(OpKind::Add) => add_zero(builder, children),
         SymbolKind::Operator(OpKind::Sub) => sub_identity(builder, children),
         SymbolKind::Operator(OpKind::Mul) => mul_identity(builder, children),
         SymbolKind::Operator(OpKind::Div) => div_identity(builder, children),
         SymbolKind::Operator(OpKind::Pow) => pow_identity(builder, children),
         SymbolKind::Operator(OpKind::Neg) => neg_double(builder, children),
+        _ => None,
+    };
+    if identity.is_some() {
+        return identity;
+    }
+
+    // Constant folding: all-constant operands → single constant.
+    let folded = constant_fold(builder, kind, children);
+    if folded.is_some() {
+        return folded;
+    }
+
+    // Constant merging: collapse nested products / sums.
+    match kind {
+        SymbolKind::Operator(OpKind::Mul) => mul_coef_merge(builder, children),
+        SymbolKind::Operator(OpKind::Add) => add_coef_merge(builder, children),
         _ => None,
     }
 }
@@ -245,5 +373,61 @@ mod tests {
             Some(x)
         );
         let _ = neg_neg_x;
+    }
+
+    #[test]
+    fn constant_fold_add() {
+        let mut b = DagBuilder::new();
+        let c3 = b.constant(3.0);
+        let c4 = b.constant(4.0);
+        let result = constant_fold(&mut b, SymbolKind::Operator(OpKind::Add), &[c3, c4]);
+        let id = result.expect("3 + 4 should fold");
+        assert_eq!(constant_value(&b, id), Some(7.0));
+    }
+
+    #[test]
+    fn constant_fold_div_by_zero_does_not_fold() {
+        let mut b = DagBuilder::new();
+        let c5 = b.constant(5.0);
+        let c0 = b.constant(0.0);
+        let result = constant_fold(&mut b, SymbolKind::Operator(OpKind::Div), &[c5, c0]);
+        assert!(result.is_none(), "division by zero must not fold");
+    }
+
+    #[test]
+    fn mul_coef_merge_folds_nested_constants() {
+        // (3.0 * x) * 4.0  →  12.0 * x
+        let mut b = DagBuilder::new();
+        let x = b.variable("x");
+        let c3 = b.constant(3.0);
+        let inner = b.mul(c3, x);
+        let c4 = b.constant(4.0);
+        let result = mul_coef_merge(&mut b, &[inner, c4]);
+        let id = result.expect("(3*x)*4 should merge to 12*x");
+        let node = b.arena().get(id).expect("result node exists");
+        assert_eq!(node.kind, SymbolKind::Operator(OpKind::Mul), "result is Mul");
+        // One child should be the constant 12.0.
+        let child_vals: Vec<_> = node.children.as_slice().iter()
+            .filter_map(|c| constant_value(&b, *c))
+            .collect();
+        assert!(child_vals.iter().any(|&v| (v - 12.0).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn add_coef_merge_folds_nested_constants() {
+        // (10.0 + x) + 5.0  →  x + 15.0
+        let mut b = DagBuilder::new();
+        let x = b.variable("x");
+        let c10 = b.constant(10.0);
+        let inner = b.add(c10, x);
+        let c5 = b.constant(5.0);
+        let result = add_coef_merge(&mut b, &[inner, c5]);
+        let id = result.expect("(10+x)+5 should merge to x+15");
+        let node = b.arena().get(id).expect("result node exists");
+        assert_eq!(node.kind, SymbolKind::Operator(OpKind::Add), "result is Add");
+        let child_vals: Vec<_> = node.children.as_slice().iter()
+            .filter_map(|c| constant_value(&b, *c))
+            .collect();
+        assert!(child_vals.iter().any(|&v| (v - 15.0).abs() < f64::EPSILON));
     }
 }

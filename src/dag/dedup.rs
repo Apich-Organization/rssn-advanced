@@ -47,8 +47,26 @@ impl DedupMap {
     }
 
     /// Computes structural hash for an operator/function node with children.
+    ///
+    /// `coefficient` and `flags` are included because two nodes that differ
+    /// only in coefficient (e.g. `2*x` vs `3*x` via metadata) or flags are
+    /// structurally distinct — omitting them caused guaranteed hash collisions
+    /// that forced a full O(N) bucket scan on every dedup lookup.
     #[must_use]
     pub fn hash_operator(kind: &SymbolKind, children: &ChildList) -> NodeHash {
+        Self::hash_operator_full(kind, children, 1.0, super::metadata::NodeFlags::EMPTY)
+    }
+
+    /// Like [`Self::hash_operator`] but includes `coefficient` and `flags`
+    /// in the hash. Call this from builder methods that set non-default
+    /// metadata on operator nodes.
+    #[must_use]
+    pub fn hash_operator_full(
+        kind: &SymbolKind,
+        children: &ChildList,
+        coefficient: f64,
+        flags: super::metadata::NodeFlags,
+    ) -> NodeHash {
         let mut hasher = rapidhash::fast::RapidHasher::default();
         use std::hash::Hash;
         use std::hash::Hasher;
@@ -56,6 +74,8 @@ impl DedupMap {
         for &child in children.as_slice() {
             child.0.hash(&mut hasher);
         }
+        hasher.write_u64(coefficient.to_bits());
+        hasher.write_u8(flags.bits());
         NodeHash(hasher.finish())
     }
 
@@ -80,7 +100,7 @@ impl DedupMap {
                 if existing.kind == kind
                     && existing.children == children
                     && existing.value == value
-                    && (existing.meta.coefficient - coefficient).abs() < f64::EPSILON
+                    && existing.meta.coefficient.to_bits() == coefficient.to_bits()
                     && existing.meta.flags == flags
                 {
                     return id;

@@ -92,13 +92,26 @@ fn prune_additive_chain(
     match kept.len() {
         0 => builder.constant(0.0),
         1 => kept[0],
-        _ => {
-            // Fold a left-associative `add` chain through the builder.
-            let mut acc = kept[0];
-            for &term in &kept[1..] {
-                acc = builder.add(acc, term);
-            }
-            acc
+        _ => balanced_add(builder, &kept),
+    }
+}
+
+/// Builds a balanced binary tree of `add` nodes over `terms`.
+///
+/// A left-associative chain over thousands of terms creates a
+/// tree thousands of levels deep — a stack-overflow hazard for any
+/// subsequent recursive traversal. A balanced tree halves depth at
+/// each split, keeping depth at O(log N).
+fn balanced_add(builder: &mut DagBuilder, terms: &[DagNodeId]) -> DagNodeId {
+    match terms.len() {
+        0 => builder.constant(0.0),
+        1 => terms[0],
+        2 => builder.add(terms[0], terms[1]),
+        n => {
+            let mid = n / 2;
+            let left = balanced_add(builder, &terms[..mid]);
+            let right = balanced_add(builder, &terms[mid..]);
+            builder.add(left, right)
         }
     }
 }

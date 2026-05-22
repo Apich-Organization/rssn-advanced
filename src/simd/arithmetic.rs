@@ -7,20 +7,35 @@
 //!
 //! Each wrapper:
 //!
-//! 1. Splits the input into 4-element chunks aligned to the kernel
-//!    width.
-//! 2. Calls the kernel per chunk.
-//! 3. Processes the trailing 0..3 elements with the same scalar
-//!    fallback the kernel uses internally, guaranteeing bit-identical
-//!    results across the vectorized and scalar paths.
+//! 1. Checks AVX2 availability once per process via [`HAS_AVX2`].
+//! 2. Splits the input into 4-element chunks aligned to the kernel width.
+//! 3. Calls the kernel per chunk.
+//! 4. Processes the trailing 0..3 elements with the scalar fallback,
+//!    guaranteeing bit-identical results across vectorized / scalar paths.
 //!
-//! Length-mismatch errors are reported via `cold_storage_error_*` —
-//! err, no: arithmetic mismatch panics are surfaced via a `Result`
-//! variant per [`BatchError`]. Hot path stays branch-light.
+//! Feature detection is hoisted out of the per-chunk inner loop using a
+//! `OnceLock<bool>` — `is_x86_feature_detected!` touches an MMIO-mapped
+//! CPUID leaf on x86_64 and should not be called on every inner iteration.
+
+use std::sync::OnceLock;
 
 use crate::asm_presets::{
     add_f64x4_avx2, cmp_eq_f64x4, coef_merge_f64x4, fma_f64x4_avx2, mul_f64x4_avx2,
 };
+
+/// Cached result of AVX2 detection. Populated on first use; subsequent
+/// reads are a single atomic load (Acquire). The `OnceLock` value is a
+/// `bool` so the hot path is a branch-predictor-friendly compare.
+static HAS_AVX2: OnceLock<bool> = OnceLock::new();
+
+/// Returns `true` if AVX2 is available on the current host CPU.
+///
+/// The first call probes `is_x86_feature_detected!`; all subsequent calls
+/// return the cached result with a single Acquire load.
+#[inline]
+fn avx2_available() -> bool {
+    *HAS_AVX2.get_or_init(|| crate::simd::detect::has_avx2())
+}
 
 /// Reasons a batch arithmetic operation cannot proceed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,16 +63,20 @@ pub fn batch_add(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
         return Err(BatchError::LengthMismatch);
     }
 
+    // Detect once per batch call rather than once per chunk call.
+    let use_simd = avx2_available();
     let mut chunk_idx = 0;
     while chunk_idx + LANES <= n {
-        // `unwrap` on slice indices is fine: we just verified the bounds.
         let l = &lhs[chunk_idx..chunk_idx + LANES];
         let r = &rhs[chunk_idx..chunk_idx + LANES];
         let o = &mut result[chunk_idx..chunk_idx + LANES];
-        add_f64x4_avx2::apply(l, r, o);
+        if use_simd {
+            add_f64x4_avx2::apply(l, r, o);
+        } else {
+            for i in 0..LANES { o[i] = l[i] + r[i]; }
+        }
         chunk_idx += LANES;
     }
-    // Tail: 0..3 elements.
     while chunk_idx < n {
         result[chunk_idx] = lhs[chunk_idx] + rhs[chunk_idx];
         chunk_idx += 1;
@@ -77,9 +96,17 @@ pub fn batch_mul(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
         return Err(BatchError::LengthMismatch);
     }
 
+    let use_simd = avx2_available();
     let mut i = 0;
     while i + LANES <= n {
-        mul_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &mut result[i..i + LANES]);
+        let l = &lhs[i..i + LANES];
+        let r = &rhs[i..i + LANES];
+        let o = &mut result[i..i + LANES];
+        if use_simd {
+            mul_f64x4_avx2::apply(l, r, o);
+        } else {
+            for j in 0..LANES { o[j] = l[j] * r[j]; }
+        }
         i += LANES;
     }
     while i < n {
@@ -101,12 +128,17 @@ pub fn batch_add_scalar(lhs: &[f64], scalar: f64, result: &mut [f64]) -> Result<
         return Err(BatchError::LengthMismatch);
     }
 
-    // Splat the scalar into a 4-lane vector once and reuse.
+    let use_simd = avx2_available();
     let rhs = [scalar; LANES];
-
     let mut i = 0;
     while i + LANES <= n {
-        add_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs, &mut result[i..i + LANES]);
+        let l = &lhs[i..i + LANES];
+        let o = &mut result[i..i + LANES];
+        if use_simd {
+            add_f64x4_avx2::apply(l, &rhs, o);
+        } else {
+            for j in 0..LANES { o[j] = l[j] + scalar; }
+        }
         i += LANES;
     }
     while i < n {
@@ -155,12 +187,19 @@ pub fn batch_cmp_eq(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) -> Result<(), Bat
         return Err(BatchError::LengthMismatch);
     }
 
+    let use_simd = avx2_available();
     let mut i = 0;
     while i + LANES <= n {
-        cmp_eq_f64x4::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &mut mask[i..i + LANES]);
+        if use_simd {
+            cmp_eq_f64x4::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &mut mask[i..i + LANES]);
+        } else {
+            #[allow(clippy::float_cmp)]
+            for j in 0..LANES {
+                mask[i + j] = if lhs[i + j] == rhs[i + j] { 0xFF } else { 0x00 };
+            }
+        }
         i += LANES;
     }
-    // Bitwise IEEE-754 equality is intentional; NaN must compare unequal.
     #[allow(clippy::float_cmp)]
     while i < n {
         mask[i] = if lhs[i] == rhs[i] { 0xFF } else { 0x00 };
@@ -191,15 +230,22 @@ pub fn batch_coef_merge(
         return Err(BatchError::LengthMismatch);
     }
 
+    let use_simd = avx2_available();
     let mut i = 0;
     while i + LANES <= n {
-        coef_merge_f64x4::apply(
-            &coef_a[i..i + LANES],
-            &coef_b[i..i + LANES],
-            &var_x[i..i + LANES],
-            &var_y[i..i + LANES],
-            &mut out[i..i + LANES],
-        );
+        if use_simd {
+            coef_merge_f64x4::apply(
+                &coef_a[i..i + LANES],
+                &coef_b[i..i + LANES],
+                &var_x[i..i + LANES],
+                &var_y[i..i + LANES],
+                &mut out[i..i + LANES],
+            );
+        } else {
+            for j in 0..LANES {
+                out[i + j] = (coef_a[i + j] * coef_b[i + j]) * (var_x[i + j] * var_y[i + j]);
+            }
+        }
         i += LANES;
     }
     while i < n {
@@ -227,14 +273,21 @@ pub fn batch_fma(
         return Err(BatchError::LengthMismatch);
     }
 
+    let use_simd = avx2_available();
     let mut i = 0;
     while i + LANES <= n {
-        fma_f64x4_avx2::apply(
-            &lhs[i..i + LANES],
-            &rhs[i..i + LANES],
-            &addend[i..i + LANES],
-            &mut out[i..i + LANES],
-        );
+        if use_simd {
+            fma_f64x4_avx2::apply(
+                &lhs[i..i + LANES],
+                &rhs[i..i + LANES],
+                &addend[i..i + LANES],
+                &mut out[i..i + LANES],
+            );
+        } else {
+            for j in 0..LANES {
+                out[i + j] = lhs[i + j].mul_add(rhs[i + j], addend[i + j]);
+            }
+        }
         i += LANES;
     }
     while i < n {

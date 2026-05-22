@@ -8,7 +8,7 @@ use super::arena::DagArena;
 use super::dedup::DedupMap;
 use super::metadata::NodeFlags;
 use super::node::{ChildList, DagNodeId};
-use super::symbol::{OpKind, SymbolKind, SymbolRegistry};
+use super::symbol::{FnId, OpKind, SymbolKind, SymbolRegistry};
 
 /// The primary context for building symbolic expression DAGs.
 ///
@@ -16,8 +16,11 @@ use super::symbol::{OpKind, SymbolKind, SymbolRegistry};
 /// to construct perfectly-shared Directed Acyclic Graphs.
 #[derive(Debug, Clone, Default)]
 pub struct DagBuilder {
-    /// Opaque registry mapping names to `SymbolId`.
+    /// Opaque registry mapping variable names to `SymbolId`.
     registry: SymbolRegistry,
+    /// Registry mapping function names to `FnId`. Stored separately so
+    /// function IDs and variable IDs occupy independent namespaces.
+    fn_registry: SymbolRegistry,
     /// Vector-backed contiguous storage for nodes.
     arena: DagArena,
     /// Fast structural deduplication lookup.
@@ -30,6 +33,7 @@ impl DagBuilder {
     pub fn new() -> Self {
         Self {
             registry: SymbolRegistry::new(),
+            fn_registry: SymbolRegistry::new(),
             arena: DagArena::new(),
             dedup: DedupMap::new(),
         }
@@ -207,6 +211,30 @@ impl DagBuilder {
         )
     }
 
+    /// Interns a function name and returns its [`FnId`].
+    ///
+    /// The function namespace is independent of the variable namespace, so a
+    /// function named `"x"` never collides with a variable named `"x"`.
+    pub fn intern_function(&mut self, name: &str) -> FnId {
+        let sym_id = self.fn_registry.intern(name);
+        FnId(sym_id.0)
+    }
+
+    /// Returns the name of the function with the given [`FnId`], if interned.
+    #[must_use]
+    pub fn function_name(&self, fn_id: FnId) -> Option<&str> {
+        use super::symbol::SymbolId;
+        self.fn_registry.name(SymbolId(fn_id.0))
+    }
+
+    /// Constructs a function-call node: `name(args...)`.
+    ///
+    /// Equivalent to calling [`Self::operator`] with `SymbolKind::Function`,
+    /// but looks up the function's name in the registry for you.
+    pub fn function_call(&mut self, fn_id: FnId, args: &[DagNodeId]) -> DagNodeId {
+        self.operator(SymbolKind::Function(fn_id), args, NodeFlags::EMPTY)
+    }
+
     /// Constructs an arbitrary custom operator or function node.
     pub fn operator(&mut self, kind: SymbolKind, children: &[DagNodeId], flags: NodeFlags) -> DagNodeId {
         let children_list = ChildList::from_slice(children);
@@ -223,13 +251,12 @@ impl DagBuilder {
         )
     }
 
-    /// Clears the builder state while retaining allocated capacities.
+    /// Resets the builder to a completely fresh state.
     pub fn clear(&mut self) {
         self.arena.clear();
         self.dedup.clear();
-        // The registry can be cleared too if needed, but retaining it is often useful.
-        // Let's reset the entire builder state to completely fresh.
         self.registry = SymbolRegistry::new();
+        self.fn_registry = SymbolRegistry::new();
     }
 }
 

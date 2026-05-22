@@ -10,13 +10,17 @@
 use nom::IResult;
 
 use super::error::{ParseError, Span};
-use super::lexer::{parse_char, parse_constant, parse_variable, ws};
+use super::lexer::{parse_char, parse_constant, parse_identifier, ws};
 use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
 
-/// Maximum allowed depth of parenthesis nesting. Inputs deeper than
-/// this fail with a `ParseError` instead of overflowing the stack.
-pub const MAX_PAREN_DEPTH: u16 = 1024;
+/// Maximum allowed depth of parenthesis / operator recursion.
+///
+/// Each parse level requires two stack frames (`parse_expr_climbing` +
+/// `parse_atom`). In debug builds these frames are large enough that
+/// 1024 levels can overflow the default 8 MB thread stack. 200 keeps
+/// the recursive depth ≈ 400 frames, which is safe on every target.
+pub const MAX_PAREN_DEPTH: u16 = 200;
 
 /// Returns the precedence of an operator. Higher number means higher precedence.
 const fn op_precedence(op: char) -> Option<u8> {
@@ -67,8 +71,40 @@ fn parse_atom<'a>(
         return Ok((rem, node_id));
     }
 
-    // 4. Variable identifier.
-    if let Ok((rem, name)) = ws(parse_variable)(input) {
+    // 4. Function call `identifier '(' args ')'` or plain variable.
+    if let Ok((rem, name)) = ws(parse_identifier)(input) {
+        // Peek for '(' to distinguish function call from variable.
+        if let Ok((mut cur, _)) = ws(parse_char('('))(rem) {
+            if depth >= MAX_PAREN_DEPTH {
+                return Err(too_deep(input));
+            }
+            let mut args: Vec<DagNodeId> = Vec::new();
+            // Handle zero-arg call: `f()`.
+            if let Ok((after_close, _)) = ws(parse_char(')'))(cur) {
+                cur = after_close;
+            } else {
+                loop {
+                    let (r, arg) = parse_expr_climbing(cur, builder, 0, depth + 1)?;
+                    args.push(arg);
+                    cur = r;
+                    if let Ok((r2, _)) = ws(parse_char(','))(cur) {
+                        cur = r2;
+                    } else if let Ok((r2, _)) = ws(parse_char(')'))(cur) {
+                        cur = r2;
+                        break;
+                    } else {
+                        return Err(nom::Err::Error(nom::error::Error::new(
+                            cur,
+                            nom::error::ErrorKind::Fail,
+                        )));
+                    }
+                }
+            }
+            let fn_id = builder.intern_function(name);
+            let node_id = builder.function_call(fn_id, &args);
+            return Ok((cur, node_id));
+        }
+        // Plain variable.
         let node_id = builder.variable(name);
         return Ok((rem, node_id));
     }
@@ -85,6 +121,12 @@ fn parse_expr_climbing<'a>(
     min_prec: u8,
     depth: u16,
 ) -> IResult<&'a str, DagNodeId, nom::error::Error<&'a str>> {
+    // Guard against deep right-associative chains (e.g. `x^y^z^...`)
+    // which recurse here for each `^` — independent of paren depth.
+    if depth >= MAX_PAREN_DEPTH {
+        return Err(too_deep(input));
+    }
+
     let (mut rem, mut lhs) = parse_atom(input, builder, depth)?;
 
     loop {
@@ -106,13 +148,20 @@ fn parse_expr_climbing<'a>(
         let (rem_after_op, _) = ws(parse_char(op_char))(rem)?;
         rem = rem_after_op;
 
+        // For right-associative operators increment depth to cap chains
+        // like `x^y^z^...` which otherwise bypass the paren depth check.
         let next_min_prec = if op_right_associative(op_char) {
             op_prec
         } else {
             op_prec + 1
         };
+        let next_depth = if op_right_associative(op_char) {
+            depth.saturating_add(1)
+        } else {
+            depth
+        };
 
-        let (rem_after_rhs, rhs) = parse_expr_climbing(rem, builder, next_min_prec, depth)?;
+        let (rem_after_rhs, rhs) = parse_expr_climbing(rem, builder, next_min_prec, next_depth)?;
         rem = rem_after_rhs;
 
         // Combine lhs and rhs using the builder (every constructor
@@ -220,8 +269,10 @@ mod tests {
 
     #[test]
     fn paren_depth_overflow_is_a_clean_error() {
-        // 2000 deep — above the 1024 cap.
-        let n: usize = 2000;
+        // Use a depth well above MAX_PAREN_DEPTH (200) but small enough
+        // that even in debug builds we never actually recurse that deep
+        // (the error fires at depth 200, long before 400).
+        let n: usize = 400;
         let mut input = String::with_capacity(n * 2 + 1);
         for _ in 0..n {
             input.push('(');
@@ -233,6 +284,35 @@ mod tests {
         let mut b = DagBuilder::new();
         let err = parse_expression(&input, &mut b).expect_err("must error");
         assert!(err.message.contains("depth"));
+    }
+
+    #[test]
+    fn function_call_parses_correctly() {
+        let mut b = DagBuilder::new();
+        let id = parse_expression("sin(x)", &mut b).expect("ok");
+        let node = b.arena().get(id).expect("root");
+        assert!(matches!(node.kind, crate::dag::symbol::SymbolKind::Function(_)));
+        assert_eq!(node.children.len(), 1);
+    }
+
+    #[test]
+    fn function_call_with_multiple_args() {
+        let mut b = DagBuilder::new();
+        let id = parse_expression("pow(x, y)", &mut b).expect("ok");
+        let node = b.arena().get(id).expect("root");
+        assert!(matches!(node.kind, crate::dag::symbol::SymbolKind::Function(_)));
+        assert_eq!(node.children.len(), 2);
+    }
+
+    #[test]
+    fn function_call_nested_in_expression() {
+        let mut b = DagBuilder::new();
+        let id = parse_expression("sin(x) + cos(y)", &mut b).expect("ok");
+        let node = b.arena().get(id).expect("root");
+        assert!(matches!(
+            node.kind,
+            crate::dag::symbol::SymbolKind::Operator(crate::dag::symbol::OpKind::Add)
+        ));
     }
 
     #[test]

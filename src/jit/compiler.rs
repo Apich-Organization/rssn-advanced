@@ -1,13 +1,11 @@
 //! Core JIT compiler wrapping Cranelift.
 //!
 //! `JitCompiler` compiles stack-local AST projection trees into callable,
-//! optimized native machine code. The IR generator is now **iterative**
+//! optimized native machine code. The IR generator is **iterative**
 //! (work-stack + SSA-value stack) so even an expression a million nodes
-//! deep does not blow the OS stack — see `jit_review §2`. It also wires
-//! [`crate::jit::codegen::emit_prefetch_hint`] in front of every memory
-//! load (`jit_review §1`), and folds a peephole pass over the per-node
-//! IR emission so that `x + 0`, `x * 1`, `x * 0`, etc. cost zero
-//! instructions (`jit_review §1` / `§2`).
+//! deep does not blow the OS stack — see `jit_review §2`. It folds a
+//! peephole pass over the per-node IR emission so that `x + 0`, `x * 1`,
+//! `x * 0`, etc. cost zero instructions (`jit_review §1` / `§2`).
 
 #![allow(unsafe_code)]
 
@@ -23,7 +21,6 @@ use cranelift_module::{Linkage, Module};
 
 use crate::ast::projection::{AstNode, AstProjection};
 use crate::dag::symbol::{FnId, OpKind, SymbolKind};
-use crate::jit::codegen::emit_prefetch_hint;
 
 /// A JIT-compiled expression function pointer.
 ///
@@ -432,10 +429,6 @@ fn emit_variable_load(
     // SymbolId * 8 (one f64 per variable). u32 → i64 via i64 is safe.
     let offset = i64::from(sym_idx).wrapping_mul(8);
     let addr = builder.ins().iadd_imm(vars_ptr, offset);
-    // Prefetch the slot 8 cache lines ahead of `addr`. The returned
-    // value is a trusted-load result we discard; the side-effect of the
-    // emitted IR is what we want (`jit_review §1`).
-    let _hint = emit_prefetch_hint(builder, addr);
     builder.ins().load(types::F64, MemFlags::new(), addr, 0)
 }
 

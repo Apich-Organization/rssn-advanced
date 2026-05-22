@@ -75,12 +75,11 @@ impl DiskCache {
         let filepath = self.key_path(key);
         let mm = MmapBuffer::open(&filepath)
             .map_err(|e| format!("Failed to open cache file {}: {e:?}", filepath.display()))?;
-        // Copy the bytes into an `AlignedBytes` so the borrow-decoder
-        // gets an 8-byte-aligned source even when `MmapBuffer` is on
-        // the read-fallback path.
+        // `MmapBuffer` guarantees 8-byte alignment on every backend
+        // (heap: Box<[u64]>; mmap: page-aligned). We decode directly
+        // from the raw bytes without a redundant AlignedBytes copy.
         let arena_owned = mm.with_view(|bytes| -> Result<DagArena, String> {
-            let aligned = crate::zerocopy::AlignedBytes::from_slice(bytes);
-            let view = BorrowedArenaView::decode(&aligned)
+            let view = crate::zerocopy::decode_zerocopy_raw::<BorrowedArenaView<'_>>(bytes)
                 .map_err(|e| format!("Packed arena decode failed: {e:?}"))?;
             Ok(view.to_owned_arena())
         })?;
@@ -105,8 +104,7 @@ impl DiskCache {
         let mm = MmapBuffer::open(&filepath)
             .map_err(|e| format!("Failed to open cache file {}: {e:?}", filepath.display()))?;
         let out = mm.with_view(|bytes| -> Result<R, String> {
-            let aligned = crate::zerocopy::AlignedBytes::from_slice(bytes);
-            let view = BorrowedArenaView::decode(&aligned)
+            let view = crate::zerocopy::decode_zerocopy_raw::<BorrowedArenaView<'_>>(bytes)
                 .map_err(|e| format!("Packed arena decode failed: {e:?}"))?;
             Ok(f(view))
         })?;

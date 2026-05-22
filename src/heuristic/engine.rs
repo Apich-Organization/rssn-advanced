@@ -147,8 +147,11 @@ impl HeuristicEngine {
             } else {
                 let Some(frame) = stack.pop() else { break };
                 let split_at = values.len().saturating_sub(frame.arity);
-                let new_children: Vec<DagNodeId> = values.drain(split_at..).collect();
-                let rebuilt = rebuild_or_match(builder, frame.kind, &new_children, frame.node_id);
+                // Borrow the children as a slice instead of collecting into
+                // a Vec — avoids a heap allocation per node. NLL guarantees
+                // the immutable borrow ends before `truncate`.
+                let rebuilt = rebuild_or_match(builder, frame.kind, &values[split_at..], frame.node_id);
+                values.truncate(split_at);
                 values.push(rebuilt);
             }
         }

@@ -216,6 +216,13 @@ impl PackedArenaImage {
                     {
                         p.child0 = children_pool.len() as u32;
                     }
+                    // For large-arity nodes (arity > 254, stored as 255 in u8)
+                    // we write the true count as the first pool entry so the
+                    // decoder can reconstruct the exact slice without guessing.
+                    if p.arity == 255 {
+                        #[allow(clippy::cast_possible_truncation)]
+                        children_pool.push(extra.len() as u32);
+                    }
                     children_pool.extend(extra.iter().map(|id| id.value()));
                     p
                 }
@@ -436,24 +443,26 @@ impl<'a> BorrowedArenaView<'a> {
                 len: 2,
             },
             _ => {
+                let pool = self.children_pool.as_slice();
                 let start = node.child0 as usize;
-                let len = if arity == 255 {
-                    // Long-arity fallback: we wrote them packed but
-                    // didn't remember the true length. Use the pool
-                    // length minus start as an upper bound — callers
-                    // should treat 255 as "≥ 255 children, look up in
-                    // pool until end". For now we expose what we have
-                    // contiguously.
-                    self.children_pool.as_slice().len().saturating_sub(start)
+                if arity == 255 {
+                    // Large-arity node: the true count is stored as the
+                    // first u32 in the pool at `start`, followed by that
+                    // many child ids. This is the only correct way to
+                    // support multiple large-arity nodes in one image —
+                    // the previous "pool end" heuristic broke as soon as
+                    // any other node followed in the pool.
+                    let Some(&count) = pool.get(start) else {
+                        return Children::Pool(&[]);
+                    };
+                    let data_start = start + 1;
+                    let data_end = data_start + count as usize;
+                    let slice = pool.get(data_start..data_end).unwrap_or(&[]);
+                    Children::Pool(slice)
                 } else {
-                    arity
-                };
-                let slice = self
-                    .children_pool
-                    .as_slice()
-                    .get(start..start + len)
-                    .unwrap_or(&[]);
-                Children::Pool(slice)
+                    let slice = pool.get(start..start + arity).unwrap_or(&[]);
+                    Children::Pool(slice)
+                }
             }
         }
     }

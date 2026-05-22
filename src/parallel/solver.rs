@@ -164,8 +164,11 @@ fn reduce_frame(
         }
         SymbolKind::Operator(op) => {
             let split_at = values.len().saturating_sub(arity);
-            let child_vals: Vec<f64> = values.drain(split_at..).collect();
-            apply_op(op, &child_vals)
+            // Borrow as slice to avoid a per-node Vec allocation. NLL
+            // guarantees the immutable borrow ends before `truncate`.
+            let result = apply_op(op, &values[split_at..]);
+            values.truncate(split_at);
+            result
         }
     }
 }
@@ -182,7 +185,9 @@ fn apply_op(op: OpKind, child_vals: &[f64]) -> f64 {
         OpKind::Div => {
             let lhs = child_vals.first().copied().unwrap_or(0.0);
             let rhs = child_vals.get(1).copied().unwrap_or(1.0);
-            if rhs.abs() < f64::EPSILON { 0.0 } else { lhs / rhs }
+            // Return NaN on exact zero — consistent with IEEE-754 and the
+            // JIT path. Returning 0.0 or using EPSILON threshold masks bugs.
+            if rhs == 0.0 { f64::NAN } else { lhs / rhs }
         }
         OpKind::Pow => {
             let base = child_vals.first().copied().unwrap_or(0.0);
