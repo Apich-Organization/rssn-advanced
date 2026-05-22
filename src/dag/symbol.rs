@@ -4,6 +4,7 @@
 //! a numeric constant, an operator, or a function reference.
 
 use core::fmt;
+use std::sync::Arc;
 
 use bincode_next::{Decode, Encode};
 
@@ -55,6 +56,8 @@ pub enum OpKind {
     Pow,
     /// Unary negation (`-x`).
     Neg,
+    /// IEEE-754 floating-point remainder (`%`). Same precedence as `*` and `/`.
+    Mod,
 }
 
 impl fmt::Display for OpKind {
@@ -66,6 +69,7 @@ impl fmt::Display for OpKind {
             Self::Div => "/",
             Self::Pow => "^",
             Self::Neg => "neg",
+            Self::Mod => "%",
         };
         f.write_str(s)
     }
@@ -98,15 +102,23 @@ pub enum SymbolKind {
 ///
 /// This is the canonical name table — all variable and function names
 /// are interned here to avoid redundant string storage. A side-index
-/// `HashMap<Box<str>, SymbolId>` provides O(1) name → ID lookup so that
+/// `HashMap<Arc<str>, SymbolId>` provides O(1) name → ID lookup so that
 /// `intern` does not degrade to O(N) when a program declares thousands
 /// of distinct variables (`dag_review §2`).
+///
+/// Both `names` and `lookup` store `Arc<str>` sharing the same allocation —
+/// `Arc::clone` is a ref-count bump, not a heap allocation, so `intern` now
+/// does exactly **one** heap allocation per new symbol instead of two
+/// (`dag_review §1.3`).
 #[derive(Debug, Clone)]
 pub struct SymbolRegistry {
-    /// Interned names, indexed by `SymbolId.0`.
-    names: Vec<Box<str>>,
+    /// Interned names, indexed by `SymbolId.0`. Shared with the lookup map.
+    names: Vec<Arc<str>>,
     /// O(1) lookup from name to existing `SymbolId`.
-    lookup: std::collections::HashMap<Box<str>, SymbolId>,
+    /// `Arc<str>: Borrow<str>` so `HashMap::get(name: &str)` works without
+    /// allocating a temporary key. rapidhash `GlobalState` is used as the
+    /// hasher since string keys benefit from its throughput over SipHash.
+    lookup: std::collections::HashMap<Arc<str>, SymbolId, rapidhash::fast::GlobalState>,
 }
 
 impl SymbolRegistry {
@@ -115,23 +127,24 @@ impl SymbolRegistry {
     pub fn new() -> Self {
         Self {
             names: Vec::new(),
-            lookup: std::collections::HashMap::new(),
+            lookup: std::collections::HashMap::default(),
         }
     }
 
     /// Interns a name and returns its `SymbolId`.
     ///
-    /// If the name already exists, returns the existing ID in O(1).
-    /// Otherwise, allocates a new slot.
+    /// If the name already exists, returns the existing ID in O(1) with zero
+    /// allocation. Otherwise allocates exactly one `Arc<str>` and shares it
+    /// between `names` and `lookup` via a ref-count bump (`dag_review §1.3`).
     pub fn intern(&mut self, name: &str) -> SymbolId {
         if let Some(&id) = self.lookup.get(name) {
             return id;
         }
         #[allow(clippy::cast_possible_truncation)]
         let id = SymbolId(self.names.len() as u32);
-        let boxed: Box<str> = Box::from(name);
-        self.names.push(boxed.clone());
-        self.lookup.insert(boxed, id);
+        let arc: Arc<str> = Arc::from(name); // one allocation
+        self.names.push(Arc::clone(&arc));    // ref-count bump — no alloc
+        self.lookup.insert(arc, id);
         id
     }
 
@@ -140,7 +153,7 @@ impl SymbolRegistry {
     /// Returns `None` if the ID is out of range.
     #[must_use]
     pub fn name(&self, id: SymbolId) -> Option<&str> {
-        self.names.get(id.0 as usize).map(|s| &**s)
+        self.names.get(id.0 as usize).map(|s| s.as_ref())
     }
 
     /// Looks up an existing `SymbolId` for `name` without interning.

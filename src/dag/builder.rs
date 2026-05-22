@@ -194,6 +194,26 @@ impl DagBuilder {
         )
     }
 
+    /// Constructs a floating-point remainder node: `left % right`.
+    ///
+    /// Semantics follow IEEE-754 `remainder` (same as Cranelift `frem` and Rust `f64::rem`):
+    /// result has the same sign as the dividend, and `x % 0 → NaN`.
+    pub fn modulo(&mut self, left: DagNodeId, right: DagNodeId) -> DagNodeId {
+        let kind = SymbolKind::Operator(OpKind::Mod);
+        let children = ChildList::from_slice(&[left, right]);
+        let hash = DedupMap::hash_operator(&kind, &children);
+
+        self.dedup.get_or_insert(
+            &mut self.arena,
+            kind,
+            hash,
+            children,
+            None,
+            1.0,
+            NodeFlags::EMPTY,
+        )
+    }
+
     /// Constructs a unary negation node: `-operand`.
     pub fn neg(&mut self, operand: DagNodeId) -> DagNodeId {
         let kind = SymbolKind::Operator(OpKind::Neg);

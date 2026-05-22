@@ -11,10 +11,17 @@ use super::metadata::NodeHash;
 use super::node::{ChildList, DagNode, DagNodeId};
 use super::symbol::SymbolKind;
 
+/// rapidhash-backed HashMap: the structural hash keys are already u64 values
+/// produced by `rapidhash::fast::RapidHasher`, so using rapidhash as the outer
+/// HashMap hasher avoids a second SipHash pass over pre-hashed keys.
+/// `GlobalState` uses a deterministic fixed seed (unlike `RandomState`) which
+/// is appropriate for hash-consing maps.
+type RapidHashMap<K, V> = HashMap<K, V, rapidhash::fast::GlobalState>;
+
 /// Hash-consing map for structural deduplication of nodes in a `DagArena`.
 #[derive(Debug, Clone, Default)]
 pub struct DedupMap {
-    map: HashMap<u64, Vec<DagNodeId>>,
+    map: RapidHashMap<u64, Vec<DagNodeId>>,
 }
 
 impl DedupMap {
@@ -22,7 +29,7 @@ impl DedupMap {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            map: HashMap::new(),
+            map: RapidHashMap::default(),
         }
     }
 

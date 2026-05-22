@@ -59,7 +59,7 @@ pub fn apply(c1: &[f64], c2: &[f64], x: &[f64], y: &[f64], out: &mut [f64]) {
                     out("ymm1") _,
                     out("ymm2") _,
                     out("ymm3") _,
-                    options(nostack),
+                    options(nostack, preserves_flags),
                 );
             }
             return;

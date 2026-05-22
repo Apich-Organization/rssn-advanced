@@ -75,7 +75,7 @@ mod ast_tests {
         // We can append constant 2.0 at the end of the AST array (index 7).
         let two_const = rssn_advanced::ast::projection::AstNode {
             kind: SymbolKind::Constant,
-            value: Some(2.0),
+            value: 2.0,
             dag_id: rssn_advanced::dag::node::DagNodeId::NONE,
             children: rssn_advanced::ast::projection::AstChildList::Empty,
         };

@@ -90,6 +90,8 @@ pub mod op_tag {
     pub const POW: u8 = 4;
     /// unary `-`
     pub const NEG: u8 = 5;
+    /// `%` (IEEE-754 remainder)
+    pub const MOD: u8 = 6;
 }
 
 /// The 32-byte canonical wire-image of a DAG node.
@@ -144,6 +146,7 @@ impl PackedDagNode {
                 op_tag::DIV => Some(SymbolKind::Operator(OpKind::Div)),
                 op_tag::POW => Some(SymbolKind::Operator(OpKind::Pow)),
                 op_tag::NEG => Some(SymbolKind::Operator(OpKind::Neg)),
+                op_tag::MOD => Some(SymbolKind::Operator(OpKind::Mod)),
                 _ => None,
             },
             kind_tag::FUNCTION => Some(SymbolKind::Function(FnId(self.kind_payload))),
@@ -341,6 +344,7 @@ fn pack_one_node_ref(node: &DagNode) -> PackOne {
                 OpKind::Div => op_tag::DIV,
                 OpKind::Pow => op_tag::POW,
                 OpKind::Neg => op_tag::NEG,
+                OpKind::Mod => op_tag::MOD,
             };
         }
         SymbolKind::Function(fn_id) => {

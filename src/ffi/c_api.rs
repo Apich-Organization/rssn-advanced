@@ -17,6 +17,7 @@ use super::types::RssnStatus;
 /// Creates a new `DagBuilder` context.
 ///
 /// Returns a raw pointer to the builder, or NULL if creation failed or panicked.
+/// The returned pointer must be freed exactly once via [`rssn_dag_free`].
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_new() -> *mut DagBuilder {
     let result = catch_unwind(|| {
@@ -26,6 +27,12 @@ pub extern "C" fn rssn_dag_new() -> *mut DagBuilder {
 }
 
 /// Releases the memory of a previously allocated `DagBuilder`.
+///
+/// # Safety
+///
+/// `builder` must be a pointer previously returned by [`rssn_dag_new`], or NULL.
+/// After this call the pointer is dangling and must not be used.
+/// Passing a pointer not from `rssn_dag_new`, or freeing twice, is undefined behaviour.
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_free(builder: *mut DagBuilder) {
     if builder.is_null() {
@@ -45,6 +52,12 @@ pub extern "C" fn rssn_dag_free(builder: *mut DagBuilder) {
 /// [`CStr::to_bytes`] → `SymbolRegistry::intern_bytes`. Only the
 /// first time a given name is interned does an allocation happen
 /// (`ffi_review §2`).
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+/// - `name` must be a valid, non-null, null-terminated C string valid for the duration of
+///   this call.
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_variable(builder: *mut DagBuilder, name: *const c_char) -> u32 {
     if builder.is_null() || name.is_null() {
@@ -61,6 +74,10 @@ pub extern "C" fn rssn_dag_variable(builder: *mut DagBuilder, name: *const c_cha
 }
 
 /// Allocates a new constant node in the DAG.
+///
+/// # Safety
+///
+/// `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_constant(builder: *mut DagBuilder, val: f64) -> u32 {
     if builder.is_null() {
@@ -74,6 +91,10 @@ pub extern "C" fn rssn_dag_constant(builder: *mut DagBuilder, val: f64) -> u32 {
 }
 
 /// Allocates a new addition node in the DAG: `lhs + rhs`.
+///
+/// # Safety
+///
+/// `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_add(builder: *mut DagBuilder, lhs: u32, rhs: u32) -> u32 {
     if builder.is_null() {
@@ -89,6 +110,10 @@ pub extern "C" fn rssn_dag_add(builder: *mut DagBuilder, lhs: u32, rhs: u32) -> 
 /// Simplifies a target expression using the default heuristic engine.
 ///
 /// Returns the new root node index of the simplified expression.
+///
+/// # Safety
+///
+/// `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_simplify(builder: *mut DagBuilder, root: u32) -> u32 {
     if builder.is_null() {
@@ -109,6 +134,13 @@ pub extern "C" fn rssn_dag_simplify(builder: *mut DagBuilder, root: u32) -> u32 
 /// JIT compiles a target expression and writes the native function pointer to `out_fn`.
 ///
 /// `out_fn` can be called via `rssn_dag_execute` or cast directly as `double (*)(const double*)`.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+/// - `out_fn` must be a valid, non-null pointer to a `*mut c_void` that the function will write to.
+/// - The compiled function pointer written to `*out_fn` remains valid until the `JITModule`
+///   backing this compiler is dropped. Do not call it after that.
 #[cfg(feature = "cranelift-jit")]
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_compile(
@@ -156,6 +188,14 @@ pub extern "C" fn rssn_dag_compile(
 }
 
 /// Executes a previously compiled JIT function with the given variable input array.
+///
+/// # Safety
+///
+/// - `func` must be a valid function pointer previously written by [`rssn_dag_compile`],
+///   with signature `double (*)(const double*)`.
+/// - `variables` must be a valid pointer to an array of at least as many `f64` values
+///   as there are distinct variables in the compiled expression, ordered by `SymbolId`.
+/// - Both pointers must remain valid for the duration of this call.
 #[cfg(feature = "cranelift-jit")]
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_execute(func: *const c_void, variables: *const f64) -> f64 {
@@ -189,6 +229,12 @@ pub extern "C" fn rssn_dag_execute(_func: *const c_void, _variables: *const f64)
 /// Creates a new variable node. Status-returning variant.
 ///
 /// On `Success`, writes the new node id to `*out_id`.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+/// - `name` must be a valid, non-null, null-terminated C string valid for this call.
+/// - `out_id` must be a valid, non-null, writable `u32` pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_variable_v2(
     builder: *mut DagBuilder,
@@ -213,6 +259,11 @@ pub extern "C" fn rssn_dag_variable_v2(
 }
 
 /// Creates a new constant node. Status-returning variant.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+/// - `out_id` must be a valid, non-null, writable `u32` pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_constant_v2(
     builder: *mut DagBuilder,
@@ -232,6 +283,11 @@ pub extern "C" fn rssn_dag_constant_v2(
 }
 
 /// Creates an addition node. Status-returning variant.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+/// - `out_id` must be a valid, non-null, writable `u32` pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_add_v2(
     builder: *mut DagBuilder,
@@ -257,6 +313,14 @@ pub extern "C" fn rssn_dag_add_v2(
 /// Executes a previously compiled JIT function. Status-returning variant.
 ///
 /// On `Success`, writes the result to `*out_val`.
+///
+/// # Safety
+///
+/// - `func` must be a valid function pointer previously written by [`rssn_dag_compile`].
+/// - `variables` must be a valid pointer to an array of at least as many `f64` values
+///   as there are variables in the compiled expression, ordered by `SymbolId`.
+/// - `out_val` must be a valid, non-null, writable `f64` pointer.
+/// - All pointers must remain valid for the duration of this call.
 #[cfg(feature = "cranelift-jit")]
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_execute_v2(
@@ -293,6 +357,11 @@ pub extern "C" fn rssn_dag_execute_v2(
 }
 
 /// Simplifies an expression. Status-returning variant.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+/// - `out_id` must be a valid, non-null, writable `u32` pointer.
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_simplify_v2(
     builder: *mut DagBuilder,

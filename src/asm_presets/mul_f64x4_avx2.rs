@@ -42,7 +42,7 @@ pub fn apply(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
                     out = in(reg) out.as_mut_ptr(),
                     out("ymm0") _,
                     out("ymm1") _,
-                    options(nostack),
+                    options(nostack, preserves_flags),
                 );
             }
             return;
@@ -68,7 +68,7 @@ pub fn apply(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
                 out = in(reg) out.as_mut_ptr(),
                 out("v0") _,
                 out("v1") _,
-                options(nostack),
+                options(nostack, preserves_flags),
             );
         }
         return;

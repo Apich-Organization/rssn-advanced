@@ -26,8 +26,9 @@ pub enum AstChildList {
     Three([RelPtr<AstNode>; 3]),
     /// Four children.
     Four([RelPtr<AstNode>; 4]),
-    /// Variadic children (heap spilled).
-    Many(Vec<RelPtr<AstNode>>),
+    /// Variadic children (heap spilled). Box<[T]> saves 8 bytes vs Vec<T>
+    /// (16-byte fat pointer vs 24-byte triple), halving the enum's large-variant cost.
+    Many(Box<[RelPtr<AstNode>]>),
 }
 
 impl AstChildList {
@@ -40,7 +41,7 @@ impl AstChildList {
             Self::Two(_) => 2,
             Self::Three(_) => 3,
             Self::Four(_) => 4,
-            Self::Many(v) => v.len(),
+            Self::Many(v) => v.len(), // Box<[T]> has .len()
         }
     }
 
@@ -59,7 +60,7 @@ impl AstChildList {
             Self::Two(arr) => arr,
             Self::Three(arr) => arr,
             Self::Four(arr) => arr,
-            Self::Many(v) => v,
+            Self::Many(v) => v.as_ref(),
         }
     }
 }
@@ -70,12 +71,17 @@ impl AstChildList {
 /// - Stores its classification (`kind`) and constant value (`value`).
 /// - Tracks the original global `DagNodeId` for metadata lookups.
 /// - Connects to child nodes using relative pointers (`children`).
+///
+/// `value` is meaningful only when `kind == SymbolKind::Constant`; for all
+/// other node kinds it is `0.0`. Using `f64` instead of `Option<f64>` saves
+/// 8 bytes per node (8 vs 16 bytes) (`ast_review §1.1`).
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct AstNode {
     /// The kind/classification of this symbol.
     pub kind: SymbolKind,
-    /// Numeric value if this is a constant node.
-    pub value: Option<f64>,
+    /// Numeric constant value. Meaningful only when `kind == SymbolKind::Constant`;
+    /// guaranteed to be `0.0` for all other kinds.
+    pub value: f64,
     /// Index reference back to the global DAG node.
     pub dag_id: DagNodeId,
     /// Relative pointer offsets to child nodes within the buffer.

@@ -60,41 +60,82 @@ impl SimplifyConfig {
 ///
 /// Under high concurrency, threads updating adjacent memory addresses trigger
 /// false-sharing (cache line invalidations on MESI). This struct aligns memory
-/// boundary to 128 bytes, isolating thread states.
+/// to 128 bytes, placing each thread's state on a fresh cache line.
+///
+/// Tracks three meaningful per-thread metrics (`parallel_review §3.1`):
+/// - `steps_count` — total simplification rounds performed by this thread
+/// - `nodes_visited` — total DAG nodes inspected during traversal
+/// - `rewrites_applied` — total rewrite rules that fired (pattern matches)
 #[derive(Debug)]
 #[repr(align(128))]
 pub struct ThreadLocalState {
-    /// Number of evaluations or simplification steps performed by this thread.
+    /// Total simplification steps (one per [`run_staged_simplification`] round).
     pub steps_count: AtomicU64,
+    /// Total DAG nodes visited across all steps. Useful for throughput profiling.
+    pub nodes_visited: AtomicU64,
+    /// Total rewrite rules that fired. Non-zero means the expression changed.
+    pub rewrites_applied: AtomicU64,
 }
 
 impl Default for ThreadLocalState {
     fn default() -> Self {
         Self {
             steps_count: AtomicU64::new(0),
+            nodes_visited: AtomicU64::new(0),
+            rewrites_applied: AtomicU64::new(0),
         }
     }
 }
 
 impl ThreadLocalState {
-    /// Creates a new instance.
+    /// Creates a new instance with all counters at zero.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             steps_count: AtomicU64::new(0),
+            nodes_visited: AtomicU64::new(0),
+            rewrites_applied: AtomicU64::new(0),
         }
     }
 
-    /// Increments the local operation counter with strict memory ordering.
+    /// Increments the simplification-step counter.
     pub fn increment(&self) {
-        // plan.md §4.2: strict Acquire/Release memory ordering
         self.steps_count.fetch_add(1, Ordering::Release);
     }
 
-    /// Retrieves the local operation count with strict memory ordering.
+    /// Retrieves the simplification-step count.
     #[must_use]
     pub fn get_count(&self) -> u64 {
         self.steps_count.load(Ordering::Acquire)
+    }
+
+    /// Records that `n` additional DAG nodes were visited.
+    pub fn record_nodes_visited(&self, n: u64) {
+        self.nodes_visited.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Records that `n` rewrite rules fired.
+    pub fn record_rewrites(&self, n: u64) {
+        self.rewrites_applied.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Returns the total number of nodes visited.
+    #[must_use]
+    pub fn get_nodes_visited(&self) -> u64 {
+        self.nodes_visited.load(Ordering::Relaxed)
+    }
+
+    /// Returns the total number of rewrites applied.
+    #[must_use]
+    pub fn get_rewrites_applied(&self) -> u64 {
+        self.rewrites_applied.load(Ordering::Relaxed)
+    }
+
+    /// Resets all counters to zero.
+    pub fn reset(&self) {
+        self.steps_count.store(0, Ordering::Release);
+        self.nodes_visited.store(0, Ordering::Relaxed);
+        self.rewrites_applied.store(0, Ordering::Relaxed);
     }
 }
 

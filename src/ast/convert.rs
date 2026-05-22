@@ -124,7 +124,7 @@ fn push_dag_frame(
     let arity = node.children.len();
     projection.nodes.push(AstNode {
         kind: node.kind,
-        value: node.value,
+        value: node.value.unwrap_or(0.0), // DagNode.value is Option<f64>; 0.0 for non-constants
         dag_id,
         children: AstChildList::Empty,
     });
@@ -154,7 +154,7 @@ fn backpatch_children(projection: &mut AstProjection, ast_idx: usize, child_indi
         2 => AstChildList::Two([ptrs[0], ptrs[1]]),
         3 => AstChildList::Three([ptrs[0], ptrs[1], ptrs[2]]),
         4 => AstChildList::Four([ptrs[0], ptrs[1], ptrs[2], ptrs[3]]),
-        _ => AstChildList::Many(ptrs),
+        _ => AstChildList::Many(ptrs.into_boxed_slice()),
     };
 }
 
@@ -248,7 +248,7 @@ fn build_dag_node(
         return DagNodeId::NONE;
     };
     match ast_node.kind {
-        SymbolKind::Constant => builder.constant(ast_node.value.unwrap_or(0.0)),
+        SymbolKind::Constant => builder.constant(ast_node.value),
         SymbolKind::Variable(sym_id) => {
             // Round-trip the variable through the builder's registry. If the
             // SymbolId isn't in the new registry (cross-builder conversion),
@@ -269,6 +269,7 @@ fn build_dag_node(
             OpKind::Sub if child_ids.len() == 2 => builder.sub(child_ids[0], child_ids[1]),
             OpKind::Mul if child_ids.len() == 2 => builder.mul(child_ids[0], child_ids[1]),
             OpKind::Div if child_ids.len() == 2 => builder.div(child_ids[0], child_ids[1]),
+            OpKind::Mod if child_ids.len() == 2 => builder.modulo(child_ids[0], child_ids[1]),
             OpKind::Pow if child_ids.len() == 2 => builder.pow(child_ids[0], child_ids[1]),
             OpKind::Neg if child_ids.len() == 1 => builder.neg(child_ids[0]),
             _ => DagNodeId::NONE,

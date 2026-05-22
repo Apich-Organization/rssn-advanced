@@ -18,6 +18,11 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+// Using AtomicU64 values lets the read-lock fast path increment without
+// upgrading to a write lock. Write lock is only needed for new-key insertion.
+// This cuts lock contention on the hot path from write-every-access to
+// write-on-first-access-per-key.
+
 use crate::dag::node::DagNodeId;
 
 /// Number of independent shards. Picked to be ≥ a typical core count
@@ -32,7 +37,7 @@ pub const NUM_SHARDS: usize = 32;
 #[derive(Debug, Default)]
 #[repr(align(128))]
 struct Shard {
-    frequencies: RwLock<HashMap<DagNodeId, u64>>,
+    frequencies: RwLock<HashMap<DagNodeId, AtomicU64>>,
     /// Per-shard total accesses (sum of frequency values written).
     /// Useful for cheap whole-table aggregates without taking every
     /// `RwLock`. Uses Acquire/Release ordering per `plan.md §4.2`.
@@ -98,13 +103,32 @@ impl DynamicHotspotTable {
     /// just noise.
     pub fn record_access(&self, id: DagNodeId) {
         let shard = self.shard(id);
+
+        // Fast path: key already exists — increment atomically under read lock.
+        // No write lock needed since AtomicU64::fetch_add is thread-safe without
+        // exclusive access to the HashMap.
+        {
+            let guard = shard
+                .frequencies
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(counter) = guard.get(&id) {
+                counter.fetch_add(1, Ordering::Relaxed);
+                shard.total_accesses.fetch_add(1, Ordering::Release);
+                return;
+            }
+        }
+
+        // Slow path: new key — acquire write lock and insert. Re-check under
+        // write lock so two concurrent slow-path callers don't double-insert.
         let mut guard = shard
             .frequencies
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let count = guard.entry(id).or_insert(0);
-        *count += 1;
-        drop(guard);
+        guard
+            .entry(id)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
         shard.total_accesses.fetch_add(1, Ordering::Release);
     }
 
@@ -116,7 +140,7 @@ impl DynamicHotspotTable {
             .frequencies
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.get(&id).copied().unwrap_or(0)
+        guard.get(&id).map_or(0, |c| c.load(Ordering::Relaxed))
     }
 
     /// Returns whether the access count for `id` meets or exceeds the `threshold`.
@@ -147,7 +171,7 @@ impl DynamicHotspotTable {
                 .frequencies
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            out.extend(guard.iter().map(|(k, v)| (*k, *v)));
+            out.extend(guard.iter().map(|(k, v)| (*k, v.load(Ordering::Relaxed))));
         }
         out
     }

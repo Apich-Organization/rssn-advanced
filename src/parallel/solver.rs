@@ -189,6 +189,11 @@ fn apply_op(op: OpKind, child_vals: &[f64]) -> f64 {
             // JIT path. Returning 0.0 or using EPSILON threshold masks bugs.
             if rhs == 0.0 { f64::NAN } else { lhs / rhs }
         }
+        OpKind::Mod => {
+            let lhs = child_vals.first().copied().unwrap_or(0.0);
+            let rhs = child_vals.get(1).copied().unwrap_or(1.0);
+            if rhs == 0.0 { f64::NAN } else { lhs % rhs }
+        }
         OpKind::Pow => {
             let base = child_vals.first().copied().unwrap_or(0.0);
             let exp = child_vals.get(1).copied().unwrap_or(0.0);

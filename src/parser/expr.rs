@@ -26,7 +26,7 @@ pub const MAX_PAREN_DEPTH: u16 = 200;
 const fn op_precedence(op: char) -> Option<u8> {
     match op {
         '+' | '-' => Some(1),
-        '*' | '/' => Some(2),
+        '*' | '/' | '%' => Some(2),
         '^' => Some(3),
         _ => None,
     }
@@ -172,6 +172,7 @@ fn parse_expr_climbing<'a>(
             '-' => builder.sub(lhs, rhs),
             '*' => builder.mul(lhs, rhs),
             '/' => builder.div(lhs, rhs),
+            '%' => builder.modulo(lhs, rhs),
             '^' => builder.pow(lhs, rhs),
             _ => return Err(too_deep(input)),
         };

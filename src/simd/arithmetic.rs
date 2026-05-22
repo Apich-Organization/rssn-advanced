@@ -344,6 +344,53 @@ pub fn batch_fma(
     Ok(())
 }
 
+// =========================================================================
+// JIT + SIMD bridge (simd_review §3.1)
+// =========================================================================
+
+/// Evaluates a JIT-compiled expression for each row of `var_sets`.
+///
+/// `var_sets` is a **row-major** matrix with `results.len()` rows and
+/// `num_vars` columns. `results[i]` receives `func(&var_sets[i * num_vars..])`.
+///
+/// This bridges the JIT single-eval path with batch processing patterns:
+/// callers can tabulate a compiled expression over a grid of inputs, run
+/// Monte Carlo sampling, or compare the JIT path to a SIMD-vectorized path
+/// by stacking this with [`batch_add`] / [`batch_mul`] on the result slice.
+///
+/// # Errors
+///
+/// Returns [`BatchError::LengthMismatch`] when
+/// `var_sets.len() != results.len() * num_vars`.
+#[cfg(feature = "cranelift-jit")]
+pub fn batch_eval(
+    func: crate::jit::compiler::CompiledExprFn,
+    var_sets: &[f64],
+    num_vars: usize,
+    results: &mut [f64],
+) -> Result<(), BatchError> {
+    let n = results.len();
+    if var_sets.len() != n.saturating_mul(num_vars) {
+        return Err(BatchError::LengthMismatch);
+    }
+    for (i, out) in results.iter_mut().enumerate() {
+        *out = func(var_sets[i * num_vars..].as_ptr());
+    }
+    Ok(())
+}
+
+/// Non-JIT stub so `batch_eval` compiles without the `cranelift-jit` feature.
+#[cfg(not(feature = "cranelift-jit"))]
+pub fn batch_eval(
+    _func: *const (),
+    _var_sets: &[f64],
+    _num_vars: usize,
+    results: &mut [f64],
+) -> Result<(), BatchError> {
+    let _ = results;
+    Err(BatchError::LengthMismatch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -39,6 +39,10 @@ extern "C" fn jit_powf(base: f64, exp: f64) -> f64 {
     base.powf(exp)
 }
 
+extern "C" fn jit_fmod(lhs: f64, rhs: f64) -> f64 {
+    lhs % rhs
+}
+
 /// Shared registry of custom function pointers, keyed by `FnId.0`.
 ///
 /// Stored as `usize` (not `*const u8`) so the type is `Send`/`Sync`
@@ -101,6 +105,7 @@ impl JitCompiler {
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
 
         builder.symbol("powf", jit_powf as *const u8);
+        builder.symbol("fmod", jit_fmod as *const u8);
 
         // Custom function registry: shared between the JitCompiler
         // and the lookup-fn closure baked into the JITModule. The
@@ -182,6 +187,15 @@ impl JitCompiler {
             .module
             .declare_func_in_func(powf_name, func_builder.func);
 
+        // fmod: same binary signature as powf (two f64 → one f64).
+        let fmod_name = self
+            .module
+            .declare_function("fmod", Linkage::Import, &powf_sig)
+            .map_err(|e| format!("Failed to declare fmod import: {e:?}"))?;
+        let fmod_func_ref = self
+            .module
+            .declare_func_in_func(fmod_name, func_builder.func);
+
         // Walk the AST once and import every distinct custom function
         // it references. Refuse to compile if any referenced id was
         // not registered via `register_custom_function`.
@@ -233,6 +247,7 @@ impl JitCompiler {
             &mut func_builder,
             vars_ptr,
             powf_func_ref,
+            fmod_func_ref,
             &custom_refs,
             &mut self.work_stack,
             &mut self.work_values,
@@ -304,6 +319,7 @@ fn compile_ast_iterative(
     builder: &mut FunctionBuilder<'_>,
     vars_ptr: Value,
     powf_func_ref: cranelift_codegen::ir::FuncRef,
+    fmod_func_ref: cranelift_codegen::ir::FuncRef,
     custom_refs: &HashMap<u32, cranelift_codegen::ir::FuncRef>,
     stack: &mut Vec<Frame>,
     mut values: &mut Vec<Value>,
@@ -363,6 +379,7 @@ fn compile_ast_iterative(
                     builder,
                     vars_ptr,
                     powf_func_ref,
+                    fmod_func_ref,
                     custom_refs,
                     &mut values,
                 )?;
@@ -396,6 +413,7 @@ fn emit_one_node(
     builder: &mut FunctionBuilder<'_>,
     vars_ptr: Value,
     powf_func_ref: cranelift_codegen::ir::FuncRef,
+    fmod_func_ref: cranelift_codegen::ir::FuncRef,
     custom_refs: &HashMap<u32, cranelift_codegen::ir::FuncRef>,
     values: &mut Vec<Value>,
 ) -> Result<(), String> {
@@ -403,8 +421,7 @@ fn emit_one_node(
 
     match node.kind {
         SymbolKind::Constant => {
-            let val = node.value.unwrap_or(0.0);
-            values.push(builder.ins().f64const(val));
+            values.push(builder.ins().f64const(node.value)); // AstNode.value: f64 (not Option)
         }
         SymbolKind::Variable(sym_id) => {
             let val = emit_variable_load(builder, vars_ptr, sym_id.0);
@@ -417,7 +434,7 @@ fn emit_one_node(
             // Take children out in order — the iterative walker pushes
             // left-to-right, so children[0..arity] are already correct.
             let child_vals: Vec<Value> = values.drain(split_at..).collect();
-            let result = emit_operator(builder, op, &child_vals, powf_func_ref, node)?;
+            let result = emit_operator(builder, op, &child_vals, powf_func_ref, fmod_func_ref, node)?;
             values.push(result);
         }
         SymbolKind::Function(fn_id) => {
@@ -474,6 +491,7 @@ fn emit_operator(
     op: OpKind,
     child_vals: &[Value],
     powf_func_ref: cranelift_codegen::ir::FuncRef,
+    fmod_func_ref: cranelift_codegen::ir::FuncRef,
     ast_node: &AstNode,
 ) -> Result<Value, String> {
     use crate::jit::primitives::{simplify_add, simplify_mul};
@@ -572,6 +590,28 @@ fn emit_operator(
                     Ok(builder.inst_results(call)[0])
                 }
             }
+        }
+        OpKind::Mod => {
+            if arity != 2 {
+                return Err("Mod operator must have exactly 2 children".to_owned());
+            }
+            let lhs = child_vals[0];
+            let rhs = child_vals[1];
+            if let (Some(lval), Some(rval)) = (constants[0], constants[1]) {
+                let result = if rval == 0.0 { f64::NAN } else { lval % rval };
+                return Ok(builder.ins().f64const(result));
+            }
+            if constants[1] == Some(0.0) {
+                return Ok(builder.ins().f64const(f64::NAN));
+            }
+            // Cranelift has no native frem for f64; call jit_fmod helper.
+            // Guard runtime zero-denominator with select(rhs==0, NaN, fmod(lhs,rhs)).
+            let zero = builder.ins().f64const(0.0);
+            let nan_val = builder.ins().f64const(f64::NAN);
+            let is_zero = builder.ins().fcmp(FloatCC::Equal, rhs, zero);
+            let call = builder.ins().call(fmod_func_ref, &[lhs, rhs]);
+            let rem_result = builder.inst_results(call)[0];
+            Ok(builder.ins().select(is_zero, nan_val, rem_result))
         }
         OpKind::Neg => {
             if arity != 1 {

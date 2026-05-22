@@ -222,6 +222,9 @@ fn rebuild_or_match(
         SymbolKind::Operator(crate::dag::symbol::OpKind::Pow) if new_children.len() == 2 => {
             builder.pow(new_children[0], new_children[1])
         }
+        SymbolKind::Operator(crate::dag::symbol::OpKind::Mod) if new_children.len() == 2 => {
+            builder.modulo(new_children[0], new_children[1])
+        }
         SymbolKind::Operator(crate::dag::symbol::OpKind::Neg) if new_children.len() == 1 => {
             builder.neg(new_children[0])
         }
