@@ -1,16 +1,13 @@
 //! `coef_merge_f64x4` — symbolic coefficient merge kernel.
 //!
-//! Implements `(c1*c2) * (x*y)` over 4-lane `f64` inputs in a single
-//! pass:
+//! Implements `out[i] = (c1[i] * c2[i]) * (x[i] * y[i])` over 4-lane
+//! `f64` inputs in a single pass — the kernel the JIT calls when fusing
+//! nested products `(c1*x)*(c2*y)` (`jit_review §1`, `plan.md §3.1`).
 //!
-//! ```text
-//!   out[i] = (c1[i] * c2[i]) * (x[i] * y[i])
-//! ```
-//!
-//! This is the kernel the JIT calls when fusing nested products
-//! `(c1*x)*(c2*y)` — see `jit_review §1` (coefficient merging) and
-//! `plan.md §3.1`. On `x86_64` with FMA we collapse the two multiplies
-//! into one `vfmadd213pd` flow; without FMA we use two `vmulpd`s.
+//! * x86_64 + AVX2: three `vmulpd ymm` ops (256-bit each).
+//! * AArch64: three `fmul v.2d` NEON ops × 2 128-bit rounds (NEON mandatory).
+//! * riscv64 + RVV: three `vfmul.vv` ops with `vsetvli` for 4×f64.
+//! * fallback: scalar loop.
 
 #![allow(unsafe_code)]
 
@@ -63,6 +60,77 @@ pub fn apply(c1: &[f64], c2: &[f64], x: &[f64], y: &[f64], out: &mut [f64]) {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: lengths checked above; NEON is mandatory on AArch64.
+        // Operands xs/ys alias the x/y parameters to avoid shadowing issues.
+        unsafe {
+            use core::arch::asm;
+            asm!(
+                "ld1 {{v0.2d}}, [{c1}]",
+                "ld1 {{v1.2d}}, [{c2}]",
+                "ld1 {{v2.2d}}, [{xs}]",
+                "ld1 {{v3.2d}}, [{ys}]",
+                "fmul v0.2d, v0.2d, v1.2d",
+                "fmul v2.2d, v2.2d, v3.2d",
+                "fmul v0.2d, v0.2d, v2.2d",
+                "st1 {{v0.2d}}, [{out}]",
+                "ld1 {{v0.2d}}, [{c1}, #16]",
+                "ld1 {{v1.2d}}, [{c2}, #16]",
+                "ld1 {{v2.2d}}, [{xs}, #16]",
+                "ld1 {{v3.2d}}, [{ys}, #16]",
+                "fmul v0.2d, v0.2d, v1.2d",
+                "fmul v2.2d, v2.2d, v3.2d",
+                "fmul v0.2d, v0.2d, v2.2d",
+                "st1 {{v0.2d}}, [{out}, #16]",
+                c1 = in(reg) c1.as_ptr(),
+                c2 = in(reg) c2.as_ptr(),
+                xs = in(reg) x.as_ptr(),
+                ys = in(reg) y.as_ptr(),
+                out = in(reg) out.as_mut_ptr(),
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+                out("v3") _,
+                options(nostack),
+            );
+        }
+        return;
+    }
+
+    #[cfg(all(target_arch = "riscv64", target_feature = "v"))]
+    {
+        // SAFETY: lengths checked above; RVV activated via target_feature = "v".
+        unsafe {
+            use core::arch::asm;
+            asm!(
+                "li t0, 4",
+                "vsetvli t0, t0, e64, m1, ta, ma",
+                "vle64.v v0, ({c1})",
+                "vle64.v v1, ({c2})",
+                "vle64.v v2, ({xs})",
+                "vle64.v v3, ({ys})",
+                "vfmul.vv v0, v0, v1",
+                "vfmul.vv v2, v2, v3",
+                "vfmul.vv v0, v0, v2",
+                "vse64.v v0, ({out})",
+                c1 = in(reg) c1.as_ptr(),
+                c2 = in(reg) c2.as_ptr(),
+                xs = in(reg) x.as_ptr(),
+                ys = in(reg) y.as_ptr(),
+                out = in(reg) out.as_mut_ptr(),
+                out("t0") _,
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+                out("v3") _,
+                options(nostack),
+            );
+        }
+        return;
+    }
+
+    // Scalar fallback.
     for i in 0..4 {
         out[i] = (c1[i] * c2[i]) * (x[i] * y[i]);
     }

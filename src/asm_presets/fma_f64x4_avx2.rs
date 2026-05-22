@@ -1,8 +1,13 @@
-//! `fma_f64x4_avx2` — fused multiply-add `out = a * b + c` via `vfmadd231pd`.
+//! `fma_f64x4_avx2` — fused multiply-add `out = a * b + c`.
 //!
 //! Single-rounding FMA is what `plan.md §3.1` calls out for coefficient
 //! merging hot paths; the scalar fallback uses `f64::mul_add` so the
 //! semantics match on both branches.
+//!
+//! * x86_64 + AVX2 + FMA: `vfmadd231pd ymm` (256-bit, single rounding).
+//! * AArch64: two `fmla v.2d` NEON ops (`Vd += Va * Vb`, NEON mandatory).
+//! * riscv64 + RVV: `vfmacc.vv` (`vd += vs1 * vs2`).
+//! * fallback: `f64::mul_add` scalar loop.
 
 #![allow(unsafe_code)]
 
@@ -45,9 +50,67 @@ pub fn apply(a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]) {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: lengths checked above; NEON is mandatory on AArch64.
+        // `fmla Vd.2d, Vn.2d, Vm.2d` computes Vd += Vn * Vm (single rounding).
+        unsafe {
+            use core::arch::asm;
+            asm!(
+                "ld1 {{v0.2d}}, [{a}]",
+                "ld1 {{v1.2d}}, [{b}]",
+                "ld1 {{v2.2d}}, [{c}]",
+                "fmla v2.2d, v0.2d, v1.2d",
+                "st1 {{v2.2d}}, [{out}]",
+                "ld1 {{v0.2d}}, [{a}, #16]",
+                "ld1 {{v1.2d}}, [{b}, #16]",
+                "ld1 {{v2.2d}}, [{c}, #16]",
+                "fmla v2.2d, v0.2d, v1.2d",
+                "st1 {{v2.2d}}, [{out}, #16]",
+                a = in(reg) a.as_ptr(),
+                b = in(reg) b.as_ptr(),
+                c = in(reg) c.as_ptr(),
+                out = in(reg) out.as_mut_ptr(),
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+                options(nostack),
+            );
+        }
+        return;
+    }
+
+    #[cfg(all(target_arch = "riscv64", target_feature = "v"))]
+    {
+        // SAFETY: lengths checked above; RVV activated via target_feature = "v".
+        // `vfmacc.vv vd, vs1, vs2` computes vd += vs1 * vs2 (single rounding).
+        unsafe {
+            use core::arch::asm;
+            asm!(
+                "li t0, 4",
+                "vsetvli t0, t0, e64, m1, ta, ma",
+                "vle64.v v0, ({a})",
+                "vle64.v v1, ({b})",
+                "vle64.v v2, ({c})",
+                "vfmacc.vv v2, v0, v1",
+                "vse64.v v2, ({out})",
+                a = in(reg) a.as_ptr(),
+                b = in(reg) b.as_ptr(),
+                c = in(reg) c.as_ptr(),
+                out = in(reg) out.as_mut_ptr(),
+                out("t0") _,
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+                options(nostack),
+            );
+        }
+        return;
+    }
+
     for i in 0..4 {
         // `mul_add` requests single-rounding semantics that match
-        // `vfmadd231pd` exactly on hardware with FMA.
+        // `vfmadd231pd` / `fmla` / `vfmacc.vv` exactly on FMA hardware.
         out[i] = a[i].mul_add(b[i], c[i]);
     }
 }

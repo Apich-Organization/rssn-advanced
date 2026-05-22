@@ -1,4 +1,9 @@
-//! `mul_f64x4_avx2` — packed `f64x4` multiplication via `vmulpd`.
+//! `mul_f64x4_avx2` — packed `f64x4` multiplication.
+//!
+//! * x86_64 + AVX2: `vmulpd ymm` (256-bit, 4 lanes).
+//! * AArch64: two `fmul v.2d` NEON ops (NEON mandatory).
+//! * riscv64 + RVV: `vfmul.vv` with `vsetvli` for 4×f64.
+//! * fallback: scalar loop.
 
 #![allow(unsafe_code)]
 
@@ -38,6 +43,56 @@ pub fn apply(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: lengths checked above; NEON is mandatory on AArch64.
+        unsafe {
+            use core::arch::asm;
+            asm!(
+                "ld1 {{v0.2d}}, [{lhs}]",
+                "ld1 {{v1.2d}}, [{rhs}]",
+                "fmul v0.2d, v0.2d, v1.2d",
+                "st1 {{v0.2d}}, [{out}]",
+                "ld1 {{v0.2d}}, [{lhs}, #16]",
+                "ld1 {{v1.2d}}, [{rhs}, #16]",
+                "fmul v0.2d, v0.2d, v1.2d",
+                "st1 {{v0.2d}}, [{out}, #16]",
+                lhs = in(reg) lhs.as_ptr(),
+                rhs = in(reg) rhs.as_ptr(),
+                out = in(reg) out.as_mut_ptr(),
+                out("v0") _,
+                out("v1") _,
+                options(nostack),
+            );
+        }
+        return;
+    }
+
+    #[cfg(all(target_arch = "riscv64", target_feature = "v"))]
+    {
+        // SAFETY: lengths checked above; RVV activated via target_feature = "v".
+        unsafe {
+            use core::arch::asm;
+            asm!(
+                "li t0, 4",
+                "vsetvli t0, t0, e64, m1, ta, ma",
+                "vle64.v v0, ({lhs})",
+                "vle64.v v1, ({rhs})",
+                "vfmul.vv v0, v0, v1",
+                "vse64.v v0, ({out})",
+                lhs = in(reg) lhs.as_ptr(),
+                rhs = in(reg) rhs.as_ptr(),
+                out = in(reg) out.as_mut_ptr(),
+                out("t0") _,
+                out("v0") _,
+                out("v1") _,
+                options(nostack),
+            );
+        }
+        return;
+    }
+
+    // Scalar fallback.
     for i in 0..4 {
         out[i] = lhs[i] * rhs[i];
     }

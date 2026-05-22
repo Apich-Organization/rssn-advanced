@@ -1,13 +1,17 @@
-//! `hash_u64x2_aesni` — fast 128-bit AES-NI based hash mix.
+//! `hash_u64x2_aesni` — fast 128-bit hardware-AES hash mix.
 //!
-//! Mixes two `u64` lanes with a single round of `aesenc`. The result is
+//! Mixes two `u64` lanes via one AES encryption round. The result is
 //! suitable as a structural-hash kernel for the dedup map (`dag_review`,
 //! `simd_review §2.2`) — *not* cryptographically secure but extremely
 //! fast and avalanche-friendly enough for hash-cons buckets.
 //!
-//! Used by [`crate::dag::dedup`]'s rapidhash glue when the host has
-//! AES-NI; otherwise a scalar mix via `wrapping_mul` provides identical
-//! semantics with no SIMD.
+//! * x86_64 + AES-NI: `aesenc xmm` (single round, checked at runtime).
+//! * AArch64 + crypto ext: `aese v.16b` + `aesmc v.16b`. On Apple Silicon
+//!   (M1+, `target_vendor = "apple"`) AES is mandatory so the runtime check
+//!   is elided at compile time; other AArch64 hosts probe via
+//!   `is_aarch64_feature_detected!`.
+//! * riscv64: scalar xor-mix (no stable RVV crypto asm available).
+//! * fallback: scalar multiplicative xor-mix.
 
 #![allow(unsafe_code)]
 
@@ -66,9 +70,55 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
         }
     }
 
-    // Scalar fallback: a classic multiplicative xor-mix. Constants
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Apple Silicon (M1+) mandates AES as part of its ARMv8.4-A+ baseline —
+        // skip the runtime sysctlbyname probe. All other AArch64 targets query
+        // the OS at runtime via `is_aarch64_feature_detected!`.
+        #[cfg(target_vendor = "apple")]
+        let has_aes = true;
+        #[cfg(not(target_vendor = "apple"))]
+        let has_aes = std::arch::is_aarch64_feature_detected!("aes");
+
+        if has_aes {
+            // Same FNV-derived round key as the x86 path.
+            const RK_LO: u64 = 0xcbf2_9ce4_8422_2325;
+            const RK_HI: u64 = 0x1000_0000_01b3_0000;
+            let lo: u64;
+            let hi: u64;
+            // SAFETY: AES extension guaranteed (Apple) or detected (other AArch64).
+            // `fmov Dd, Xn` is a GP→NEON bitwise move (no float conversion).
+            // `ins Vd.D[i], Xn` inserts a GP register into a vector lane.
+            // `aese` + `aesmc` together form one full AES-128 round.
+            unsafe {
+                use core::arch::asm;
+                asm!(
+                    "fmov d0, {lhs}",
+                    "ins v0.d[1], {rhs}",
+                    "fmov d1, {rk_lo}",
+                    "ins v1.d[1], {rk_hi}",
+                    "aese v0.16b, v1.16b",
+                    "aesmc v0.16b, v0.16b",
+                    "umov {lo}, v0.d[0]",
+                    "umov {hi}, v0.d[1]",
+                    lhs = in(reg) lhs,
+                    rhs = in(reg) rhs,
+                    rk_lo = in(reg) RK_LO,
+                    rk_hi = in(reg) RK_HI,
+                    lo = out(reg) lo,
+                    hi = out(reg) hi,
+                    out("v0") _,
+                    out("v1") _,
+                    options(nostack, pure, nomem),
+                );
+            }
+            return (lo, hi);
+        }
+    }
+
+    // Scalar fallback (also covers riscv64 and non-crypto AArch64): a classic multiplicative xor-mix. Constants
     // declared at the function top so the items-after-statements lint
-    // is satisfied even when the AES path is excluded.
+    // is satisfied even when all hardware paths are excluded.
     let mut x = lhs.wrapping_mul(MIX) ^ rhs;
     let mut y = rhs.wrapping_mul(MIX) ^ lhs;
     x ^= x >> 27;

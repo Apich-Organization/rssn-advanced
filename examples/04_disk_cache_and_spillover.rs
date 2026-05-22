@@ -48,7 +48,7 @@ fn main() {
     // Only variables, leaf defaults, and nodes with freq >= 2 are preserved
     println!("Evicting cold nodes (frequency < 2) to reclaim memory...");
     let compacted_arena = evict_cold_nodes(builder.arena(), &hotspots, 2);
-    println!("  Compacted DagArena node count  : {}\n", compacted_arena.len());
+    println!("  Compacted DagArena node count  : {}\n", compacted_arena.arena.len());
 
     // 3. Disk Cache spilling and restoring
     let cache_dir = PathBuf::from("./example_spillover_cache");
@@ -58,7 +58,7 @@ fn main() {
     // Spill the current compacted arena to disk cache
     let key = "partition_block_42";
     println!("Spilling compacted arena to disk with key: '{}'...", key);
-    disk_cache.spill(key, &compacted_arena)
+    disk_cache.spill(key, &compacted_arena.arena)
         .expect("Failed to spill arena to disk");
     println!("  Arena successfully serialized and spilled to disk.");
 

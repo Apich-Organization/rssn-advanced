@@ -1,9 +1,12 @@
-//! `cmp_eq_f64x4` — packed `f64x4` equality test via `vcmppd`.
+//! `cmp_eq_f64x4` — packed `f64x4` equality test.
 //!
-//! Returns a 4-lane boolean mask. Each result byte is `0xFF` if the
-//! corresponding lanes are bitwise equal *as f64*, `0x00` otherwise.
-//! Note: `NaN == NaN` returns false (IEEE 754), matching the scalar
-//! Rust semantics of `==` on `f64`.
+//! Returns a 4-lane boolean mask: `0xFF` per lane if equal, `0x00`
+//! otherwise. `NaN == NaN` is false (IEEE 754), matching Rust `==`.
+//!
+//! * x86_64 + AVX2: `vcmpeqpd ymm` + `vmovmskpd` to collapse sign bits.
+//! * AArch64: two `fcmeq v.2d` + `umov` to extract lane masks (NEON mandatory).
+//! * riscv64: scalar (RVV predicate-mask expansion is overly complex for 4 lanes).
+//! * fallback: scalar `==` loop.
 
 #![allow(unsafe_code)]
 
@@ -51,6 +54,45 @@ pub fn apply(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) {
             }
             return;
         }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: lengths checked above; NEON is mandatory on AArch64.
+        // `fcmeq` sets each 64-bit lane to all-ones (!=0) if equal, all-zeros (0) otherwise.
+        let m0: u64;
+        let m1: u64;
+        let m2: u64;
+        let m3: u64;
+        unsafe {
+            use core::arch::asm;
+            asm!(
+                "ld1 {{v0.2d}}, [{lhs}]",
+                "ld1 {{v1.2d}}, [{rhs}]",
+                "fcmeq v0.2d, v0.2d, v1.2d",
+                "umov {m0}, v0.d[0]",
+                "umov {m1}, v0.d[1]",
+                "ld1 {{v0.2d}}, [{lhs}, #16]",
+                "ld1 {{v1.2d}}, [{rhs}, #16]",
+                "fcmeq v0.2d, v0.2d, v1.2d",
+                "umov {m2}, v0.d[0]",
+                "umov {m3}, v0.d[1]",
+                lhs = in(reg) lhs.as_ptr(),
+                rhs = in(reg) rhs.as_ptr(),
+                m0 = out(reg) m0,
+                m1 = out(reg) m1,
+                m2 = out(reg) m2,
+                m3 = out(reg) m3,
+                out("v0") _,
+                out("v1") _,
+                options(nostack, readonly),
+            );
+        }
+        let lane_bits = [m0, m1, m2, m3];
+        for (slot, &bits) in mask.iter_mut().zip(lane_bits.iter()) {
+            *slot = if bits != 0 { 0xFF } else { 0x00 };
+        }
+        return;
     }
 
     // Bitwise equality on f64 is intentional: callers want IEEE-754

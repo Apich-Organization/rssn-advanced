@@ -48,7 +48,7 @@ fn main() {
     let config = HeuristicConfig::default();
     let engine = HeuristicEngine::new(config, SearchStrategy::Greedy);
     
-    let simplified_id = engine.simplify(builder.arena_mut(), root_id);
+    let simplified_id = engine.simplify(&mut builder, root_id);
     println!("Simplification completed.");
     println!("  Original root node index       : {:?}", root_id);
     println!("  Simplified root node index     : {:?}", simplified_id);
