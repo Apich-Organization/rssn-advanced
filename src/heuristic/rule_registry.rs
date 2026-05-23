@@ -24,7 +24,7 @@ pub type RuleFn = Box<dyn Fn(&mut DagBuilder, SymbolKind, &[DagNodeId]) -> Optio
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use rssn_advanced::heuristic::rule_registry::RuleRegistry;
 /// use rssn_advanced::dag::symbol::{SymbolKind, OpKind};
 ///
