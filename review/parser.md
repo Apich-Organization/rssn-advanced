@@ -1,4 +1,4 @@
-# Module Review: `parser` (Phase 4 Audit)
+# Module Review: `parser` (Phase 5 Audit)
 
 ## 1. Performance
 
@@ -8,5 +8,5 @@
 
 ## 2. Extensibility
 
-### 2.1 Static Precedence
-- **Sharp Question:** Users can now register custom rewrite rules and JIT functions, but they can't use them in strings because the parser's operator set is hardcoded. How does a user parse `sin(x) dot y` if `dot` is a custom operator? Is the parser becoming the bottleneck for high-level usability?
+### 2.2 Unary Extension
+- **Sharp Question:** We have a `PrecedenceTable` for infix operators, but `parse_atom` has a hardcoded `-` handler. How does a user register a custom unary operator (e.g., `!x`, `~x`) or a custom prefix/postfix operator without modifying `expr.rs`?

@@ -1,12 +1,11 @@
-# Module Review: `ffi` (Phase 4 Audit)
+# Module Review: `ffi` (Phase 5 Audit)
 
-## 1. Design Integrity
+## 2. Design Integrity
 
-### 1.1 Compiler Re-initialization
-`rssn_dag_compile` still instantiates a new `JitCompiler` for every call.
-- **Sharp Question:** We have `jit_context.rs` with a persistent context. Why is the main `c_api.rs` entry point still ignoring it? Are we forcing C users to learn two different ways to compile just to get decent performance?
+### 2.1 Compiler Re-initialization
+- **Sharp Question:** `rssn_dag_compile` still instantiates a new `JitCompiler` for every call, ignoring the `RssnJitContext`. Why are we keeping a known inefficient entry point in our public API? Is it purely for users who "don't care about performance," and if so, is that the right audience for a library called `rssn-advanced`?
 
-## 2. Sharp Questions
+## 3. Sharp Questions
 
-### 2.1 Error Propagation
-- **Sharp Question:** We have a rich `RssnStatus` enum(which need to be incorperated with the error mudule way), but our internal `error` module uses 7 different enums with `cold_*` constructors. Is the FFI status code a "lossy conversion" of our internal error state, and if so, how does a C developer debug a `CompilationError` without the internal context?
+### 3.1 Error Context
+- **Sharp Question:** We have a rich `RssnStatus` enum, but our internal `error` module uses 7 different enums with `cold_*` constructors. Is the FFI status code a "lossy conversion" of our internal error state, and if so, how does a C developer debug a `CompilationError` without the internal context?

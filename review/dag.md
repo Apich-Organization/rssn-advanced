@@ -1,13 +1,13 @@
-# Module Review: `dag` (Phase 4 Audit)
+# Module Review: `dag` (Phase 5 Audit)
 
-## 1. Extensibility
+## 2. Extensibility
 
-### 1.1 Pluggable Operators
-While `OpKind` remains a closed enum for the most common operations, the JIT and Parallel engines now support `SymbolKind::Function` with user-defined native callbacks and arity.
-- **Sharp Question:** If we have a high-performance "Function" path for custom logic, why do we still need a hardcoded `OpKind` at all? Could the built-in operators be treated as pre-registered "intrinsic" functions to simplify the core engine and make it truly "pluggable"?
+### 2.1 Pluggable Operators
+`OpKind` remains a closed enum, but `SymbolKind::Function` now supports user-defined native callbacks.
+- **Sharp Question:** We still have a hardcoded `OpKind` enum. If `FnId` `0..=6` are reserved for these operators, why is `OpKind` still a distinct type rather than a set of "Intrinsic" constants in a unified `FnId` space? Are we keeping this duality only for the convenience of `match` statements, at the cost of architectural purity?
 
-## 2. Correctness
+## 3. Correctness
 
-### 2.1 `CANONICAL` Flag Inconsistency
-The `HeuristicEngine` now uses the `CANONICAL` bit in `NodeMetadata` to skip redundant work, but it still maintains a transient `HashSet` for safety during a single call.
-- **Sharp Question:** If a node is marked `CANONICAL` and then its children are evicted or changed in a separate arena, does the bit become a "lie"? How do we ensure the `CANONICAL` bit remains globally valid in a system with streaming storage and multiple builders?
+### 3.1 `CANONICAL` Flag Inconsistency
+The `HeuristicEngine` uses the `CANONICAL` bit, and `PackedArenaImage` now includes a `rule_fingerprint` to detect when these bits are stale.
+- **Sharp Question:** Clearing `CANONICAL` bits on fingerprint mismatch is a "safety" feature, but it's an all-or-nothing approach. In a world of incremental updates, is there a way to clear only the bits affected by a *specific* rule change, or is global invalidation the only way to avoid mathematical "ghosts"?
