@@ -411,13 +411,17 @@ impl JitCompiler {
         Ok(compiled_fn)
     }
 
-    /// Compiles a vectorized (2× unrolled scalar) batch evaluation function.
+    /// Compiles a vectorized batch evaluation function using true F64X2 SIMD.
     ///
     /// Returns `None` if the expression is not vectorizable (contains `Mod`,
     /// non-expandable `Pow`, or user `Function` nodes).
     ///
     /// The returned function operates on column-major data: each variable
     /// has its own contiguous column of `f64` values. See [`CompiledBatchFn`].
+    ///
+    /// The vec_body block processes 2 rows per iteration using genuine F64X2
+    /// SIMD (one load/store of 16 bytes per variable column), with a scalar
+    /// tail for any odd final row.
     ///
     /// # Errors
     /// Returns a [`crate::error::JitError`] if Cranelift compilation fails.
@@ -510,68 +514,46 @@ impl JitCompiler {
         func_builder.ins().brif(can_vec, vec_body, &[i_lc_ba], scalar_check, &[i_lc_ba]);
         // loop_check has back-edge from vec_body — seal after vec_body is built.
 
-        // ── vec_body(i) ────────────────────────────────────────────────────
-        // Implements 2× unrolled scalar: two independent SSA paths for rows i
-        // and i+1. This achieves the same throughput as F64X2 SIMD via ILP
-        // without requiring SIMD types (avoiding Cranelift F64X2 API issues).
+        // ── vec_body(i) ─────────────────────────────────────────────────────
+        // True F64X2 SIMD: loads 16 bytes (2 f64s) per variable in one
+        // instruction, evaluates the full expression tree on F64X2 values,
+        // and stores 16 bytes of results.
         func_builder.switch_to_block(vec_body);
         let i_vb = func_builder.block_params(vec_body)[0];
 
-        // Compute byte offsets: i*8 and (i+1)*8
-        let byte_off_0 = func_builder.ins().ishl_imm(i_vb, 3);
-        let one_i = func_builder.ins().iconst(ptr_type, 1);
-        let i_plus1 = func_builder.ins().iadd(i_vb, one_i);
-        let byte_off_1 = func_builder.ins().ishl_imm(i_plus1, 3);
-
-        // Load variable values for both rows.
+        // Byte offset of row i: i * 8
+        let byte_off_vec = func_builder.ins().ishl_imm(i_vb, 3);
         let ptr_size = i64::try_from(ptr_type.bytes()).unwrap_or(8);
-        let mut var_vals_0: HashMap<u32, Value> = HashMap::new();
-        let mut var_vals_1: HashMap<u32, Value> = HashMap::new();
+
+        // Load F64X2 values for each variable: reads f64[i] and f64[i+1] in one load.
+        let mut var_vals_vec: HashMap<u32, Value> = HashMap::new();
         for &sid in &sym_ids {
             let col_offset = func_builder.ins().iconst(ptr_type,
                 i64::from(sid).wrapping_mul(ptr_size));
             let col_ptr_addr = func_builder.ins().iadd(vars_cols_val, col_offset);
             let col_ptr = func_builder.ins().load(ptr_type, MemFlags::new(), col_ptr_addr, 0);
-            let addr_0 = func_builder.ins().iadd(col_ptr, byte_off_0);
-            let addr_1 = func_builder.ins().iadd(col_ptr, byte_off_1);
-            let v0 = func_builder.ins().load(types::F64, MemFlags::new(), addr_0, 0);
-            let v1 = func_builder.ins().load(types::F64, MemFlags::new(), addr_1, 0);
-            var_vals_0.insert(sid, v0);
-            var_vals_1.insert(sid, v1);
+            let elem_addr = func_builder.ins().iadd(col_ptr, byte_off_vec);
+            // Load 16 bytes = two consecutive f64 values = F64X2 vector
+            let vec_val = func_builder.ins().load(
+                types::F64X2, MemFlags::new(), elem_addr, 0);
+            var_vals_vec.insert(sid, vec_val);
         }
 
+        // The powf func_ref is not used in vectorizable expressions (all Pow nodes
+        // are expanded via IntPow/Sqrt/NegIntPow), but we need a placeholder.
         let powf_func_ref_vb = self.module.declare_func_in_func(powf_name, func_builder.func);
 
-        // Emit scalar expression for row 0 and row 1 independently.
-        let mut work_stack_0: Vec<Frame> = Vec::with_capacity(32);
-        let mut work_vals_0: Vec<Value> = Vec::with_capacity(32);
-        let res_0 = emit_ast_scalar_with_vars(
+        // Evaluate expression in F64X2 mode.
+        let result_vec = emit_ast_simd_f64x2(
             ast, &analysis, &opts,
             &mut func_builder,
-            &var_vals_0,
+            &var_vals_vec,
             powf_func_ref_vb,
-            &HashMap::new(),
-            &mut work_stack_0,
-            &mut work_vals_0,
         )?;
 
-        let mut work_stack_1: Vec<Frame> = Vec::with_capacity(32);
-        let mut work_vals_1: Vec<Value> = Vec::with_capacity(32);
-        let res_1 = emit_ast_scalar_with_vars(
-            ast, &analysis, &opts,
-            &mut func_builder,
-            &var_vals_1,
-            powf_func_ref_vb,
-            &HashMap::new(),
-            &mut work_stack_1,
-            &mut work_vals_1,
-        )?;
-
-        // Store results.
-        let out_addr_0 = func_builder.ins().iadd(out_ptr_val, byte_off_0);
-        let out_addr_1 = func_builder.ins().iadd(out_ptr_val, byte_off_1);
-        func_builder.ins().store(MemFlags::new(), res_0, out_addr_0, 0);
-        func_builder.ins().store(MemFlags::new(), res_1, out_addr_1, 0);
+        // Store F64X2 result: writes 16 bytes = two consecutive f64 outputs.
+        let out_addr_vec = func_builder.ins().iadd(out_ptr_val, byte_off_vec);
+        func_builder.ins().store(MemFlags::new(), result_vec, out_addr_vec, 0);
 
         let i_vb_next = func_builder.ins().iadd_imm(i_vb, 2);
         let i_vb_next_ba = BlockArg::Value(i_vb_next);
@@ -861,11 +843,22 @@ fn emit_one_node(
             // Take children out in order — the iterative walker pushes
             // left-to-right, so children[0..arity] are already correct.
             let child_vals: Vec<Value> = values.drain(split_at..).collect();
-            let node_analysis = analysis.get(idx);
+
+            // Collect child node analyses (one per child, in order).
+            // For Pow nodes we also append the node's own analysis at slot 2
+            // so emit_operator can read the PowExpansion strategy.
+            let children = node.children.as_slice_with_pool(&ast.children_pool);
+            let mut child_analyses: Vec<Option<&NodeAnalysis>> = children
+                .iter()
+                .map(|ptr| ptr.resolve(idx).and_then(|ci| analysis.get(ci)))
+                .collect();
+            // Append the node's own analysis as extra slot for Pow expansion lookup.
+            child_analyses.push(analysis.get(idx));
+
             let result = emit_operator(
                 builder, op, &child_vals,
                 powf_func_ref, fmod_func_ref,
-                node, node_analysis, opts,
+                node, &child_analyses, opts,
                 mul_factors,
             )?;
             values.push(result);
@@ -909,8 +902,8 @@ fn emit_variable_load(
 /// Emits IR for a single algebraic operator, applying peephole identity
 /// simplifications, NaN-guard elision, power expansion, and FMA fusion.
 ///
-/// `analysis` carries the pre-computed `NodeAnalysis` for this node (if any);
-/// `opts` controls which passes are active.
+/// `child_analyses` contains the pre-computed `NodeAnalysis` for each child
+/// (one per child, in order); `opts` controls which passes are active.
 #[allow(clippy::too_many_arguments)]
 fn emit_operator(
     builder: &mut FunctionBuilder<'_>,
@@ -919,7 +912,7 @@ fn emit_operator(
     powf_func_ref: cranelift_codegen::ir::FuncRef,
     fmod_func_ref: cranelift_codegen::ir::FuncRef,
     ast_node: &AstNode,
-    node_analysis: Option<&NodeAnalysis>,
+    child_analyses: &[Option<&NodeAnalysis>],
     opts: &OptConfig,
     mul_factors: &mut HashMap<Value, (Value, Value)>,
 ) -> Result<Value, crate::error::JitError> {
@@ -977,7 +970,16 @@ fn emit_operator(
             match (constants[0], constants[1]) {
                 (Some(l), Some(r)) => Ok(builder.ins().f64const(l - r)),
                 (_, Some(0.0)) => Ok(child_vals[0]),
-                _ => Ok(builder.ins().fsub(child_vals[0], child_vals[1])),
+                // 0 - x → fneg(x): cheaper than a full fsub.
+                (Some(0.0), _) => Ok(builder.ins().fneg(child_vals[1])),
+                _ => {
+                    // FMA: (a*b) - c → fma(a, b, fneg(c))
+                    if let Some(&(a, b)) = mul_factors.get(&child_vals[0]) {
+                        let neg_c = builder.ins().fneg(child_vals[1]);
+                        return Ok(builder.ins().fma(a, b, neg_c));
+                    }
+                    Ok(builder.ins().fsub(child_vals[0], child_vals[1]))
+                }
             }
         }
         OpKind::Mul => {
@@ -995,6 +997,9 @@ fn emit_operator(
                 (Some(0.0), _) | (_, Some(0.0)) => Ok(builder.ins().f64const(0.0)),
                 (Some(1.0), _) => Ok(child_vals[1]),
                 (_, Some(1.0)) => Ok(child_vals[0]),
+                // x * -1 → fneg(x)
+                (Some(-1.0), _) => Ok(builder.ins().fneg(child_vals[1])),
+                (_, Some(-1.0)) => Ok(builder.ins().fneg(child_vals[0])),
                 // `x * 2.0 → x + x` and `2.0 * x → x + x`: replacing a
                 // multiply by a power-of-two constant with an additive
                 // self-addition avoids an FP multiply unit stall on CPUs
@@ -1039,20 +1044,12 @@ fn emit_operator(
                 }
             }
 
-            // NaN guard elision: if the denominator is provably non-zero,
-            // we can skip the `select(rhs==0, NaN, lhs/rhs)` guard.
+            // NaN guard elision: check whether the DENOMINATOR (child[1]) is
+            // provably non-zero. Use child_analyses[1] directly.
             let rhs_is_const_nonzero = constants[1].map_or(false, |c| c != 0.0 && !c.is_nan());
-            // The analysis result for THIS node is not what we want for guard
-            // elision; we need to know if the RHS (denominator) child is non-zero.
-            // The analysis pass puts `is_nonzero` on each node; the denominator
-            // child is the node at `child_vals[1]`. Since we don't have its idx
-            // here, we use the parent node's analysis which was computed to reflect
-            // `is_nonzero[a] && is_nonzero[b]` for Div — i.e., the parent being
-            // non-zero implies the denominator is non-zero.
-            // As a simpler and equally correct approach: trust the constant check
-            // and the analysis flag on this Div node's own result.
-            let parent_nonzero = node_analysis.map_or(false, |a| a.is_nonzero);
-            let skip_guard = opts.elide_nan_guard && (rhs_is_const_nonzero || parent_nonzero);
+            let rhs_nonzero = child_analyses.get(1).and_then(|a| *a)
+                .map_or(false, |a| a.is_nonzero());
+            let skip_guard = opts.elide_nan_guard && (rhs_nonzero || rhs_is_const_nonzero);
 
             if skip_guard {
                 // Safe to divide directly — no NaN guard needed.
@@ -1081,14 +1078,44 @@ fn emit_operator(
                 _ => {}
             }
 
-            // Use expansion strategy from analysis pass if available.
-            let expansion = node_analysis.map(|a| &a.pow_expansion);
+            // Use expansion strategy from the node's own analysis (carried via
+            // child_analyses — the caller should pass the node's own analysis
+            // as a stand-in if needed, but for Pow we use the node analysis
+            // stored in the iteration context). For the new signature we use
+            // the analysis keyed on this Pow node, which is the last element.
+            // Since emit_operator no longer receives the node's own analysis
+            // directly, we look it up from child_analyses slot 2 (convention:
+            // callers pass [child0_an, child1_an, node_own_an] for Pow).
+            let node_an: Option<&NodeAnalysis> = child_analyses.get(2).and_then(|a| *a);
+            let expansion = node_an.map(|a| &a.pow_expansion);
             match expansion {
                 Some(PowExpansion::Sqrt) if opts.expand_sqrt => {
                     Ok(passes::emit_sqrt(builder, child_vals[0]))
                 }
                 Some(PowExpansion::IntPow(n)) if *n >= 2 && *n <= opts.max_int_pow => {
                     Ok(passes::emit_int_pow(builder, child_vals[0], *n))
+                }
+                Some(PowExpansion::NegIntPow(n)) => {
+                    let n = *n;
+                    let base = child_vals[0];
+                    let x_n = if n == 1 {
+                        base
+                    } else {
+                        passes::emit_int_pow(builder, base, n)
+                    };
+                    let one = builder.ins().f64const(1.0);
+                    // Guard: if x^n == 0, return NaN (base was zero).
+                    let base_nonzero = child_analyses.get(0).and_then(|a| *a)
+                        .map_or(false, |a| a.is_nonzero());
+                    if opts.elide_nan_guard && base_nonzero {
+                        Ok(builder.ins().fdiv(one, x_n))
+                    } else {
+                        let zero = builder.ins().f64const(0.0);
+                        let nan_val = builder.ins().f64const(f64::NAN);
+                        let is_zero = builder.ins().fcmp(FloatCC::Equal, x_n, zero);
+                        let div_result = builder.ins().fdiv(one, x_n);
+                        Ok(builder.ins().select(is_zero, nan_val, div_result))
+                    }
                 }
                 _ => {
                     // Fall back to runtime powf call.
@@ -1124,12 +1151,21 @@ fn emit_operator(
             }
             // Cranelift has no native frem for f64; call jit_fmod helper.
             // Guard runtime zero-denominator with select(rhs==0, NaN, fmod(lhs,rhs)).
-            let zero = builder.ins().f64const(0.0);
-            let nan_val = builder.ins().f64const(f64::NAN);
-            let is_zero = builder.ins().fcmp(FloatCC::Equal, rhs, zero);
-            let call = builder.ins().call(fmod_func_ref, &[lhs, rhs]);
-            let rem_result = builder.inst_results(call)[0];
-            Ok(builder.ins().select(is_zero, nan_val, rem_result))
+            // Check if denominator is provably nonzero to elide the guard.
+            let rhs_is_const_nonzero = constants[1].map_or(false, |c| c != 0.0 && !c.is_nan());
+            let rhs_nonzero = child_analyses.get(1).and_then(|a| *a)
+                .map_or(false, |a| a.is_nonzero());
+            if opts.elide_nan_guard && (rhs_nonzero || rhs_is_const_nonzero) {
+                let call = builder.ins().call(fmod_func_ref, &[lhs, rhs]);
+                Ok(builder.inst_results(call)[0])
+            } else {
+                let zero = builder.ins().f64const(0.0);
+                let nan_val = builder.ins().f64const(f64::NAN);
+                let is_zero = builder.ins().fcmp(FloatCC::Equal, rhs, zero);
+                let call = builder.ins().call(fmod_func_ref, &[lhs, rhs]);
+                let rem_result = builder.inst_results(call)[0];
+                Ok(builder.ins().select(is_zero, nan_val, rem_result))
+            }
         }
         OpKind::Neg => {
             if arity != 1 {
@@ -1138,6 +1174,242 @@ fn emit_operator(
             if let Some(c) = constants[0] {
                 return Ok(builder.ins().f64const(-c));
             }
+            Ok(builder.ins().fneg(child_vals[0]))
+        }
+    }
+}
+
+/// Creates an F64X2 vector constant where both lanes hold the value `v`.
+///
+/// Inserts a 16-byte literal into the function's constant pool, then emits
+/// `vconst` to load it. Bytes are in little-endian order (x86 SIMD layout).
+fn f64x2_const(builder: &mut FunctionBuilder<'_>, v: f64) -> Value {
+    use cranelift_codegen::ir::ConstantData;
+    let bits = v.to_bits().to_le_bytes();
+    let data: [u8; 16] = [
+        bits[0], bits[1], bits[2], bits[3], bits[4], bits[5], bits[6], bits[7],
+        bits[0], bits[1], bits[2], bits[3], bits[4], bits[5], bits[6], bits[7],
+    ];
+    let constant_handle = builder.func.dfg.constants.insert(ConstantData::from(&data[..]));
+    builder.ins().vconst(types::F64X2, constant_handle)
+}
+
+/// Iterative post-order emitter for F64X2 SIMD code.
+///
+/// Evaluates the entire AST tree operating on `F64X2` values. Each variable
+/// is looked up in `var_vals_vec` (which must map `sym_id.0 → F64X2 Value`).
+/// Constants are splatted to both lanes via `f64x2_const`.
+///
+/// Returns `Err(MalformedNode)` if the AST contains anything that cannot be
+/// vectorized (Function, Mod, non-expandable Pow).
+fn emit_ast_simd_f64x2(
+    ast: &AstProjection,
+    analysis: &[NodeAnalysis],
+    opts: &OptConfig,
+    builder: &mut FunctionBuilder<'_>,
+    var_vals_vec: &HashMap<u32, Value>,  // sym_id.0 → F64X2 Value
+    _powf_func_ref: cranelift_codegen::ir::FuncRef,
+) -> Result<Value, crate::error::JitError> {
+    let mut stack: Vec<Frame> = Vec::with_capacity(64);
+    let mut values: Vec<Value> = Vec::with_capacity(64);
+    let mut mul_factors: HashMap<Value, (Value, Value)> = HashMap::new();
+
+    let root_node = ast
+        .nodes
+        .first()
+        .ok_or(crate::error::JitError::MalformedNode)?;
+    stack.push(Frame { idx: 0, arity: root_node.children.len(), cursor: 0 });
+
+    while let Some(top) = stack.last_mut() {
+        let action = if top.cursor < top.arity {
+            let Some(node) = ast.nodes.get(top.idx) else {
+                return Err(crate::error::JitError::MalformedNode);
+            };
+            let Some(&child_ptr) = node.children.as_slice().get(top.cursor) else {
+                return Err(crate::error::JitError::MalformedNode);
+            };
+            let child_idx = child_ptr.resolve(top.idx)
+                .ok_or(crate::error::JitError::MalformedNode)?;
+            top.cursor += 1;
+            Action::Descend(child_idx)
+        } else {
+            Action::Emit(top.idx, top.arity)
+        };
+
+        match action {
+            Action::Descend(child_idx) => {
+                let Some(child_node) = ast.nodes.get(child_idx) else {
+                    return Err(crate::error::JitError::MalformedNode);
+                };
+                stack.push(Frame {
+                    idx: child_idx,
+                    arity: child_node.children.len(),
+                    cursor: 0,
+                });
+            }
+            Action::Emit(idx, arity) => {
+                stack.pop();
+                let node = ast.nodes.get(idx).ok_or(crate::error::JitError::MalformedNode)?;
+                match node.kind {
+                    SymbolKind::Constant(_) => {
+                        // Splat the constant to both lanes.
+                        values.push(f64x2_const(builder, node.value));
+                    }
+                    SymbolKind::Variable(sym_id) => {
+                        let v = var_vals_vec.get(&sym_id.0).copied()
+                            .ok_or(crate::error::JitError::MalformedNode)?;
+                        values.push(v);
+                    }
+                    SymbolKind::Operator(op) => {
+                        let split_at = values.len().checked_sub(arity)
+                            .ok_or(crate::error::JitError::MalformedNode)?;
+                        let child_v: Vec<Value> = values.drain(split_at..).collect();
+
+                        // Collect child analyses and append node's own analysis for Pow.
+                        let children = node.children.as_slice_with_pool(&ast.children_pool);
+                        let mut child_analyses: Vec<Option<&NodeAnalysis>> = children
+                            .iter()
+                            .map(|ptr| ptr.resolve(idx).and_then(|ci| analysis.get(ci)))
+                            .collect();
+                        child_analyses.push(analysis.get(idx));
+
+                        let result = emit_operator_simd_f64x2(
+                            builder, op, &child_v,
+                            node, &child_analyses, opts,
+                            &mut mul_factors,
+                        )?;
+                        values.push(result);
+                    }
+                    SymbolKind::Function(_) => {
+                        // Functions cannot be vectorized.
+                        return Err(crate::error::JitError::MalformedNode);
+                    }
+                }
+            }
+        }
+    }
+
+    values.pop().ok_or(crate::error::JitError::MalformedNode)
+}
+
+/// Emits F64X2 SIMD IR for a single algebraic operator.
+///
+/// Mirrors `emit_operator` but works on F64X2 values. Constant peepholes
+/// use `f64x2_const` instead of `f64const`. NaN guards use `bitcast` +
+/// `bitselect` instead of scalar `select`.
+#[allow(clippy::too_many_arguments)]
+fn emit_operator_simd_f64x2(
+    builder: &mut FunctionBuilder<'_>,
+    op: OpKind,
+    child_vals: &[Value],
+    ast_node: &AstNode,
+    child_analyses: &[Option<&NodeAnalysis>],
+    opts: &OptConfig,
+    mul_factors: &mut HashMap<Value, (Value, Value)>,
+) -> Result<Value, crate::error::JitError> {
+    let _ = ast_node;
+    let arity = child_vals.len();
+
+    match op {
+        OpKind::Add => {
+            if arity != 2 { return Err(crate::error::JitError::MalformedNode); }
+            // FMA peephole: (a*b) + c → fma(a, b, c)
+            if let Some(&(a, b)) = mul_factors.get(&child_vals[0]) {
+                return Ok(builder.ins().fma(a, b, child_vals[1]));
+            }
+            if let Some(&(a, b)) = mul_factors.get(&child_vals[1]) {
+                return Ok(builder.ins().fma(a, b, child_vals[0]));
+            }
+            Ok(builder.ins().fadd(child_vals[0], child_vals[1]))
+        }
+        OpKind::Sub => {
+            if arity != 2 { return Err(crate::error::JitError::MalformedNode); }
+            if child_vals[0] == child_vals[1] {
+                return Ok(f64x2_const(builder, 0.0));
+            }
+            // FMA: (a*b) - c → fma(a, b, fneg(c))
+            if let Some(&(a, b)) = mul_factors.get(&child_vals[0]) {
+                let neg_c = builder.ins().fneg(child_vals[1]);
+                return Ok(builder.ins().fma(a, b, neg_c));
+            }
+            Ok(builder.ins().fsub(child_vals[0], child_vals[1]))
+        }
+        OpKind::Mul => {
+            if arity != 2 { return Err(crate::error::JitError::MalformedNode); }
+            let result = builder.ins().fmul(child_vals[0], child_vals[1]);
+            // Record for FMA fusion.
+            mul_factors.insert(result, (child_vals[0], child_vals[1]));
+            Ok(result)
+        }
+        OpKind::Div => {
+            if arity != 2 { return Err(crate::error::JitError::MalformedNode); }
+            let lhs = child_vals[0];
+            let rhs = child_vals[1];
+            // Check if denominator is provably nonzero to elide NaN guard.
+            let rhs_nonzero = child_analyses.get(1).and_then(|a| *a)
+                .map_or(false, |a| a.is_nonzero());
+            if opts.elide_nan_guard && rhs_nonzero {
+                Ok(builder.ins().fdiv(lhs, rhs))
+            } else {
+                // Guard: vselect lanes where rhs == 0 → NaN
+                let zero_vec = f64x2_const(builder, 0.0);
+                let nan_vec = f64x2_const(builder, f64::NAN);
+                let div_result = builder.ins().fdiv(lhs, rhs);
+                // fcmp on F64X2 → boolean vector; bitcast to F64X2 for bitselect
+                let is_zero_bv = builder.ins().fcmp(FloatCC::Equal, rhs, zero_vec);
+                let is_zero_mask = builder.ins().bitcast(types::F64X2, MemFlags::new(), is_zero_bv);
+                Ok(builder.ins().bitselect(is_zero_mask, nan_vec, div_result))
+            }
+        }
+        OpKind::Pow => {
+            if arity != 2 { return Err(crate::error::JitError::MalformedNode); }
+            // Get the expansion strategy from the node's own analysis (slot 2).
+            let node_an: Option<&NodeAnalysis> = child_analyses.get(2).and_then(|a| *a);
+            let expansion = node_an.map(|a| &a.pow_expansion);
+            match expansion {
+                Some(PowExpansion::Sqrt) if opts.expand_sqrt => {
+                    // sqrt is polymorphic: works on F64X2.
+                    Ok(builder.ins().sqrt(child_vals[0]))
+                }
+                Some(PowExpansion::IntPow(n)) if *n >= 2 && *n <= opts.max_int_pow => {
+                    // emit_int_pow uses fmul which is polymorphic.
+                    Ok(passes::emit_int_pow(builder, child_vals[0], *n))
+                }
+                Some(PowExpansion::NegIntPow(n)) => {
+                    let n = *n;
+                    let base_vec = child_vals[0];
+                    let x_n = if n == 1 {
+                        base_vec
+                    } else {
+                        passes::emit_int_pow(builder, base_vec, n)
+                    };
+                    let one_vec = f64x2_const(builder, 1.0);
+                    let base_nonzero = child_analyses.get(0).and_then(|a| *a)
+                        .map_or(false, |a| a.is_nonzero());
+                    if opts.elide_nan_guard && base_nonzero {
+                        Ok(builder.ins().fdiv(one_vec, x_n))
+                    } else {
+                        let zero_vec = f64x2_const(builder, 0.0);
+                        let nan_vec = f64x2_const(builder, f64::NAN);
+                        let div_result = builder.ins().fdiv(one_vec, x_n);
+                        let is_zero_bv = builder.ins().fcmp(FloatCC::Equal, x_n, zero_vec);
+                        let is_zero_mask = builder.ins().bitcast(
+                            types::F64X2, MemFlags::new(), is_zero_bv);
+                        Ok(builder.ins().bitselect(is_zero_mask, nan_vec, div_result))
+                    }
+                }
+                _ => {
+                    // Non-expandable Pow — should not occur in vectorizable ASTs.
+                    Err(crate::error::JitError::MalformedNode)
+                }
+            }
+        }
+        OpKind::Mod => {
+            // Mod is excluded from vectorizable ASTs.
+            Err(crate::error::JitError::MalformedNode)
+        }
+        OpKind::Neg => {
+            if arity != 1 { return Err(crate::error::JitError::MalformedNode); }
             Ok(builder.ins().fneg(child_vals[0]))
         }
     }
@@ -1256,11 +1528,17 @@ fn emit_ast_scalar_with_vars(
                         let split_at = values.len().checked_sub(arity)
                             .ok_or(crate::error::JitError::MalformedNode)?;
                         let child_v: Vec<Value> = values.drain(split_at..).collect();
-                        let node_analysis = analysis.get(idx);
+                        let children = node.children.as_slice_with_pool(&ast.children_pool);
+                        let mut child_analyses: Vec<Option<&NodeAnalysis>> = children
+                            .iter()
+                            .map(|ptr| ptr.resolve(idx).and_then(|ci| analysis.get(ci)))
+                            .collect();
+                        // Append node's own analysis for Pow expansion slot.
+                        child_analyses.push(analysis.get(idx));
                         let result = emit_operator(
                             builder, op, &child_v,
                             powf_func_ref, fmod_dummy,
-                            node, node_analysis, opts,
+                            node, &child_analyses, opts,
                             &mut mul_factors,
                         )?;
                         values.push(result);
@@ -1488,4 +1766,103 @@ mod tests {
             assert!((got - exp).abs() < f64::EPSILON, "row {i}: expected {exp}, got {got}");
         }
     }
+
+    #[test]
+    fn test_neg_int_pow_x_inv() {
+        // x^(-1) = 1/x. For x=3, result should be 1/3.
+        let mut b = DagBuilder::new();
+        let id = parse_expression("x ^ -1", &mut b).unwrap();
+        let ast = dag_to_ast(b.arena(), id);
+        let mut compiler = JitCompiler::new();
+        let f = compiler.compile(&ast).unwrap();
+        let result = f([3.0_f64].as_ptr());
+        let expected = 1.0_f64 / 3.0;
+        assert!((result - expected).abs() < 1e-14,
+            "x^(-1) for x=3 should be ~{expected}; got {result}");
+        // x=0 should return NaN (not trap).
+        let nan_result = f([0.0_f64].as_ptr());
+        assert!(nan_result.is_nan(), "x^(-1) for x=0 should be NaN; got {nan_result}");
+    }
+
+    #[test]
+    fn test_analysis_x_squared_plus_1_is_positive() {
+        // x^2 + 1 should be proven is_positive by the analysis.
+        let mut b = DagBuilder::new();
+        let id = parse_expression("x ^ 2 + 1", &mut b).unwrap();
+        let ast = dag_to_ast(b.arena(), id);
+        let analysis = crate::jit::analysis::analyze(&ast);
+        // Root is the Add node (index 0).
+        let root_an = &analysis[0];
+        assert!(root_an.is_positive,
+            "x^2 + 1 should be provably positive; got {root_an:?}");
+        assert!(root_an.is_nonnegative,
+            "x^2 + 1 should be provably nonneg; got {root_an:?}");
+    }
+
+    #[test]
+    fn test_nan_guard_elision_x_sq_plus_1_denominator() {
+        // x / (x^2 + 1): denominator is proven positive, so no NaN guard needed.
+        // For any x, x^2 + 1 ≥ 1 > 0, so this is always safe.
+        let mut b = DagBuilder::new();
+        let id = parse_expression("x / (x ^ 2 + 1)", &mut b).unwrap();
+        let ast = dag_to_ast(b.arena(), id);
+        let mut compiler = JitCompiler::new();
+        let f = compiler.compile(&ast).unwrap();
+
+        // Test for various x values including x=0.
+        let test_cases: &[(f64, f64)] = &[
+            (0.0, 0.0),      // 0 / 1 = 0
+            (1.0, 0.5),      // 1 / 2 = 0.5
+            (2.0, 0.4),      // 2 / 5 = 0.4
+            (-1.0, -0.5),    // -1 / 2 = -0.5
+            (3.0, 3.0 / 10.0),  // 3 / 10
+        ];
+        for &(x, expected) in test_cases {
+            let result = f([x].as_ptr());
+            assert!((result - expected).abs() < 1e-14,
+                "x / (x^2+1) for x={x}: expected {expected}, got {result}");
+        }
+    }
+
+    #[test]
+    fn test_batch_f64x2_true_simd() {
+        // Verify that the batch F64X2 function (now true SIMD) produces
+        // correct results, including for odd numbers of rows (scalar tail).
+        let mut b = DagBuilder::new();
+        let id = parse_expression("x * x + 1", &mut b).unwrap();
+        let ast = dag_to_ast(b.arena(), id);
+        let mut compiler = JitCompiler::new();
+        let batch_fn = compiler
+            .compile_batch_f64x2(&ast)
+            .expect("compile ok")
+            .expect("should be vectorizable");
+
+        // 5 rows: test both the SIMD path (4 rows) and scalar tail (1 row).
+        let x_col = vec![0.0_f64, 1.0, 2.0, 3.0, 4.0];
+        let cols: Vec<*const f64> = vec![x_col.as_ptr()];
+        let mut out = vec![0.0_f64; 5];
+        batch_fn(cols.as_ptr(), 5, out.as_mut_ptr());
+
+        let expected = [1.0_f64, 2.0, 5.0, 10.0, 17.0]; // x^2 + 1
+        for (i, (&got, &exp)) in out.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < f64::EPSILON, "row {i}: expected {exp}, got {got}");
+        }
+    }
+
+    #[test]
+    fn test_zero_minus_x_is_fneg() {
+        // 0 - x should compile to fneg(x). For x=3, result is -3.
+        let mut b = DagBuilder::new();
+        let id = parse_expression("0 - x", &mut b).unwrap();
+        let ast = dag_to_ast(b.arena(), id);
+        let mut compiler = JitCompiler::new();
+        let f = compiler.compile(&ast).unwrap();
+        let result = f([3.0_f64].as_ptr());
+        assert!((result - (-3.0)).abs() < f64::EPSILON,
+            "0 - 3 should be -3; got {result}");
+        let result2 = f([0.0_f64].as_ptr());
+        assert!(result2 == 0.0 || result2 == -0.0,
+            "0 - 0 should be ±0; got {result2}");
+    }
 }
+

@@ -68,9 +68,23 @@ pub fn emit_int_pow(builder: &mut FunctionBuilder<'_>, lhs: Value, n: u32) -> Va
 /// Emits `sqrt(lhs)` using Cranelift's native `sqrt` instruction.
 ///
 /// On x86-64 this lowers to a single `sqrtsd` instruction. On AArch64
-/// it lowers to `fsqrt`.
+/// it lowers to `fsqrt`. The instruction is polymorphic and also works
+/// on `F64X2` values.
 #[must_use]
 pub fn emit_sqrt(builder: &mut FunctionBuilder<'_>, lhs: Value) -> Value {
     use cranelift_codegen::ir::InstBuilder as _;
     builder.ins().sqrt(lhs)
+}
+
+/// Emits `lhs^(-n)` = `1.0 / lhs^n` using binary exponentiation for
+/// the scalar (F64) case. Does NOT emit a NaN guard — the caller is
+/// responsible for handling the `lhs == 0` case if required.
+///
+/// `n` must be in `1..=4`.
+#[must_use]
+pub fn emit_neg_int_pow(builder: &mut FunctionBuilder<'_>, lhs: Value, n: u32) -> Value {
+    use cranelift_codegen::ir::InstBuilder as _;
+    let x_n = if n == 1 { lhs } else { emit_int_pow(builder, lhs, n) };
+    let one = builder.ins().f64const(1.0);
+    builder.ins().fdiv(one, x_n)
 }
