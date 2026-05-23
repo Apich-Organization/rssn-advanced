@@ -1,19 +1,14 @@
-# Module Review: `ast` (Phase 3 Audit)
+# Module Review: `ast` (Phase 4 Audit)
 
 ## 1. Performance & Memory
 
-### 1.1 Boxed Slice Overhead
-`AstChildList::Many` uses `Box<[RelPtr<AstNode>]>`.
-- **Sharp Question:** We optimized the nodes to be compact, but `Many` still spills to the heap. If an expression has thousands of variadic children, aren't we just moving the allocation pressure from the "node" level to the "child list" level? Why not use a side-pool in the `AstProjection` similar to the `PackedArenaImage`?
+### 1.1 Monolithic Conversion
+The conversion logic still uses a large match over `OpKind`.
+- **Sharp Question:** As we move toward a "Function"-centric extensibility model, shouldn't the AST conversion be driven by the symbol's metadata rather than a hardcoded list of operators? Why is the AST layer the only part of the system that still needs to know the difference between `Add` and `Mul`?
 
-## 2. Extensibility
+## 2. Design Integrity
 
-### 2.1 The "Giant Match" Anti-Pattern
-`ast_to_dag` and `dag_to_ast` use massive `match` statements over `OpKind`.
-- **Sharp Question:** If we add 50 new operators, will this function become a 2000-line maintenance nightmare? Is there no way to register "Conversion Handlers" for new symbol kinds, or are we committed to a monolithic architecture?
-
-## 3. Design Integrity
-
-### 3.1 Unused `RelPtr<T, i64>`
-The `i64` variant of relative pointers is implemented but never used.
-- **Sharp Question:** Why maintain the complexity of a generic `RelPtr<T, O>` and an unused `i64` implementation if our arena size is strictly bounded by `u32` (4GB)? Is this "just-in-case" engineering or a signal for a future feature that hasn't arrived?
+### 2.1 Unused `RelPtr<T, i64>`
+The `i64` variant remains unimplemented and unreferenced.
+- **Sharp Question:** Is this dead code a "placeholder for the future" or just baggage? If we ever need 64-bit offsets, will we really be projecting an AST so large that it spans 8 quintillion bytes?
+The developers note: for this questions, we would like to document that this is intended for future extensibility, just doc it and provide method and steps for user to use it mannuly.

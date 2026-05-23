@@ -1,19 +1,13 @@
-# Module Review: `zerocopy` & `error` (Phase 3 Audit)
+# Module Review: `zerocopy` & `error` (Phase 4 Audit)
 
-## 1. Safety
+## 1. Performance
 
-### 1.1 The manual `Pod` Trap
-`PackedDagNode` and `BorrowedSlice` implement `Pod` manually.
-- **Sharp Question:** If a developer adds a `bool` field to `PackedDagNode`, they introduce 7 bytes of undefined padding. How many days of debugging will it take to find the resulting memory corruption? Why are we not using a verified `Pod` derive macro?
+### 1.1 Task Spawning
+`TaskEnvelope` reduces spawns to a single allocation.
+- **Sharp Question:** We are still using `Box::new` for every fiber task. In a system where we might spawn 100,000 tasks for a giant parallel evaluation, is the heap allocation really the best we can do? Why not use a fixed-size slab or a ring buffer for task payloads?
 
 ## 2. Implementation Integrity
 
-### 2.1 The Ghost Error System
-We have an elaborate `rssn_error!` macro system and dozens of `cold_*` functions.
-- **Sharp Question:** Why are we still using `u32::MAX` sentinels and silent short-circuits in our core logic when we have a purpose-built error system? Is our error handling architecture just "documentation" or is it intended to be used?
-
-## 3. Performance
-
-### 3.1 The "Box" in `TaskEnvelope`
-`TaskEnvelope` reduces spawns to a single allocation.
-- **Sharp Question:** Why are we allocating at all for every fiber task? Could we use a slab-allocated or pool-allocated task buffer to achieve truly "advanced" parallel performance?
+### 2.1 Unused Error Infrastructure
+- **Sharp Question:** We still have dozens of `cold_*` error variants that are never constructed. Is the "Phase 7" migration to this error system officially dead, or are we just slowly accruing technical debt in our error handling?
+developer's note: YOU MUST SEARCH IN THE CODEBASE TO FIND ANYWHERE WHICH STILL USES HARDCODED return(Err...) AND CHANGE THEM ALL IN A TURN.

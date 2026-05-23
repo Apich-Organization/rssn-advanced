@@ -1,19 +1,12 @@
-# Module Review: `parser` (Phase 3 Audit)
+# Module Review: `parser` (Phase 4 Audit)
 
 ## 1. Performance
 
-### 1.1 The "Trim" Tax
-`parse_expr_climbing` calls `.trim_start()` on the input in every loop iteration.
-- **Sharp Question:** If we are parsing a 1MB expression string, how many millions of times are we re-scanning the same leading whitespace? Why not use a proper lexer that consumes whitespace once and for all?
+### 1.1 Redundant Whitespace
+`parse_expr_climbing` still calls `.trim_start()` in a loop.
+- **Sharp Question:** We have a lexer module. Why isn't the lexer responsible for whitespace stripping? Why is our parser manually trimming strings while traversing the precedence tree?
 
 ## 2. Extensibility
 
 ### 2.1 Static Precedence
-Precedence is hardcoded in a `match` on `char`.
-- **Sharp Question:** How does a user add a new infix operator (e.g. `xor` or `dot`) with custom precedence? Is our parser's grammar "fixed" at compile-time?
-
-## 3. Correctness
-
-### 3.1 Unary Minus Precedence
-Unary minus is handled in `parse_atom` with a hardcoded precedence of `4`.
-- **Sharp Question:** Is this correct for all expressions? Does `-x^y` parse as `-(x^y)` or `(-x)^y`? Are we sure our hardcoded "precedence climbing" matches standard mathematical conventions for all edge cases?
+- **Sharp Question:** Users can now register custom rewrite rules and JIT functions, but they can't use them in strings because the parser's operator set is hardcoded. How does a user parse `sin(x) dot y` if `dot` is a custom operator? Is the parser becoming the bottleneck for high-level usability?

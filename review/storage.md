@@ -1,19 +1,10 @@
-# Module Review: `storage` (Phase 3 Audit)
+# Module Review: `storage` (Phase 4 Audit)
 
-## 1. Performance
+## 1. Design Integrity
 
-### 1.1 The "Stop-the-World" Eviction
-`evict_cold_nodes` performs a full O(N) mark-and-sweep.
-- **Sharp Question:** In a streaming symbolic engine, why is our only memory reclamation strategy a global, blocking compaction pass? If we have 10GB of nodes, do we really want to wait 2 seconds for a "mark" phase before we can keep calculating?
+### 1.1 The Blocking Eviction Pass
+`evict_cold_nodes` remains a global, blocking mark-and-sweep.
+- **Sharp Question:** In a real-time physics simulation or a high-frequency trading bot, can we really afford to "stop the world" for an eviction pass? Why aren't we using an incremental or concurrent mark-and-sweep that reclaims memory in small chunks?
 
-## 2. Design Consistency
-
-### 2.1 The Remap Table Allocation
-Eviction returns a `HashMap<DagNodeId, DagNodeId>`.
-- **Sharp Question:** We just cleared memory, and then we immediately allocate a giant `HashMap` that is nearly as large as the arena itself just to tell the user where their nodes went. Is there no more efficient way to communicate a range-based or offset-based remap?
-
-## 3. Extensibility
-
-### 3.1 Hardcoded "Hotness"
-The eviction policy is "access frequency >= threshold".
-- **Sharp Question:** What if a user wants to protect nodes based on "Depth", "Recency (LRU)", or "Algebraic Complexity"? Why is our "DynamicHotspotTable" hardcoded to one specific policy?
+### 1.2 The Remap Table Memory
+- **Sharp Question:** We still return a giant `HashMap` for remapping. If an eviction pass keeps 1 million nodes, we've just allocated 40MB for the map alone. Why can't we use an offset-based mapping if our arena is contiguous?
