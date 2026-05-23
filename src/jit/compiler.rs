@@ -206,10 +206,10 @@ impl JitCompiler {
     /// Compiles an `AstProjection` expression into a native callable function.
     ///
     /// # Errors
-    /// Returns a message string if the compilation or linking step fails.
-    pub fn compile(&mut self, ast: &AstProjection) -> Result<CompiledExprFn, String> {
+    /// Returns a [`crate::error::JitError`] if compilation or linking fails.
+    pub fn compile(&mut self, ast: &AstProjection) -> Result<CompiledExprFn, crate::error::JitError> {
         if ast.is_empty() {
-            return Err("Cannot compile empty AST projection".to_owned());
+            return crate::error::cold_jit_error_malformed_node();
         }
 
         let mut ctx = Context::new();
@@ -236,7 +236,7 @@ impl JitCompiler {
         let powf_name = self
             .module
             .declare_function("powf", Linkage::Import, &powf_sig)
-            .map_err(|e| format!("Failed to declare powf import: {e:?}"))?;
+            .map_err(|_| crate::error::JitError::InitFailed)?;
         let powf_func_ref = self
             .module
             .declare_func_in_func(powf_name, func_builder.func);
@@ -245,7 +245,7 @@ impl JitCompiler {
         let fmod_name = self
             .module
             .declare_function("fmod", Linkage::Import, &powf_sig)
-            .map_err(|e| format!("Failed to declare fmod import: {e:?}"))?;
+            .map_err(|_| crate::error::JitError::InitFailed)?;
         let fmod_func_ref = self
             .module
             .declare_func_in_func(fmod_name, func_builder.func);
@@ -283,22 +283,14 @@ impl JitCompiler {
                 if custom_refs.contains_key(&fn_id.0) {
                     continue;
                 }
-                let arity = registered_entries.get(&fn_id.0).copied().ok_or_else(|| {
-                    format!(
-                        "AST references custom function id {} but no \
-                         implementation was registered via \
-                         JitCompiler::register_custom_function*()",
-                        fn_id.0
-                    )
-                })?;
+                let arity = registered_entries.get(&fn_id.0).copied()
+                    .ok_or(crate::error::JitError::UnknownFunction)?;
                 let sig = make_fn_sig(arity);
                 let sym = format!("rssn_custom_fn_{}", fn_id.0);
                 let fid = self
                     .module
                     .declare_function(&sym, Linkage::Import, &sig)
-                    .map_err(|e| {
-                        format!("Failed to declare custom function {sym} import: {e:?}")
-                    })?;
+                    .map_err(|_| crate::error::JitError::InitFailed)?;
                 let fr = self.module.declare_func_in_func(fid, func_builder.func);
                 custom_refs.insert(fn_id.0, fr);
             }
@@ -326,17 +318,17 @@ impl JitCompiler {
         let func_id = self
             .module
             .declare_function(&fn_name, Linkage::Export, &ctx.func.signature)
-            .map_err(|e| format!("Failed to declare JIT function: {e:?}"))?;
+            .map_err(|_| crate::error::JitError::VerifierRejected)?;
 
         self.module
             .define_function(func_id, &mut ctx)
-            .map_err(|e| format!("Failed to define JIT function: {e:?}"))?;
+            .map_err(|_| crate::error::JitError::VerifierRejected)?;
 
         self.module.clear_context(&mut ctx);
 
         self.module
             .finalize_definitions()
-            .map_err(|e| format!("Failed to finalize JIT module: {e:?}"))?;
+            .map_err(|_| crate::error::JitError::VerifierRejected)?;
 
         let code_ptr = self.module.get_finalized_function(func_id);
 
@@ -354,12 +346,12 @@ impl JitCompiler {
     /// [`crate::ast::convert::dag_to_ast`] first.
     ///
     /// # Errors
-    /// Returns a message string if the AST conversion or compilation fails.
+    /// Returns a [`crate::error::JitError`] if the AST conversion or compilation fails.
     pub fn compile_dag(
         &mut self,
         arena: &crate::dag::arena::DagArena,
         root: crate::dag::node::DagNodeId,
-    ) -> Result<CompiledExprFn, String> {
+    ) -> Result<CompiledExprFn, crate::error::JitError> {
         let ast = crate::ast::convert::dag_to_ast(arena, root);
         self.compile(&ast)
     }
@@ -389,7 +381,7 @@ fn compile_ast_iterative(
     custom_refs: &HashMap<u32, cranelift_codegen::ir::FuncRef>,
     stack: &mut Vec<Frame>,
     mut values: &mut Vec<Value>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::error::JitError> {
     // Callers clear these before passing — guaranteed by `compile()`.
 
     // FMA peephole: maps each Mul-result Value to its two input factors so
@@ -401,7 +393,7 @@ fn compile_ast_iterative(
     let root_node = ast
         .nodes
         .first()
-        .ok_or_else(|| "AST projection has no root node".to_owned())?;
+        .ok_or(crate::error::JitError::MalformedNode)?;
     stack.push(Frame {
         idx: 0,
         arity: root_node.children.len(),
@@ -414,14 +406,13 @@ fn compile_ast_iterative(
         // checker happy when we go from `last_mut()` to `push/pop`.
         let action = if top.cursor < top.arity {
             let Some(node) = ast.nodes.get(top.idx) else {
-                return Err(format!("JIT codegen: AST index {} out of range", top.idx));
+                return Err(crate::error::JitError::MalformedNode);
             };
             let Some(&child_ptr) = node.children.as_slice().get(top.cursor) else {
-                return Err("JIT codegen: child cursor past child list end".to_owned());
+                return Err(crate::error::JitError::MalformedNode);
             };
-            let child_idx = child_ptr.resolve(top.idx).ok_or_else(|| {
-                "Failed to resolve relative pointer in JIT codegen".to_owned()
-            })?;
+            let child_idx = child_ptr.resolve(top.idx)
+                .ok_or(crate::error::JitError::MalformedNode)?;
             top.cursor += 1;
             Action::Descend(child_idx)
         } else {
@@ -431,9 +422,7 @@ fn compile_ast_iterative(
         match action {
             Action::Descend(child_idx) => {
                 let Some(child_node) = ast.nodes.get(child_idx) else {
-                    return Err(format!(
-                        "JIT codegen: child AST index {child_idx} out of range"
-                    ));
+                    return Err(crate::error::JitError::MalformedNode);
                 };
                 stack.push(Frame {
                     idx: child_idx,
@@ -459,15 +448,9 @@ fn compile_ast_iterative(
         }
     }
 
-    let result = values.pop().ok_or_else(|| {
-        "JIT codegen value-stack ended empty; expected exactly one result".to_owned()
-    })?;
+    let result = values.pop().ok_or(crate::error::JitError::MalformedNode)?;
     if !values.is_empty() {
-        return Err(format!(
-            "JIT codegen value-stack invariant violated: \
-             {} leftover values after compilation",
-            values.len()
-        ));
+        return Err(crate::error::JitError::VerifierRejected);
     }
     Ok(result)
 }
@@ -489,7 +472,7 @@ fn emit_one_node(
     custom_refs: &HashMap<u32, cranelift_codegen::ir::FuncRef>,
     values: &mut Vec<Value>,
     mul_factors: &mut HashMap<Value, (Value, Value)>,
-) -> Result<(), String> {
+) -> Result<(), crate::error::JitError> {
     let node = &ast.nodes[idx];
 
     match node.kind {
@@ -501,9 +484,8 @@ fn emit_one_node(
             values.push(val);
         }
         SymbolKind::Operator(op) => {
-            let split_at = values.len().checked_sub(arity).ok_or_else(|| {
-                "JIT codegen value-stack underflow at operator".to_owned()
-            })?;
+            let split_at = values.len().checked_sub(arity)
+                .ok_or(crate::error::JitError::MalformedNode)?;
             // Take children out in order — the iterative walker pushes
             // left-to-right, so children[0..arity] are already correct.
             let child_vals: Vec<Value> = values.drain(split_at..).collect();
@@ -515,30 +497,20 @@ fn emit_one_node(
             // FuncRef declared in `compile()` and emit a call with
             // 1, 2, or 3 f64 arguments depending on the registration
             // arity (`jit_review §3.1`).
-            let func_ref = custom_refs.get(&fn_id.0).copied().ok_or_else(|| {
-                format!(
-                    "Missing FuncRef for custom function id {} during \
-                     codegen — should have been pre-declared in compile()",
-                    fn_id.0
-                )
-            })?;
-            let split_at = values.len().checked_sub(arity).ok_or_else(|| {
-                "JIT codegen value-stack underflow at custom function".to_owned()
-            })?;
+            let func_ref = custom_refs.get(&fn_id.0).copied()
+                .ok_or(crate::error::JitError::UnknownFunction)?;
+            let split_at = values.len().checked_sub(arity)
+                .ok_or(crate::error::JitError::MalformedNode)?;
             let child_vals: Vec<Value> = values.drain(split_at..).collect();
             if child_vals.is_empty() || child_vals.len() > 3 {
-                return Err(format!(
-                    "Custom JIT functions support 1–3 f64 arguments; \
-                     symbol got {} children",
-                    child_vals.len()
-                ));
+                return Err(crate::error::JitError::MalformedNode);
             }
             let call = builder.ins().call(func_ref, &child_vals);
             let result = builder
                 .inst_results(call)
                 .first()
                 .copied()
-                .ok_or_else(|| "Custom function call returned no value".to_owned())?;
+                .ok_or(crate::error::JitError::VerifierRejected)?;
             values.push(result);
         }
     }
@@ -573,7 +545,7 @@ fn emit_operator(
     fmod_func_ref: cranelift_codegen::ir::FuncRef,
     ast_node: &AstNode,
     mul_factors: &mut HashMap<Value, (Value, Value)>,
-) -> Result<Value, String> {
+) -> Result<Value, crate::error::JitError> {
     use crate::jit::primitives::{simplify_add, simplify_mul};
 
     // Look up the immediate constant behind each child SSA value, if any.
@@ -588,7 +560,7 @@ fn emit_operator(
     match op {
         OpKind::Add => {
             if arity != 2 {
-                return Err("Add operator must have exactly 2 children".to_owned());
+                return Err(crate::error::JitError::MalformedNode);
             }
             // Peephole: `x + 0 → x`, `0 + x → x`, `c1 + c2 → const`.
             match (constants[0], constants[1]) {
@@ -616,7 +588,7 @@ fn emit_operator(
         }
         OpKind::Sub => {
             if arity != 2 {
-                return Err("Sub operator must have exactly 2 children".to_owned());
+                return Err(crate::error::JitError::MalformedNode);
             }
             match (constants[0], constants[1]) {
                 (Some(l), Some(r)) => Ok(builder.ins().f64const(l - r)),
@@ -626,7 +598,7 @@ fn emit_operator(
         }
         OpKind::Mul => {
             if arity != 2 {
-                return Err("Mul operator must have exactly 2 children".to_owned());
+                return Err(crate::error::JitError::MalformedNode);
             }
             // Peephole: `x * 0 → 0`, `x * 1 → x`, `c1 * c2 → const`,
             // `x * 2.0 → x + x` (single fadd is often faster than fmul
@@ -656,7 +628,7 @@ fn emit_operator(
         }
         OpKind::Div => {
             if arity != 2 {
-                return Err("Div operator must have exactly 2 children".to_owned());
+                return Err(crate::error::JitError::MalformedNode);
             }
             let lhs = child_vals[0];
             let rhs = child_vals[1];
@@ -685,7 +657,7 @@ fn emit_operator(
         }
         OpKind::Pow => {
             if arity != 2 {
-                return Err("Pow operator must have exactly 2 children".to_owned());
+                return Err(crate::error::JitError::MalformedNode);
             }
             // Peephole: `x ^ 0 → 1`, `x ^ 1 → x`, `c1 ^ c2 → const`.
             match (constants[0], constants[1]) {
@@ -700,7 +672,7 @@ fn emit_operator(
         }
         OpKind::Mod => {
             if arity != 2 {
-                return Err("Mod operator must have exactly 2 children".to_owned());
+                return Err(crate::error::JitError::MalformedNode);
             }
             let lhs = child_vals[0];
             let rhs = child_vals[1];
@@ -722,7 +694,7 @@ fn emit_operator(
         }
         OpKind::Neg => {
             if arity != 1 {
-                return Err("Neg operator must have exactly 1 child".to_owned());
+                return Err(crate::error::JitError::MalformedNode);
             }
             if let Some(c) = constants[0] {
                 return Ok(builder.ins().f64const(-c));
@@ -886,9 +858,10 @@ mod tests {
         let mut compiler = JitCompiler::new();
         // No `register_custom_function` call → compile must error.
         let err = compiler.compile(&ast).expect_err("must error");
-        assert!(
-            err.contains("99"),
-            "error must mention the unregistered fn id; got: {err}"
+        assert_eq!(
+            err,
+            crate::error::JitError::UnknownFunction,
+            "unregistered fn id must yield UnknownFunction; got: {err:?}"
         );
     }
 }

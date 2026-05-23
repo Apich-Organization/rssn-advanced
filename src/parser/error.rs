@@ -70,6 +70,26 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// Cold constructor for unexpected-EOF parse errors (e.g. missing closing `)`).
+#[cold]
+#[inline(never)]
+pub fn cold_parse_error_unexpected_eof(span: Span) -> ParseError {
+    ParseError {
+        message: "Unexpected end of input; expected closing ')'".to_owned(),
+        span,
+    }
+}
+
+/// Cold constructor for unexpected-token parse errors.
+#[cold]
+#[inline(never)]
+pub fn cold_parse_error_unexpected_token(span: Span, bad: char) -> ParseError {
+    ParseError {
+        message: format!("Unexpected character {bad:?}; expected a number, variable, or '('"),
+        span,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

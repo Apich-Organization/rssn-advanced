@@ -411,6 +411,13 @@ impl<T: Pod> Encode for BorrowedSlice<'_, T> {
     }
 }
 
+/// Cold helper for the misalignment error path in `BorrowedSlice` decode.
+#[cold]
+#[inline(never)]
+fn decode_error_misaligned() -> DecodeError {
+    DecodeError::Other("BorrowedSlice: misaligned input buffer")
+}
+
 impl<'de, Context, T: Pod> BorrowDecode<'de, Context> for BorrowedSlice<'de, T> {
     fn borrow_decode<D: BorrowDecoder<'de, Context = Context>>(
         decoder: &mut D,
@@ -427,7 +434,7 @@ impl<'de, Context, T: Pod> BorrowDecode<'de, Context> for BorrowedSlice<'de, T> 
 
         let align = core::mem::align_of::<T>();
         if (bytes.as_ptr() as usize) & (align - 1) != 0 {
-            return Err(DecodeError::Other("BorrowedSlice: misaligned input buffer"));
+            return Err(decode_error_misaligned());
         }
 
         // SAFETY: `T: Pod` (every bit pattern valid, no padding). The

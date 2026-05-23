@@ -24,23 +24,102 @@ use super::hotspot::DynamicHotspotTable;
 use crate::dag::arena::DagArena;
 use crate::dag::node::{ChildList, DagNode, DagNodeId};
 
+// =========================================================================
+// CompactRemap — hierarchical rank-based translation table (Part 2b)
+// =========================================================================
+
+/// A memory-compact remap table using a hierarchical popcount rank structure.
+///
+/// For N old slots:
+/// - `blocks`: 1 bit per slot → N/8 bytes (16 KB for 1 M nodes).
+/// - `block_prefix`: 1 u32 per 64-slot block → N/16 bytes (64 KB for 1 M nodes).
+///
+/// Total ≈ 80 KB for 1 M nodes, a 50× reduction vs `Vec<DagNodeId>` (4 MB).
+/// `translate` is O(1) with two array accesses and one `count_ones()`.
+#[derive(Debug)]
+pub struct CompactRemap {
+    /// Bitset: bit `i` is set iff slot `i` survived eviction.
+    blocks: Vec<u64>,
+    /// Prefix popcount: `block_prefix[w]` = number of surviving slots in
+    /// words `0..w` (exclusive). Length = `blocks.len()`.
+    block_prefix: Vec<u32>,
+    /// Total number of surviving slots.
+    n_kept: u32,
+}
+
+impl CompactRemap {
+    /// Builds a `CompactRemap` from an iterator of old slot indices that survived.
+    ///
+    /// `n_slots` is the total number of old arena slots (surviving + evicted).
+    /// `kept` yields each surviving old slot index exactly once, in any order.
+    #[must_use]
+    pub fn build(n_slots: usize, kept: impl Iterator<Item = usize>) -> Self {
+        let n_words = n_slots.div_ceil(64);
+        let mut blocks = vec![0u64; n_words];
+        let mut n_kept = 0u32;
+        for idx in kept {
+            let word = idx / 64;
+            let bit = idx % 64;
+            if word < n_words {
+                blocks[word] |= 1u64 << bit;
+                n_kept += 1;
+            }
+        }
+        // Build exclusive-prefix popcount table.
+        let mut block_prefix = Vec::with_capacity(n_words);
+        let mut running = 0u32;
+        for &w in &blocks {
+            block_prefix.push(running);
+            running = running.saturating_add(w.count_ones());
+        }
+        Self { blocks, block_prefix, n_kept }
+    }
+
+    /// Translates an old (pre-eviction) `DagNodeId` to its new (post-eviction) id.
+    ///
+    /// Returns `None` if `old_id` was evicted (bit not set in bitset).
+    #[must_use]
+    pub fn translate(&self, old_id: DagNodeId) -> Option<DagNodeId> {
+        if old_id.is_none() {
+            return Some(DagNodeId::NONE);
+        }
+        let idx = old_id.index();
+        let word = idx / 64;
+        let bit = idx % 64;
+        let block = *self.blocks.get(word)?;
+        if block & (1u64 << bit) == 0 {
+            return None; // evicted
+        }
+        // rank = number of set bits up to and including position `bit` in word `word`.
+        let prefix = self.block_prefix[word];
+        // Mask: all bits at positions 0..=bit (inclusive).
+        let mask = (1u64 << bit).wrapping_shl(1).wrapping_sub(1) | (1u64 << bit);
+        let rank = prefix + (block & mask).count_ones();
+        // rank is 1-based (the surviving node occupies arena slot rank-1).
+        Some(DagNodeId::new(rank - 1))
+    }
+
+    /// Total number of surviving slots.
+    #[must_use]
+    pub const fn n_kept(&self) -> u32 {
+        self.n_kept
+    }
+}
+
 /// Result of an eviction pass.
 ///
 /// `arena` is the compacted DAG with every protected node remapped to
 /// a fresh contiguous index range.
 ///
-/// `remap[old_id.index()]` is the new `DagNodeId` for that old id, or
-/// `DagNodeId::NONE` if the node was evicted. Arena IDs are dense
-/// integers so a `Vec` gives O(1) cache-friendly lookups instead of a
-/// `HashMap`.
+/// `remap` is a [`CompactRemap`] bitset-based translation table.
+/// For 1 M nodes it occupies ≈ 80 KB, a 50× reduction vs a flat
+/// `Vec<DagNodeId>` (4 MB). Use [`EvictionResult::translate`] for lookups.
 #[derive(Debug)]
 pub struct EvictionResult {
-    /// Compacted arena, every child reference resolved against
-    /// `remap`.
+    /// Compacted arena, every child reference resolved against `remap`.
     pub arena: DagArena,
-    /// Forward index: `remap[old_id.index()]` is the new id, or
-    /// `DagNodeId::NONE` if evicted.
-    pub remap: Vec<DagNodeId>,
+    /// Compact bitset remap: surviving old slot → new slot id.
+    pub remap: CompactRemap,
 }
 
 impl EvictionResult {
@@ -48,12 +127,7 @@ impl EvictionResult {
     /// (post-eviction) value, or `None` if it was evicted.
     #[must_use]
     pub fn translate(&self, old: DagNodeId) -> Option<DagNodeId> {
-        if old.is_none() {
-            return Some(DagNodeId::NONE);
-        }
-        self.remap.get(old.index())
-            .copied()
-            .filter(|id| !id.is_none())
+        self.remap.translate(old)
     }
 }
 
@@ -225,8 +299,13 @@ pub fn evict_nodes_budgeted_with_policy<P: EvictionPolicy>(
         }
     }
 
+    // Sweep phase: allocate surviving nodes into the compacted arena.
+    // `flat_remap[old_index]` holds the new DagNodeId (or NONE) so that
+    // child references can be rewritten during this pass. A CompactRemap
+    // is built afterwards from the set of surviving old indices.
     let mut compacted = DagArena::new();
-    let mut remap: Vec<DagNodeId> = vec![DagNodeId::NONE; total];
+    let mut flat_remap: Vec<DagNodeId> = vec![DagNodeId::NONE; total];
+    let mut kept_indices: Vec<usize> = Vec::new();
     let mut count = 0usize;
 
     for (i, is_protected) in protected.iter().enumerate() {
@@ -247,7 +326,7 @@ pub fn evict_nodes_budgeted_with_policy<P: EvictionPolicy>(
             .children
             .iter()
             .filter_map(|c| {
-                let mapped = remap.get(c.index()).copied().unwrap_or(DagNodeId::NONE);
+                let mapped = flat_remap.get(c.index()).copied().unwrap_or(DagNodeId::NONE);
                 if mapped.is_none() { None } else { Some(mapped) }
             })
             .collect();
@@ -259,13 +338,14 @@ pub fn evict_nodes_budgeted_with_policy<P: EvictionPolicy>(
             children: child_list,
         };
         let new_id = compacted.alloc(new_node);
-        remap[old_id.index()] = new_id;
+        flat_remap[old_id.index()] = new_id;
+        kept_indices.push(i);
     }
 
     // Post-pass: clear CANONICAL bits from nodes whose children are absent.
     // When the budget cuts the sweep early, a node may be copied into the
     // compacted arena but some of its children may have been excluded (their
-    // old ids map to NONE in `remap`). The CANONICAL flag would then be a
+    // old ids map to NONE in `flat_remap`). The CANONICAL flag would then be a
     // lie — the subtree is incomplete.
     let compacted_len = compacted.len();
     let mut to_clear: Vec<DagNodeId> = Vec::new();
@@ -288,6 +368,9 @@ pub fn evict_nodes_budgeted_with_policy<P: EvictionPolicy>(
             node.meta.flags = node.meta.flags.without_canonical();
         }
     }
+
+    // Build the compact remap from the list of surviving old slot indices.
+    let remap = CompactRemap::build(total, kept_indices.into_iter());
 
     EvictionResult {
         arena: compacted,
@@ -338,8 +421,8 @@ mod tests {
         let hot = DynamicHotspotTable::new();
         let result = evict_cold_nodes(b.arena(), &hot, 1);
         assert_eq!(result.arena.len(), 0);
-        // Vec remap has entries (one per old node) but all are NONE (evicted).
-        assert!(result.remap.iter().all(|id| id.is_none()));
+        // CompactRemap has no surviving slots — all old ids translate to None.
+        assert_eq!(result.remap.n_kept(), 0);
     }
 
     #[test]

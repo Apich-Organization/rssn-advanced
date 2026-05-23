@@ -9,10 +9,11 @@
 
 use nom::IResult;
 
-use super::error::{ParseError, Span};
+use super::error::{ParseError, Span, cold_parse_error_unexpected_eof, cold_parse_error_unexpected_token};
 use super::lexer::{parse_char, parse_constant, parse_identifier, ws};
 use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
+use crate::dag::symbol::SymbolKind;
 
 /// Maximum allowed depth of parenthesis / operator recursion.
 ///
@@ -44,13 +45,18 @@ pub struct PrecedenceTable {
     /// Maps operator string → (precedence, is_right_associative).
     /// Single-character operators are stored as single-char strings.
     entries: std::collections::HashMap<String, (u8, bool)>,
+    /// Maps prefix unary operator string → DAG `SymbolKind` for the node to build.
+    unary: std::collections::HashMap<String, SymbolKind>,
 }
 
 impl PrecedenceTable {
     /// Creates the default table matching the built-in parser behaviour.
     #[must_use]
     pub fn default_table() -> Self {
-        let mut t = Self { entries: std::collections::HashMap::new() };
+        let mut t = Self {
+            entries: std::collections::HashMap::new(),
+            unary: std::collections::HashMap::new(),
+        };
         t.entries.insert("+".into(), (1, false));
         t.entries.insert("-".into(), (1, false));
         t.entries.insert("*".into(), (2, false));
@@ -63,7 +69,10 @@ impl PrecedenceTable {
     /// Creates an empty table (no operators registered).
     #[must_use]
     pub fn empty() -> Self {
-        Self { entries: std::collections::HashMap::new() }
+        Self {
+            entries: std::collections::HashMap::new(),
+            unary: std::collections::HashMap::new(),
+        }
     }
 
     /// Registers a new infix operator by name (single- or multi-character).
@@ -119,6 +128,24 @@ impl PrecedenceTable {
             .filter(|k| k.len() > 1)
             .map(String::as_str)
     }
+
+    /// Registers a prefix unary operator (e.g. `"!"`, `"~"`, `"not"`).
+    ///
+    /// When the parser encounters this prefix in atom position, it consumes
+    /// it, recursively parses the operand, and wraps it in a DAG node whose
+    /// `SymbolKind` is `kind`. The prefix is matched literally from the
+    /// current position (after whitespace).
+    pub fn register_unary_op(&mut self, prefix: impl Into<String>, kind: SymbolKind) {
+        self.unary.insert(prefix.into(), kind);
+    }
+
+    /// Iterator over all registered prefix unary operators.
+    ///
+    /// Yields `(prefix, kind)` pairs. Use this to inspect what custom
+    /// unary operators are active without modifying the table.
+    pub fn unary_ops(&self) -> impl Iterator<Item = (&str, &SymbolKind)> {
+        self.unary.iter().map(|(k, v)| (k.as_str(), v))
+    }
 }
 
 /// Returns the precedence of an operator. Higher number means higher precedence.
@@ -138,6 +165,8 @@ const fn op_right_associative(op: char) -> bool {
 
 /// Internal recursion-capped error sentinel. We return it via an
 /// `ErrorKind::TooLarge` so `nom`'s Err path knows to propagate it.
+#[cold]
+#[inline(never)]
 fn too_deep(input: &str) -> nom::Err<nom::error::Error<&str>> {
     nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge))
 }
@@ -305,6 +334,31 @@ fn parse_atom_with_table<'a>(
         let (rem, atom) = parse_expr_climbing_with_table(rem, builder, 3, depth, table)?;
         let neg = builder.neg(atom);
         return Ok((rem, neg));
+    }
+
+    // 2b. User-registered prefix unary operators (e.g. "!", "~", "not").
+    // Sort by prefix length descending so longer prefixes take priority.
+    {
+        let trimmed = input.trim_start();
+        let mut candidates: Vec<(&str, &SymbolKind)> = table.unary_ops().collect();
+        candidates.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        for (prefix, kind) in candidates {
+            if trimmed.starts_with(prefix) {
+                let after = &trimmed[prefix.len()..];
+                // For single-char prefixes accept any position; for
+                // multi-char word prefixes ensure a word boundary.
+                let ok = prefix.chars().next().is_some_and(|c| !c.is_alphanumeric() && c != '_')
+                    || after.is_empty()
+                    || !after.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_');
+                if ok {
+                    let (rem, atom) =
+                        parse_expr_climbing_with_table(after, builder, 3, depth, table)?;
+                    use crate::dag::metadata::NodeFlags;
+                    let node_id = builder.operator(*kind, &[atom], NodeFlags::EMPTY);
+                    return Ok((rem, node_id));
+                }
+            }
+        }
     }
 
     // 3. Numeric constant.
@@ -481,34 +535,33 @@ pub fn parse_with_table(
         Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
             let offset = offset_in(input, e.input).unwrap_or(input.len());
             let len = e.input.len().min(input.len().saturating_sub(offset));
-            let msg = match e.code {
-                nom::error::ErrorKind::TooLarge => {
-                    format!("Parenthesis depth exceeded {MAX_PAREN_DEPTH}")
-                }
+            let span = super::error::Span::from_offset(input, offset, len);
+            match e.code {
+                nom::error::ErrorKind::TooLarge => Err(super::error::ParseError {
+                    message: format!("Parenthesis depth exceeded {MAX_PAREN_DEPTH}"),
+                    span,
+                }),
                 nom::error::ErrorKind::Char => {
                     if e.input.trim_start().is_empty() {
-                        "Unexpected end of input; expected closing ')'".to_owned()
+                        Err(cold_parse_error_unexpected_eof(span))
                     } else {
                         let bad = e.input.trim_start().chars().next().unwrap_or('?');
-                        format!(
-                            "Unexpected character {bad:?}; expected a number, variable, or '('"
-                        )
+                        Err(cold_parse_error_unexpected_token(span, bad))
                     }
                 }
-                nom::error::ErrorKind::Tag => {
-                    "Expected ',' or ')' to close function argument list".to_owned()
-                }
-                nom::error::ErrorKind::Eof => {
-                    "Unexpected end of input; expression is incomplete".to_owned()
-                }
-                _ => {
-                    format!("Syntax error near {:?}", &e.input[..e.input.len().min(8)])
-                }
-            };
-            Err(super::error::ParseError {
-                message: msg,
-                span: super::error::Span::from_offset(input, offset, len),
-            })
+                nom::error::ErrorKind::Tag => Err(super::error::ParseError {
+                    message: "Expected ',' or ')' to close function argument list".to_owned(),
+                    span,
+                }),
+                nom::error::ErrorKind::Eof => Err(super::error::ParseError {
+                    message: "Unexpected end of input; expression is incomplete".to_owned(),
+                    span,
+                }),
+                _ => Err(super::error::ParseError {
+                    message: format!("Syntax error near {:?}", &e.input[..e.input.len().min(8)]),
+                    span,
+                }),
+            }
         }
         Err(nom::Err::Incomplete(_)) => Err(super::error::ParseError {
             message: "Incomplete input".to_owned(),
@@ -551,35 +604,36 @@ pub fn parse_expression(input: &str, builder: &mut DagBuilder) -> Result<DagNode
         Err(nom::Err::Error(e) | nom::Err::Failure(e)) => {
             let offset = offset_in(input, e.input).unwrap_or(input.len());
             let len = e.input.len().min(input.len().saturating_sub(offset));
-            let msg = match e.code {
-                nom::error::ErrorKind::TooLarge => {
-                    format!("Parenthesis depth exceeded {MAX_PAREN_DEPTH}")
-                }
+            let span = Span::from_offset(input, offset, len);
+            match e.code {
+                nom::error::ErrorKind::TooLarge => Err(ParseError {
+                    message: format!("Parenthesis depth exceeded {MAX_PAREN_DEPTH}"),
+                    span,
+                }),
                 nom::error::ErrorKind::Char => {
                     // `nom_char(c)` emits Char on mismatch. When input is
                     // exhausted it means a required character (e.g. `)`) was
                     // never found; when input has a character it is unexpected.
                     if e.input.trim_start().is_empty() {
-                        "Unexpected end of input; expected closing ')'".to_owned()
+                        Err(cold_parse_error_unexpected_eof(span))
                     } else {
                         let bad = e.input.trim_start().chars().next().unwrap_or('?');
-                        format!("Unexpected character {bad:?}; expected a number, variable, or '('")
+                        Err(cold_parse_error_unexpected_token(span, bad))
                     }
                 }
-                nom::error::ErrorKind::Tag => {
-                    "Expected ',' or ')' to close function argument list".to_owned()
-                }
-                nom::error::ErrorKind::Eof => {
-                    "Unexpected end of input; expression is incomplete".to_owned()
-                }
-                _ => {
-                    format!("Syntax error near {:?}", &e.input[..e.input.len().min(8)])
-                }
-            };
-            Err(ParseError {
-                message: msg,
-                span: Span::from_offset(input, offset, len),
-            })
+                nom::error::ErrorKind::Tag => Err(ParseError {
+                    message: "Expected ',' or ')' to close function argument list".to_owned(),
+                    span,
+                }),
+                nom::error::ErrorKind::Eof => Err(ParseError {
+                    message: "Unexpected end of input; expression is incomplete".to_owned(),
+                    span,
+                }),
+                _ => Err(ParseError {
+                    message: format!("Syntax error near {:?}", &e.input[..e.input.len().min(8)]),
+                    span,
+                }),
+            }
         }
         Err(nom::Err::Incomplete(_)) => Err(ParseError {
             message: "Incomplete input".to_owned(),

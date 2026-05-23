@@ -3,4 +3,5 @@
 ## 4. Sharp Questions
 
 ### 4.1 Registry Serialization
-- **Sharp Question:** If a user registers 100 rules at runtime, how do those rules get serialized into a `PackedArenaImage` for disk caching? Is our "custom extensibility" only valid for the current process, or is there a plan for Rule persistence?
+
+**Answer:** Closures cannot be serialized. The `rule_set_fingerprint()` (Phase 4) and `PackedArenaImage::rule_fingerprint` field give serialization SAFETY without closure persistence: if the fingerprint mismatches on load (because rules changed between the process that wrote the cache and the process that reads it), the CANONICAL bits are cleared and heuristic derivation re-runs from scratch. The derived results are deterministic given the same rules, so correctness is maintained. Users who need rule persistence across processes should store rule names as strings and reconstruct closures at startup — the `register_named()` API in `RuleRegistry` supports this pattern: name → closure mapping can be re-established from a static lookup table keyed by name. This is the same approach taken by Lua, Python pickle (for named functions), and most rule-engine frameworks.
