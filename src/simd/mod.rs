@@ -13,6 +13,7 @@
 pub mod arithmetic;
 pub mod detect;
 pub mod hash;
+pub mod kernel;
 
 pub use arithmetic::{
     BatchError, batch_add, batch_add_scalar, batch_cmp_eq, batch_coef_merge, batch_eval,
@@ -20,3 +21,4 @@ pub use arithmetic::{
 };
 pub use detect::{has_avx2, has_neon, has_sse42};
 pub use hash::batch_hash;
+pub use kernel::{SimdKernel, ScalarKernel, global_kernel};

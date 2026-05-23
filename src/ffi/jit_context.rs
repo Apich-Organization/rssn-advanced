@@ -23,6 +23,9 @@ use std::os::raw::c_void;
 use crate::dag::builder::DagBuilder;
 use crate::ffi::types::RssnStatus;
 
+#[cfg(feature = "cranelift-jit")]
+use std::sync::{Mutex, OnceLock};
+
 // =========================================================================
 // JIT-enabled build
 // =========================================================================
@@ -33,6 +36,35 @@ use crate::ffi::types::RssnStatus;
 #[cfg(feature = "cranelift-jit")]
 pub struct RssnJitContext {
     compiler: crate::jit::compiler::JitCompiler,
+}
+
+/// Process-level shared JIT context.
+///
+/// `rssn_dag_compile` routes here instead of creating a fresh `JitCompiler`
+/// on every call. Cranelift ISA detection and module setup happen exactly
+/// once, on first use. `JitCompiler` is `!Sync` so we wrap in `Mutex`.
+#[cfg(feature = "cranelift-jit")]
+static GLOBAL_JIT_CTX: OnceLock<Mutex<RssnJitContext>> = OnceLock::new();
+
+/// Returns a reference to the process-level `Mutex<RssnJitContext>`,
+/// initialising it on first call.
+#[cfg(feature = "cranelift-jit")]
+pub(crate) fn global_jit_ctx() -> &'static Mutex<RssnJitContext> {
+    GLOBAL_JIT_CTX.get_or_init(|| {
+        Mutex::new(RssnJitContext {
+            compiler: crate::jit::compiler::JitCompiler::new(),
+        })
+    })
+}
+
+/// Implementation block — internal access used by `c_api.rs`.
+#[cfg(feature = "cranelift-jit")]
+impl RssnJitContext {
+    /// Returns a mutable reference to the underlying `JitCompiler`.
+    #[inline]
+    pub(crate) fn compiler_mut(&mut self) -> &mut crate::jit::compiler::JitCompiler {
+        &mut self.compiler
+    }
 }
 
 /// Creates a new persistent JIT context.
@@ -84,7 +116,7 @@ pub extern "C" fn rssn_dag_compile_with_ctx(
         let builder_ref = unsafe { &mut *builder };
         let root_id = crate::dag::node::DagNodeId::new(root);
         let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
-        match ctx_ref.compiler.compile(&ast) {
+        match ctx_ref.compiler_mut().compile(&ast) {
             Ok(compiled_fn) => {
                 unsafe { *out_fn = compiled_fn as *mut c_void };
                 RssnStatus::Success

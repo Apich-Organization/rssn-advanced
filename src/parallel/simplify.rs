@@ -56,18 +56,18 @@ impl SimplifyConfig {
     }
 }
 
-/// Cache-line padded thread-local state to physically isolate counters.
+/// Per-thread telemetry for staged simplification.
 ///
-/// Under high concurrency, threads updating adjacent memory addresses trigger
-/// false-sharing (cache line invalidations on MESI). This struct aligns memory
-/// to 128 bytes, placing each thread's state on a fresh cache line.
-///
-/// Tracks three meaningful per-thread metrics (`parallel_review §3.1`):
+/// Tracks three per-thread metrics (`parallel_review §3.1`):
 /// - `steps_count` — total simplification rounds performed by this thread
 /// - `nodes_visited` — total DAG nodes inspected during traversal
 /// - `rewrites_applied` — total rewrite rules that fired (pattern matches)
+///
+/// The 128-byte `repr(align)` was removed: cache-line padding guards against
+/// false-sharing only when *different threads* write to *adjacent* memory. A
+/// `thread_local!` value lives in per-thread storage — no other thread can
+/// touch it — so over-alignment is pure waste.
 #[derive(Debug)]
-#[repr(align(128))]
 pub struct ThreadLocalState {
     /// Total simplification steps (one per [`run_staged_simplification`] round).
     pub steps_count: AtomicU64,

@@ -11,7 +11,7 @@
 //! throughput improvement from pairing, slower clock-to-clock.
 
 use crate::asm_presets::hash_u64x2_aesni;
-use crate::simd::arithmetic::BatchError;
+use crate::simd::arithmetic::{BatchError, cold_batch_error_length_mismatch};
 
 /// Computes one `u64` hash per input key using the AES-NI 2-lane kernel.
 ///
@@ -26,7 +26,7 @@ use crate::simd::arithmetic::BatchError;
 /// Returns [`BatchError::LengthMismatch`] when `keys.len() != hashes.len()`.
 pub fn batch_hash(keys: &[u64], hashes: &mut [u64]) -> Result<(), BatchError> {
     if keys.len() != hashes.len() {
-        return Err(BatchError::LengthMismatch);
+        return cold_batch_error_length_mismatch();
     }
 
     let n = keys.len();

@@ -156,13 +156,12 @@ pub extern "C" fn rssn_dag_compile(
     let result = catch_unwind(|| {
         let builder_ref = unsafe { &mut *builder };
         let root_id = DagNodeId::new(root);
-        
-        // Project root node to AST
         let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
 
-        // JIT compile
-        let mut compiler = crate::jit::compiler::JitCompiler::new();
-        match compiler.compile(&ast) {
+        // Reuse the process-level JIT context to amortise Cranelift init cost.
+        let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
+        let mut ctx = ctx_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        match ctx.compiler_mut().compile(&ast) {
             Ok(compiled_fn) => {
                 let ptr = compiled_fn as *mut c_void;
                 unsafe { *out_fn = ptr };
@@ -413,8 +412,10 @@ pub extern "C" fn rssn_dag_compile_v2(
         let builder_ref = unsafe { &mut *builder };
         let root_id = DagNodeId::new(root);
         let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
-        let mut compiler = crate::jit::compiler::JitCompiler::new();
-        match compiler.compile(&ast) {
+        // Reuse the process-level JIT context.
+        let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
+        let mut ctx = ctx_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        match ctx.compiler_mut().compile(&ast) {
             Ok(compiled_fn) => {
                 unsafe { *out_fn = compiled_fn as *mut c_void };
                 RssnStatus::Success

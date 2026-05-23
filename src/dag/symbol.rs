@@ -57,8 +57,55 @@ impl fmt::Display for OpKind {
 }
 
 /// A function identifier, referencing a named function in the registry.
+///
+/// Values `0..=6` are reserved as **intrinsic** identifiers, one per
+/// [`OpKind`] variant (matching its `#[repr(u8)]` discriminant). This
+/// lets built-in operators be expressed as `FnId` for the JIT/parallel
+/// engines that want to handle them uniformly alongside user functions.
+///
+/// User-defined functions must use IDs ≥ [`FnId::FIRST_USER`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct FnId(pub(crate) u32);
+
+impl FnId {
+    /// The first `FnId` available for user-defined functions.
+    ///
+    /// IDs `0..=6` are reserved for built-in operators.
+    pub const FIRST_USER: Self = Self(7);
+
+    /// Converts an [`OpKind`] to its intrinsic `FnId`.
+    ///
+    /// Each `OpKind` variant's `#[repr(u8)]` discriminant becomes the `FnId`
+    /// value (0 = Add, 1 = Sub, … 6 = Neg). These IDs are stable and will
+    /// not be reassigned.
+    #[must_use]
+    pub const fn from_op(op: OpKind) -> Self {
+        Self(op as u32)
+    }
+
+    /// Returns the corresponding [`OpKind`] if this `FnId` is an intrinsic.
+    ///
+    /// Returns `None` for user-defined function IDs (≥ 7).
+    #[must_use]
+    pub fn to_op(self) -> Option<OpKind> {
+        match self.0 {
+            0 => Some(OpKind::Add),
+            1 => Some(OpKind::Sub),
+            2 => Some(OpKind::Mul),
+            3 => Some(OpKind::Div),
+            4 => Some(OpKind::Pow),
+            5 => Some(OpKind::Mod),
+            6 => Some(OpKind::Neg),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if this `FnId` maps to a built-in operator.
+    #[must_use]
+    pub const fn is_intrinsic(self) -> bool {
+        self.0 <= 6
+    }
+}
 
 /// The kind of an operator node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]

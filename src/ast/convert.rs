@@ -20,6 +20,7 @@ use crate::dag::arena::DagArena;
 use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
 use crate::dag::symbol::{OpKind, SymbolKind};
+use crate::error::cold_ast_error_unknown_symbol_kind;
 
 /// A frame on the explicit traversal stack.
 ///
@@ -146,7 +147,7 @@ fn push_dag_frame(
 fn backpatch_children(projection: &mut AstProjection, ast_idx: usize, child_indices: &[usize]) {
     let ptrs: Vec<RelPtr<AstNode>> = child_indices
         .iter()
-        .map(|&child_idx| RelPtr::from_indices(ast_idx, child_idx))
+        .map(|&child_idx| RelPtr::<AstNode, i32>::from_indices(ast_idx, child_idx))
         .collect();
 
     let children = match ptrs.len() {
@@ -303,11 +304,11 @@ pub fn dag_to_ast_checked(
     root: DagNodeId,
 ) -> Result<AstProjection, crate::error::AstError> {
     if root.is_none() || arena.get(root).is_none() {
-        return Err(crate::error::AstError::UnknownSymbolKind);
+        return cold_ast_error_unknown_symbol_kind();
     }
     let proj = dag_to_ast(arena, root);
     if proj.is_empty() {
-        Err(crate::error::AstError::UnknownSymbolKind)
+        cold_ast_error_unknown_symbol_kind()
     } else {
         Ok(proj)
     }

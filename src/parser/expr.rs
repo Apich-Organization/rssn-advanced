@@ -28,6 +28,12 @@ pub const MAX_PAREN_DEPTH: u16 = 200;
 /// infix operators with custom precedence levels can be registered at runtime
 /// without modifying the parser source.
 ///
+/// Named operators (multi-character strings such as `"and"`, `"or"`, `"mod"`,
+/// `"xor"`) are supported alongside single-character operators. Named operators
+/// are matched as identifiers during infix parsing — after the left operand is
+/// parsed, the parser checks whether the next token matches any registered
+/// named operator before falling back to single-character matching.
+///
 /// Higher precedence numbers bind more tightly (e.g. `*` before `+`).
 /// Right-associative operators (currently only `^`) are marked separately.
 ///
@@ -35,8 +41,9 @@ pub const MAX_PAREN_DEPTH: u16 = 200;
 /// hardcoded `op_precedence` / `op_right_associative` functions.
 #[derive(Debug, Clone)]
 pub struct PrecedenceTable {
-    /// Maps operator character → (precedence, is_right_associative).
-    entries: std::collections::HashMap<char, (u8, bool)>,
+    /// Maps operator string → (precedence, is_right_associative).
+    /// Single-character operators are stored as single-char strings.
+    entries: std::collections::HashMap<String, (u8, bool)>,
 }
 
 impl PrecedenceTable {
@@ -44,12 +51,12 @@ impl PrecedenceTable {
     #[must_use]
     pub fn default_table() -> Self {
         let mut t = Self { entries: std::collections::HashMap::new() };
-        t.entries.insert('+', (1, false));
-        t.entries.insert('-', (1, false));
-        t.entries.insert('*', (2, false));
-        t.entries.insert('/', (2, false));
-        t.entries.insert('%', (2, false));
-        t.entries.insert('^', (3, true));
+        t.entries.insert("+".into(), (1, false));
+        t.entries.insert("-".into(), (1, false));
+        t.entries.insert("*".into(), (2, false));
+        t.entries.insert("/".into(), (2, false));
+        t.entries.insert("%".into(), (2, false));
+        t.entries.insert("^".into(), (3, true));
         t
     }
 
@@ -59,25 +66,58 @@ impl PrecedenceTable {
         Self { entries: std::collections::HashMap::new() }
     }
 
-    /// Registers a new infix operator.
+    /// Registers a new infix operator by name (single- or multi-character).
     ///
-    /// - `op`: the operator character (e.g. `'|'` for bitwise-or).
+    /// - `op`: any string key; single chars such as `'+'` are converted to a
+    ///   one-character string. Multi-char keys like `"and"` or `"mod"` are
+    ///   matched as identifiers during infix parsing.
     /// - `precedence`: binding strength; higher binds tighter.
     /// - `right_associative`: `true` for right-to-left evaluation (like `^`).
-    pub fn register(&mut self, op: char, precedence: u8, right_associative: bool) {
-        self.entries.insert(op, (precedence, right_associative));
+    pub fn register_op(&mut self, op: impl Into<String>, precedence: u8, right_associative: bool) {
+        self.entries.insert(op.into(), (precedence, right_associative));
     }
 
-    /// Returns the precedence of `op`, or `None` if `op` is not a registered operator.
+    /// Registers a single-character infix operator.
+    ///
+    /// Convenience alias for [`register_op`](Self::register_op) with a `char`
+    /// argument; preserves backward compatibility with the previous API.
+    pub fn register(&mut self, op: char, precedence: u8, right_associative: bool) {
+        self.register_op(op.to_string(), precedence, right_associative);
+    }
+
+    /// Returns the precedence of a single-char operator, or `None` if not registered.
     #[must_use]
     pub fn precedence(&self, op: char) -> Option<u8> {
-        self.entries.get(&op).map(|&(prec, _)| prec)
+        self.entries.get(&op.to_string()).map(|&(prec, _)| prec)
     }
 
-    /// Returns `true` if `op` is right-associative.
+    /// Returns the precedence of any operator (single- or multi-char).
+    #[must_use]
+    pub fn precedence_str(&self, op: &str) -> Option<u8> {
+        self.entries.get(op).map(|&(prec, _)| prec)
+    }
+
+    /// Returns `true` if a single-char operator is right-associative.
     #[must_use]
     pub fn is_right_associative(&self, op: char) -> bool {
-        self.entries.get(&op).is_some_and(|&(_, ra)| ra)
+        self.entries.get(&op.to_string()).is_some_and(|&(_, ra)| ra)
+    }
+
+    /// Returns `true` if any operator (single- or multi-char) is right-associative.
+    #[must_use]
+    pub fn is_right_associative_str(&self, op: &str) -> bool {
+        self.entries.get(op).is_some_and(|&(_, ra)| ra)
+    }
+
+    /// Returns all registered multi-character operator names (length > 1).
+    ///
+    /// Used by the infix parser to attempt named-operator matching before
+    /// falling back to single-character operators.
+    #[must_use]
+    pub fn named_ops(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys()
+            .filter(|k| k.len() > 1)
+            .map(String::as_str)
     }
 }
 
@@ -329,8 +369,49 @@ fn parse_expr_climbing_with_table<'a>(
     let (mut rem, mut lhs) = parse_atom_with_table(input, builder, depth, table)?;
 
     loop {
-        let next_input = rem;
-        let mut chars = next_input.trim_start().chars();
+        let trimmed = rem.trim_start();
+
+        // Try named operators (multi-char, matched as identifiers) first.
+        // We sort by length descending to prefer longer matches ("and" over "a").
+        let mut named_match: Option<(&str, u8, bool, &str)> = None; // (op_name, prec, ra, rem_after)
+        {
+            let mut candidates: Vec<&str> = table.named_ops().collect();
+            candidates.sort_by(|a, b| b.len().cmp(&a.len()));
+            for named_op in candidates {
+                if trimmed.starts_with(named_op) {
+                    // Ensure the match is a complete identifier token (not a prefix of a longer word).
+                    let after = &trimmed[named_op.len()..];
+                    let is_word_boundary = after.is_empty()
+                        || !after.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_');
+                    if is_word_boundary {
+                        if let Some(prec) = table.precedence_str(named_op) {
+                            let ra = table.is_right_associative_str(named_op);
+                            named_match = Some((named_op, prec, ra, after.trim_start()));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((op_name, op_prec, ra, rem_after_op)) = named_match {
+            if op_prec < min_prec {
+                break;
+            }
+            rem = rem_after_op;
+            let next_min_prec = if ra { op_prec } else { op_prec + 1 };
+            let next_depth = if ra { depth.saturating_add(1) } else { depth };
+            let (rem_after_rhs, rhs) =
+                parse_expr_climbing_with_table(rem, builder, next_min_prec, next_depth, table)?;
+            rem = rem_after_rhs;
+            // Named operators beyond the built-ins become FunctionCall nodes with two children.
+            let fn_id = builder.intern_function(op_name);
+            lhs = builder.function_call(fn_id, &[lhs, rhs]);
+            continue;
+        }
+
+        // Single-character operator path.
+        let mut chars = trimmed.chars();
         let Some(op_char) = chars.next() else {
             break;
         };

@@ -198,10 +198,20 @@ impl PackedDagNode {
 ///
 /// Built by [`PackedArenaImage::from_arena`]. The owned `Vec`s here are
 /// what get encoded; the decoded counterpart is [`BorrowedArenaView`].
+///
+/// The `rule_fingerprint` field captures the [`RuleRegistry::rule_set_fingerprint`]
+/// at serialisation time. On load, if the fingerprint differs from the current
+/// registry's fingerprint, CANONICAL bits must be cleared — they were computed
+/// under a different rewrite set. A fingerprint of `0` means "no registry was
+/// used" and CANONICAL bits are left intact.
 #[derive(Debug, Clone, Default)]
 pub struct PackedArenaImage {
+    /// Packed nodes in arena order.
     nodes: Vec<PackedDagNode>,
+    /// Overflow child IDs for nodes with arity > 2.
     children_pool: Vec<u32>,
+    /// Rule-set fingerprint at serialisation time; `0` = no registry.
+    pub rule_fingerprint: u64,
 }
 
 impl PackedArenaImage {
@@ -245,6 +255,7 @@ impl PackedArenaImage {
         Self {
             nodes,
             children_pool,
+            rule_fingerprint: 0,
         }
     }
 
@@ -282,6 +293,7 @@ impl PackedArenaImage {
         let view = SerializableView {
             nodes: BorrowedSlice::new(&self.nodes),
             children_pool: BorrowedSlice::new(&self.children_pool),
+            rule_fingerprint: self.rule_fingerprint,
         };
         encode_zerocopy(view)
     }
@@ -300,6 +312,7 @@ impl PackedArenaImage {
         let view = SerializableView {
             nodes: BorrowedSlice::new(&self.nodes),
             children_pool: BorrowedSlice::new(&self.children_pool),
+            rule_fingerprint: self.rule_fingerprint,
         };
         struct IoWriter<W: std::io::Write>(W);
         impl<W: std::io::Write> BincodeWriter for IoWriter<W> {
@@ -404,14 +417,16 @@ const fn empty_placeholder() -> PackOne {
 // Encode/Decode of the image header
 // =========================================================================
 
-/// Internal helper that serialises the two side arrays back-to-back.
+/// Internal helper that serialises the two side arrays plus the fingerprint header.
 struct SerializableView<'a> {
     nodes: BorrowedSlice<'a, PackedDagNode>,
     children_pool: BorrowedSlice<'a, u32>,
+    rule_fingerprint: u64,
 }
 
 impl Encode for SerializableView<'_> {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        self.rule_fingerprint.encode(encoder)?;
         self.nodes.encode(encoder)?;
         self.children_pool.encode(encoder)?;
         Ok(())
@@ -426,10 +441,16 @@ impl Encode for SerializableView<'_> {
 ///
 /// The byte buffer (typically an [`crate::zerocopy::MmapBuffer`]) owns the
 /// data; `BorrowedArenaView` carries only borrowed slices.
+///
+/// `rule_fingerprint` is the fingerprint stored in the header. Compare it
+/// against [`crate::heuristic::rule_registry::RuleRegistry::rule_set_fingerprint`]
+/// to detect rule-set staleness; clear CANONICAL bits from all nodes if they differ.
 #[derive(Debug, Clone, Copy)]
 pub struct BorrowedArenaView<'a> {
     nodes: BorrowedSlice<'a, PackedDagNode>,
     children_pool: BorrowedSlice<'a, u32>,
+    /// Rule-set fingerprint written at serialisation time; `0` = no registry.
+    pub rule_fingerprint: u64,
 }
 
 impl<'a> BorrowedArenaView<'a> {
@@ -558,11 +579,13 @@ impl<'de> BorrowDecode<'de, ()> for BorrowedArenaView<'de> {
     fn borrow_decode<D: BorrowDecoder<'de, Context = ()>>(
         decoder: &mut D,
     ) -> Result<Self, DecodeError> {
+        let rule_fingerprint = u64::borrow_decode(decoder)?;
         let nodes = BorrowedSlice::<PackedDagNode>::borrow_decode(decoder)?;
         let children_pool = BorrowedSlice::<u32>::borrow_decode(decoder)?;
         Ok(Self {
             nodes,
             children_pool,
+            rule_fingerprint,
         })
     }
 }

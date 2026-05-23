@@ -83,8 +83,8 @@ mod ast_tests {
         let const_idx = ast.len() - 1;
 
         // Root is at index 0. The sum subtree starts at index 1.
-        let left_ptr = rssn_advanced::ast::pointer::RelPtr::from_indices(0, 1);
-        let right_ptr = rssn_advanced::ast::pointer::RelPtr::from_indices(0, const_idx);
+        let left_ptr = rssn_advanced::ast::pointer::RelPtr::<_, i32>::from_indices(0, 1);
+        let right_ptr = rssn_advanced::ast::pointer::RelPtr::<_, i32>::from_indices(0, const_idx);
 
         // Update the root to be a multiplication operator
         ast.nodes[0].kind = SymbolKind::Operator(OpKind::Mul);

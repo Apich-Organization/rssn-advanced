@@ -262,6 +262,33 @@ pub fn evict_nodes_budgeted_with_policy<P: EvictionPolicy>(
         remap[old_id.index()] = new_id;
     }
 
+    // Post-pass: clear CANONICAL bits from nodes whose children are absent.
+    // When the budget cuts the sweep early, a node may be copied into the
+    // compacted arena but some of its children may have been excluded (their
+    // old ids map to NONE in `remap`). The CANONICAL flag would then be a
+    // lie — the subtree is incomplete.
+    let compacted_len = compacted.len();
+    let mut to_clear: Vec<DagNodeId> = Vec::new();
+    for i in 0..compacted_len {
+        #[allow(clippy::cast_possible_truncation)]
+        let id = DagNodeId::new(i as u32);
+        if let Some(node) = compacted.get(id) {
+            if node.meta.flags.is_canonical() {
+                let children_valid = node.children.iter().all(|c| {
+                    !c.is_none() && c.index() < compacted_len
+                });
+                if !children_valid {
+                    to_clear.push(id);
+                }
+            }
+        }
+    }
+    for id in to_clear {
+        if let Some(node) = compacted.get_mut(id) {
+            node.meta.flags = node.meta.flags.without_canonical();
+        }
+    }
+
     EvictionResult {
         arena: compacted,
         remap,

@@ -192,7 +192,7 @@ mod linux {
             )
         };
         if ptr == libc::MAP_FAILED {
-            return Err(StorageError::Io);
+            return crate::error::cold_storage_error_io();
         }
         Ok(super::MmapBuffer {
             backing: super::Backing::Mmap(MmapRegion {
@@ -258,7 +258,7 @@ mod win {
             )
         };
         if mapping.is_null() {
-            return Err(StorageError::Io);
+            return crate::error::cold_storage_error_io();
         }
 
         // SAFETY: `mapping` was just successfully created; we ask for a
@@ -268,7 +268,7 @@ mod win {
             unsafe {
                 CloseHandle(mapping);
             }
-            return Err(StorageError::Io);
+            return crate::error::cold_storage_error_io();
         }
 
         Ok(super::MmapBuffer {

@@ -8,8 +8,18 @@
 //! `Some(replacement_id)` when the rule fires or `None` to pass.
 //!
 //! Rules support priority ordering and optional kind filters for efficient dispatch.
+//!
+//! # Rule-set fingerprinting
+//!
+//! Because rules are closures they cannot be serialised. To detect whether the
+//! rule set changed between a `PackedArenaImage` serialisation and the current
+//! load, [`RuleRegistry::rule_set_fingerprint`] hashes the ordered sequence of
+//! rule names. If the fingerprint stored in the image header differs from the
+//! current registry's fingerprint, CANONICAL bits in the loaded arena should be
+//! cleared — they were computed under a different set of rewrites.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
 use crate::dag::symbol::SymbolKind;
@@ -25,6 +35,8 @@ struct PrioritizedRule {
     priority: i32,
     #[allow(dead_code)]
     kind_filter: Option<SymbolKind>,
+    /// Human-readable name used by [`RuleRegistry::rule_set_fingerprint`].
+    name: String,
 }
 
 /// Rule registry with O(rules_for_kind) dispatch.
@@ -94,7 +106,7 @@ impl RuleRegistry {
     /// Register a rule with default priority (0) and no kind filter (applies to all).
     pub fn register<F>(&mut self, rule: F)
     where F: Fn(&mut DagBuilder, SymbolKind, &[DagNodeId]) -> Option<DagNodeId> + Send + Sync + 'static {
-        self.register_with_priority(rule, 0, None);
+        self.register_named_impl(format!("rule#{}", self.rules.len()), rule, 0, None);
     }
 
     /// Register a rule with explicit priority and optional kind filter.
@@ -104,8 +116,22 @@ impl RuleRegistry {
     /// inapplicable rules entirely (O(rules_for_kind) instead of O(total_rules)).
     pub fn register_with_priority<F>(&mut self, rule: F, priority: i32, kind_filter: Option<SymbolKind>)
     where F: Fn(&mut DagBuilder, SymbolKind, &[DagNodeId]) -> Option<DagNodeId> + Send + Sync + 'static {
+        self.register_named_impl(format!("rule#{}", self.rules.len()), rule, priority, kind_filter);
+    }
+
+    /// Register a named rule with explicit priority and optional kind filter.
+    ///
+    /// The `name` participates in [`Self::rule_set_fingerprint`], enabling
+    /// detection of rule-set changes across serialise/deserialise round-trips.
+    pub fn register_named<F>(&mut self, name: &str, rule: F, priority: i32, kind_filter: Option<SymbolKind>)
+    where F: Fn(&mut DagBuilder, SymbolKind, &[DagNodeId]) -> Option<DagNodeId> + Send + Sync + 'static {
+        self.register_named_impl(name.to_owned(), rule, priority, kind_filter);
+    }
+
+    fn register_named_impl<F>(&mut self, name: String, rule: F, priority: i32, kind_filter: Option<SymbolKind>)
+    where F: Fn(&mut DagBuilder, SymbolKind, &[DagNodeId]) -> Option<DagNodeId> + Send + Sync + 'static {
         let idx = self.rules.len();
-        self.rules.push(PrioritizedRule { func: Box::new(rule), priority, kind_filter: kind_filter.clone() });
+        self.rules.push(PrioritizedRule { func: Box::new(rule), priority, kind_filter: kind_filter.clone(), name });
 
         if let Some(ref k) = kind_filter {
             let disc = kind_disc(k);
@@ -117,6 +143,38 @@ impl RuleRegistry {
             self.wildcard_indices.push(idx);
             self.wildcard_indices.sort_by(|&a, &b| self.rules[b].priority.cmp(&self.rules[a].priority));
         }
+    }
+
+    /// Returns a stable `u64` fingerprint derived from the ordered list of rule names.
+    ///
+    /// Rules are ordered by registration sequence (not by priority bucket). The
+    /// hash is computed with `rapidhash` over the concatenation of names — stable
+    /// across invocations as long as the same rules are registered in the same
+    /// order.
+    ///
+    /// A value of `0` means "no registry" when stored in a `PackedArenaImage`
+    /// header. This function never returns `0` for a non-empty registry (the
+    /// rapidhash seed ensures non-zero output for any non-empty input).
+    ///
+    /// If fingerprints differ between the stored image and the current registry,
+    /// CANONICAL bits should be cleared from all loaded nodes.
+    #[must_use]
+    pub fn rule_set_fingerprint(&self) -> u64 {
+        if self.rules.is_empty() {
+            return 0;
+        }
+        let mut h = rapidhash::fast::RapidHasher::default();
+        for rule in &self.rules {
+            rule.name.hash(&mut h);
+        }
+        // Guarantee non-zero so the "no registry" sentinel (0) is distinguishable.
+        let fp = h.finish();
+        if fp == 0 { u64::MAX } else { fp }
+    }
+
+    /// Returns an iterator over rule names in registration order.
+    pub fn named_rules(&self) -> impl Iterator<Item = &str> {
+        self.rules.iter().map(|r| r.name.as_str())
     }
 
     /// Returns the number of registered rules.

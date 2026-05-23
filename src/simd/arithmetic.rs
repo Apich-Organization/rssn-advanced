@@ -23,6 +23,7 @@ use crate::asm_presets::{
     add_f64x2_neon, add_f64x4_avx2, cmp_eq_f64x4, coef_merge_f64x4, fma_f64x4_avx2,
     mul_f64x2_neon, mul_f64x4_avx2,
 };
+use crate::rssn_error;
 
 // =========================================================================
 // Private scalar lane helpers (Change 7: deduplicate scalar fallback)
@@ -65,11 +66,13 @@ fn neon_available() -> bool {
     *HAS_NEON.get_or_init(|| crate::simd::detect::has_neon())
 }
 
-/// Reasons a batch arithmetic operation cannot proceed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BatchError {
-    /// One or more slice lengths disagree.
-    LengthMismatch,
+rssn_error! {
+    /// Reasons a batch arithmetic operation cannot proceed.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum BatchError {
+        /// One or more slice lengths disagree.
+        LengthMismatch,
+    }
 }
 
 /// Width (in `f64` lanes) of one AVX2-256 register.
@@ -88,7 +91,7 @@ const LANES: usize = 4;
 pub fn batch_add(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
     let n = lhs.len();
     if n != rhs.len() || n != result.len() {
-        return Err(BatchError::LengthMismatch);
+        return cold_batch_error_length_mismatch();
     }
 
     // Detect once per batch call rather than once per chunk call.
@@ -141,7 +144,7 @@ pub fn batch_add(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
 pub fn batch_mul(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
     let n = lhs.len();
     if n != rhs.len() || n != result.len() {
-        return Err(BatchError::LengthMismatch);
+        return cold_batch_error_length_mismatch();
     }
 
     let use_avx2 = avx2_available();
@@ -191,7 +194,7 @@ pub fn batch_mul(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
 pub fn batch_add_scalar(lhs: &[f64], scalar: f64, result: &mut [f64]) -> Result<(), BatchError> {
     let n = lhs.len();
     if n != result.len() {
-        return Err(BatchError::LengthMismatch);
+        return cold_batch_error_length_mismatch();
     }
 
     let use_simd = avx2_available();
@@ -242,7 +245,7 @@ pub fn batch_add_scalar(lhs: &[f64], scalar: f64, result: &mut [f64]) -> Result<
 pub fn batch_pow(base: &[f64], exp: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
     let n = base.len();
     if n != exp.len() || n != result.len() {
-        return Err(BatchError::LengthMismatch);
+        return cold_batch_error_length_mismatch();
     }
     for ((b, e), o) in base.iter().zip(exp.iter()).zip(result.iter_mut()) {
         *o = b.powf(*e);
@@ -260,7 +263,7 @@ pub fn batch_pow(base: &[f64], exp: &[f64], result: &mut [f64]) -> Result<(), Ba
 pub fn batch_cmp_eq(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) -> Result<(), BatchError> {
     let n = lhs.len();
     if n != rhs.len() || n != mask.len() {
-        return Err(BatchError::LengthMismatch);
+        return cold_batch_error_length_mismatch();
     }
 
     let use_simd = avx2_available();
@@ -315,7 +318,7 @@ pub fn batch_coef_merge(
 ) -> Result<(), BatchError> {
     let n = coef_a.len();
     if n != coef_b.len() || n != var_x.len() || n != var_y.len() || n != out.len() {
-        return Err(BatchError::LengthMismatch);
+        return cold_batch_error_length_mismatch();
     }
 
     let use_simd = avx2_available();
@@ -358,7 +361,7 @@ pub fn batch_fma(
 ) -> Result<(), BatchError> {
     let n = lhs.len();
     if n != rhs.len() || n != addend.len() || n != out.len() {
-        return Err(BatchError::LengthMismatch);
+        return cold_batch_error_length_mismatch();
     }
 
     let use_simd = avx2_available();
@@ -417,7 +420,7 @@ pub fn batch_eval(
 ) -> Result<(), BatchError> {
     let n = results.len();
     if var_sets.len() != n.saturating_mul(num_vars) {
-        return Err(BatchError::LengthMismatch);
+        return cold_batch_error_length_mismatch();
     }
     for (i, out) in results.iter_mut().enumerate() {
         *out = func(var_sets[i * num_vars..].as_ptr());
@@ -434,7 +437,7 @@ pub fn batch_eval(
     results: &mut [f64],
 ) -> Result<(), BatchError> {
     let _ = results;
-    Err(BatchError::LengthMismatch)
+    cold_batch_error_length_mismatch()
 }
 
 /// Parallel variant of [`batch_eval`] that splits rows into chunks and
@@ -458,7 +461,7 @@ pub fn batch_eval_parallel(
 ) -> Result<(), BatchError> {
     let n = results.len();
     if var_sets.len() != n.saturating_mul(num_vars) {
-        return Err(BatchError::LengthMismatch);
+        return cold_batch_error_length_mismatch();
     }
     if chunk_size == 0 || n <= chunk_size {
         return batch_eval(func, var_sets, num_vars, results);
@@ -513,7 +516,7 @@ pub fn batch_eval_parallel(
     _chunk_size: usize,
 ) -> Result<(), BatchError> {
     let _ = results;
-    Err(BatchError::LengthMismatch)
+    cold_batch_error_length_mismatch()
 }
 
 #[cfg(test)]

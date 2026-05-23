@@ -3,6 +3,22 @@
 //! `RelPtr` stores a signed index offset (typically `i32` or `i64`) between
 //! elements in a contiguous buffer. This enables representing trees without
 //! heap-allocated pointers, keeping layouts flat, cache-friendly, and safe.
+//!
+//! ## Large-projection variant (`RelPtr<T, i64>`)
+//!
+//! The `i64` offset variant supports projections spanning up to 8 EiB.
+//! Activate it by instantiating [`RelPtr<T, i64>`] directly:
+//!
+//! ```rust
+//! use rssn_advanced::ast::pointer::RelPtr;
+//!
+//! let ptr = RelPtr::<u64, i64>::from_indices(0, 1_000_000_000);
+//! assert_eq!(ptr.resolve(0), Some(1_000_000_000));
+//! ```
+//!
+//! Call [`RelPtr::<T, i64>::from_indices`] and [`RelPtr::resolve`] exactly as
+//! with the `i32` variant — the API is structurally identical, with `i64`
+//! arithmetic instead of `i32`.
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -11,11 +27,12 @@ use core::marker::PhantomData;
 
 /// A relative pointer representing an offset in a contiguous buffer.
 ///
-/// The offset type `O` is generic; in practice only `i32` (the default) is
-/// used. Arena sizes are bounded to `u32::MAX` nodes, making a 4-byte offset
-/// sufficient. The `i64` variant is kept generic but is not instantiated
-/// anywhere in this library — remove or seal it if you need to minimize the
-/// public API surface.
+/// The offset type `O` is generic; in practice `i32` (the default) is used.
+/// Arena sizes are bounded to `u32::MAX` nodes, making a 4-byte offset
+/// sufficient. The `i64` variant (`RelPtr<T, i64>`) supports projections
+/// spanning up to ±8 EiB — see the [module-level documentation](self) for
+/// activation instructions.
+#[doc(alias = "large-projection")]
 pub struct RelPtr<T, O = i32> {
     offset: O,
     _phantom: PhantomData<T>,
@@ -75,6 +92,78 @@ impl<'de, T, O: bincode_next::de::BorrowDecode<'de, C>, C> bincode_next::de::Bor
 impl<T, O: fmt::Display> fmt::Debug for RelPtr<T, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "RelPtr(offset: {})", self.offset)
+    }
+}
+
+/// `i64` relative pointer implementation.
+///
+/// Structurally identical to [`RelPtr<T, i32>`] but with an `i64` offset field,
+/// allowing projections spanning up to ±8 EiB. Use this when the arena
+/// exceeds 2 GiB (i.e. more than ~65 M 32-byte nodes).
+///
+/// See the [module-level documentation](self) for usage instructions.
+// doc(alias = "large-projection") — not allowed on impl blocks; see struct-level doc.
+impl<T> RelPtr<T, i64> {
+    /// The null sentinel for `i64` relative pointers.
+    ///
+    /// `i64::MIN` is chosen for the same reason as [`RelPtr::<T, i32>::NULL_OFFSET`]:
+    /// a valid offset of ±2^63 is unreachable for any practical arena.
+    pub const NULL_OFFSET: i64 = i64::MIN;
+
+    /// Creates a null `i64` relative pointer.
+    #[must_use]
+    pub const fn null() -> Self {
+        Self {
+            offset: Self::NULL_OFFSET,
+            _phantom: core::marker::PhantomData,
+        }
+    }
+
+    /// Returns `true` if this relative pointer is null.
+    #[must_use]
+    pub const fn is_null(self) -> bool {
+        self.offset == Self::NULL_OFFSET
+    }
+
+    /// Computes the `i64` relative pointer from a source index to a target index.
+    ///
+    /// Returns the null pointer on overflow (requires a distance > 2^63 — unreachable
+    /// in practice). Callers that need to distinguish real null from overflow may
+    /// use [`Self::from_indices_checked`].
+    #[must_use]
+    pub fn from_indices(source: usize, target: usize) -> Self {
+        Self::from_indices_checked(source, target).unwrap_or_else(Self::null)
+    }
+
+    /// Like [`Self::from_indices`] but returns `None` on overflow instead of
+    /// clamping to null.
+    #[must_use]
+    pub fn from_indices_checked(source: usize, target: usize) -> Option<Self> {
+        let diff = (target as i128) - (source as i128);
+        let offset = i64::try_from(diff).ok()?;
+        if offset == Self::NULL_OFFSET {
+            return None;
+        }
+        Some(Self {
+            offset,
+            _phantom: core::marker::PhantomData,
+        })
+    }
+
+    /// Resolves the target element's index, given the source index.
+    ///
+    /// Returns `None` if the relative pointer is null.
+    #[must_use]
+    pub fn resolve(self, source: usize) -> Option<usize> {
+        if self.is_null() {
+            return None;
+        }
+        let target = (source as i128) + (self.offset as i128);
+        if target < 0 {
+            None
+        } else {
+            usize::try_from(target).ok()
+        }
     }
 }
 
