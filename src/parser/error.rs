@@ -71,7 +71,9 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 /// Cold constructor for unexpected-EOF parse errors (e.g. missing closing `)`).
+#[doc(hidden)]
 #[cold]
+#[track_caller]
 #[inline(never)]
 pub fn cold_parse_error_unexpected_eof(span: Span) -> ParseError {
     ParseError {
@@ -81,7 +83,9 @@ pub fn cold_parse_error_unexpected_eof(span: Span) -> ParseError {
 }
 
 /// Cold constructor for unexpected-token parse errors.
+#[doc(hidden)]
 #[cold]
+#[track_caller]
 #[inline(never)]
 pub fn cold_parse_error_unexpected_token(span: Span, bad: char) -> ParseError {
     ParseError {

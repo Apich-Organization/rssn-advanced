@@ -165,7 +165,9 @@ const fn op_right_associative(op: char) -> bool {
 
 /// Internal recursion-capped error sentinel. We return it via an
 /// `ErrorKind::TooLarge` so `nom`'s Err path knows to propagate it.
+#[doc(hidden)]
 #[cold]
+#[track_caller]
 #[inline(never)]
 fn too_deep(input: &str) -> nom::Err<nom::error::Error<&str>> {
     nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge))
