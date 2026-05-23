@@ -9,6 +9,7 @@
 //!
 //! Rules support priority ordering and optional kind filters for efficient dispatch.
 
+use std::collections::HashMap;
 use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
 use crate::dag::symbol::SymbolKind;
@@ -22,13 +23,16 @@ pub type RuleFn = Box<dyn Fn(&mut DagBuilder, SymbolKind, &[DagNodeId]) -> Optio
 struct PrioritizedRule {
     func: RuleFn,
     priority: i32,
+    #[allow(dead_code)]
     kind_filter: Option<SymbolKind>,
 }
 
-/// Registry of user-defined algebraic rewrite rules.
+/// Rule registry with O(rules_for_kind) dispatch.
 ///
-/// Rules support priority ordering (higher priority tried first) and optional
-/// kind filters that skip rules inapplicable to the current node kind.
+/// Rules are indexed at registration time: each `SymbolKind`-filtered rule is
+/// stored in a per-kind bucket; unfiltered rules go in a wildcard bucket. Both
+/// buckets are sorted by descending priority so the first match wins with no
+/// sorting overhead at match time.
 ///
 /// # Example
 ///
@@ -48,6 +52,10 @@ struct PrioritizedRule {
 /// ```
 pub struct RuleRegistry {
     rules: Vec<PrioritizedRule>,
+    // Index: kind_disc → sorted indices into `rules` (descending priority)
+    kind_index: HashMap<u8, Vec<usize>>,
+    // Unfiltered rules (applied to every kind), sorted descending priority
+    wildcard_indices: Vec<usize>,
 }
 
 impl std::fmt::Debug for RuleRegistry {
@@ -58,12 +66,30 @@ impl std::fmt::Debug for RuleRegistry {
     }
 }
 
-impl Default for RuleRegistry { fn default() -> Self { Self::new() } }
+impl Default for RuleRegistry {
+    fn default() -> Self { Self::new() }
+}
+
+/// Map `SymbolKind` to a stable u8 discriminant for the index key.
+fn kind_disc(k: &SymbolKind) -> u8 {
+    match k {
+        SymbolKind::Variable(_) => 0,
+        SymbolKind::Constant(_) => 1,
+        SymbolKind::Operator(op) => 2 + (*op as u8),
+        SymbolKind::Function(_) => 16,
+    }
+}
 
 impl RuleRegistry {
     /// Creates a new, empty `RuleRegistry`.
     #[must_use]
-    pub fn new() -> Self { Self { rules: Vec::new() } }
+    pub fn new() -> Self {
+        Self {
+            rules: Vec::new(),
+            kind_index: HashMap::new(),
+            wildcard_indices: Vec::new(),
+        }
+    }
 
     /// Register a rule with default priority (0) and no kind filter (applies to all).
     pub fn register<F>(&mut self, rule: F)
@@ -74,12 +100,23 @@ impl RuleRegistry {
     /// Register a rule with explicit priority and optional kind filter.
     ///
     /// Higher priority rules are tried first. Rules with a `kind_filter` are only
-    /// tried when the node's `SymbolKind` matches — this skips irrelevant rules.
+    /// tried when the node's `SymbolKind` matches — this avoids virtual calls for
+    /// inapplicable rules entirely (O(rules_for_kind) instead of O(total_rules)).
     pub fn register_with_priority<F>(&mut self, rule: F, priority: i32, kind_filter: Option<SymbolKind>)
     where F: Fn(&mut DagBuilder, SymbolKind, &[DagNodeId]) -> Option<DagNodeId> + Send + Sync + 'static {
-        self.rules.push(PrioritizedRule { func: Box::new(rule), priority, kind_filter });
-        // Keep descending priority order; stable sort preserves insertion order within same priority.
-        self.rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+        let idx = self.rules.len();
+        self.rules.push(PrioritizedRule { func: Box::new(rule), priority, kind_filter: kind_filter.clone() });
+
+        if let Some(ref k) = kind_filter {
+            let disc = kind_disc(k);
+            let bucket = self.kind_index.entry(disc).or_default();
+            bucket.push(idx);
+            // Keep descending priority order.
+            bucket.sort_by(|&a, &b| self.rules[b].priority.cmp(&self.rules[a].priority));
+        } else {
+            self.wildcard_indices.push(idx);
+            self.wildcard_indices.sort_by(|&a, &b| self.rules[b].priority.cmp(&self.rules[a].priority));
+        }
     }
 
     /// Returns the number of registered rules.
@@ -90,21 +127,31 @@ impl RuleRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool { self.rules.is_empty() }
 
-    /// Tries each registered rule in priority order for `(kind, children)`.
+    /// O(rules_for_kind + wildcard_rules) dispatch — skips all rules
+    /// registered for a different kind entirely.
     ///
-    /// Rules with a `kind_filter` that doesn't match `kind` are skipped entirely.
+    /// Kind-specific rules (higher specificity) are tried before wildcard rules.
     /// Returns the replacement node from the first rule that fires, or `None` if
     /// no rule matches.
     pub fn try_apply(&self, builder: &mut DagBuilder, kind: SymbolKind, children: &[DagNodeId]) -> Option<DagNodeId> {
-        for rule in &self.rules {
-            // Skip rules that don't apply to this kind.
-            if let Some(ref filter) = rule.kind_filter {
-                if *filter != kind { continue; }
+        let disc = kind_disc(&kind);
+
+        // Kind-specific rules first (higher specificity = higher effective priority).
+        if let Some(indices) = self.kind_index.get(&disc) {
+            for &idx in indices {
+                if let Some(result) = (self.rules[idx].func)(builder, kind, children) {
+                    return Some(result);
+                }
             }
-            if let Some(result) = (rule.func)(builder, kind, children) {
+        }
+
+        // Wildcard rules.
+        for &idx in &self.wildcard_indices {
+            if let Some(result) = (self.rules[idx].func)(builder, kind, children) {
                 return Some(result);
             }
         }
+
         None
     }
 }
@@ -203,5 +250,47 @@ mod tests {
         let result = reg.try_apply(&mut b, SymbolKind::Operator(OpKind::Mul), &[x, x]);
         assert!(result.is_none());
         assert!(!fired.load(std::sync::atomic::Ordering::SeqCst), "kind-filtered rule must not fire");
+    }
+
+    #[test]
+    fn indexed_dispatch_only_consults_matching_kind_rules() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let add_counter = Arc::new(AtomicUsize::new(0));
+        let mul_counter = Arc::new(AtomicUsize::new(0));
+
+        let mut reg = RuleRegistry::new();
+
+        // Register 100 Add-filtered rules that count how many times they run.
+        for _ in 0..100 {
+            let c = Arc::clone(&add_counter);
+            reg.register_with_priority(
+                move |_b, _k, _ch| { c.fetch_add(1, Ordering::SeqCst); None },
+                0,
+                Some(SymbolKind::Operator(OpKind::Add)),
+            );
+        }
+
+        // Register 100 Mul-filtered rules that count how many times they run.
+        for _ in 0..100 {
+            let c = Arc::clone(&mul_counter);
+            reg.register_with_priority(
+                move |_b, _k, _ch| { c.fetch_add(1, Ordering::SeqCst); None },
+                0,
+                Some(SymbolKind::Operator(OpKind::Mul)),
+            );
+        }
+
+        let mut b = DagBuilder::new();
+        let x = b.variable("x");
+
+        // Dispatch for Mul — only the 100 Mul rules should run.
+        let _ = reg.try_apply(&mut b, SymbolKind::Operator(OpKind::Mul), &[x, x]);
+
+        assert_eq!(add_counter.load(Ordering::SeqCst), 0,
+            "Add-filtered rules must NOT run when dispatching for Mul");
+        assert_eq!(mul_counter.load(Ordering::SeqCst), 100,
+            "All 100 Mul-filtered rules must run");
     }
 }

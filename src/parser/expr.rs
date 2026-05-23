@@ -518,7 +518,7 @@ mod tests {
 
         let id = parse_expression("x + y * z", &mut builder).expect("ok");
         let node = builder.arena().get(id).expect("root");
-        assert_eq!(node.meta.arity, 2);
+        assert_eq!(node.children.len(), 2);
         assert_eq!(
             node.kind,
             SymbolKind::Operator(crate::dag::symbol::OpKind::Add)

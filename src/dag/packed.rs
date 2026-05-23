@@ -185,7 +185,6 @@ impl PackedDagNode {
             } else {
                 self.coefficient
             },
-            arity: self.arity as u16,
             flags: NodeFlags::from_bits(self.flags),
         }
     }
@@ -536,7 +535,6 @@ impl<'a> BorrowedArenaView<'a> {
                 } else {
                     packed.coefficient
                 },
-                arity: packed.arity as u16,
                 flags: NodeFlags::from_bits(packed.flags),
             };
             let kids: Vec<DagNodeId> = self.children(packed).iter().collect();
@@ -710,7 +708,7 @@ mod tests {
             let orig_value = if let SymbolKind::Constant(v) = original.kind { Some(v) } else { None };
             assert_eq!(packed.value(), orig_value, "value mismatch at {i}");
             assert_eq!(packed.meta().hash, original.meta.hash);
-            assert_eq!(packed.meta().arity, original.meta.arity);
+            assert_eq!(packed.arity as usize, original.children.len());
             let kids: Vec<DagNodeId> = view.children(packed).iter().collect();
             assert_eq!(kids.as_slice(), original.children.as_slice());
         }

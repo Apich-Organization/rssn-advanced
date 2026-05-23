@@ -148,15 +148,22 @@ fn backpatch_children(projection: &mut AstProjection, ast_idx: usize, child_indi
         .iter()
         .map(|&child_idx| RelPtr::from_indices(ast_idx, child_idx))
         .collect();
-    let slot = &mut projection.nodes[ast_idx];
-    slot.children = match ptrs.len() {
+
+    let children = match ptrs.len() {
         0 => AstChildList::Empty,
         1 => AstChildList::One(ptrs[0]),
         2 => AstChildList::Two([ptrs[0], ptrs[1]]),
         3 => AstChildList::Three([ptrs[0], ptrs[1], ptrs[2]]),
         4 => AstChildList::Four([ptrs[0], ptrs[1], ptrs[2], ptrs[3]]),
-        _ => AstChildList::Many(ptrs.into_boxed_slice()),
+        _ => {
+            let start = projection.children_pool.len() as u32;
+            let len = ptrs.len() as u32;
+            projection.children_pool.extend(ptrs);
+            AstChildList::Many { start, len }
+        }
     };
+
+    projection.nodes[ast_idx].children = children;
 }
 
 // =========================================================================
@@ -205,7 +212,7 @@ pub fn ast_to_dag(ast: &AstProjection, builder: &mut DagBuilder) -> DagNodeId {
             let cursor = top.cursor;
             top.cursor += 1;
             node.children
-                .as_slice()
+                .as_slice_with_pool(&ast.children_pool)
                 .get(cursor)
                 .and_then(|p| p.resolve(top.idx))
                 .filter(|idx| *idx < ast.nodes.len())

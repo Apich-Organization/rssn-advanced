@@ -230,7 +230,7 @@ mod tests {
                 .get(crate::dag::node::DagNodeId::new(i as u32))
                 .expect("new");
             assert_eq!(orig.kind, new.kind);
-            assert_eq!(orig.meta.arity, new.meta.arity);
+            assert_eq!(orig.children.len(), new.children.len());
             assert_eq!(orig.children.as_slice(), new.children.as_slice());
         }
         let _ = std::fs::remove_dir_all(&dir);

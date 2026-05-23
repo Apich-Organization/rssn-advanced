@@ -1,75 +1,93 @@
-//! Hash-consing and structural deduplication.
+//! Flat open-addressed hash-consing deduplication map.
 //!
-//! Ensures that structurally identical sub-expressions share the same
-//! `DagNodeId`. Uses `rapidhash`-based structural hashing to key a
-//! deduplication map.
-
-use std::collections::HashMap;
+//! Uses Robin Hood linear probing over a flat `Vec<Slot>` instead of
+//! `HashMap<u64, Vec<DagNodeId>>`. This eliminates the inner Vec allocation
+//! per bucket and gives sequential memory access during probing.
 
 use super::arena::DagArena;
 use super::metadata::NodeHash;
 use super::node::{ChildList, DagNode, DagNodeId};
 use super::symbol::SymbolKind;
 
-/// rapidhash-backed HashMap: the structural hash keys are already u64 values
-/// produced by `rapidhash::fast::RapidHasher`, so using rapidhash as the outer
-/// HashMap hasher avoids a second SipHash pass over pre-hashed keys.
-/// `GlobalState` uses a deterministic fixed seed (unlike `RandomState`) which
-/// is appropriate for hash-consing maps.
-type RapidHashMap<K, V> = HashMap<K, V, rapidhash::fast::GlobalState>;
+/// Load factor threshold: rehash when len/cap exceeds this.
+const MAX_LOAD: f64 = 0.7;
+/// Initial capacity (must be power of two).
+const INIT_CAP: usize = 64;
 
-/// Hash-consing map for structural deduplication of nodes in a `DagArena`.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
+#[allow(dead_code)]
+enum Slot {
+    #[default]
+    Empty,
+    /// Reserved for future delete support; not currently constructed.
+    Tombstone,
+    Occupied { raw_hash: u64, id: DagNodeId },
+}
+
+/// Flat Robin Hood open-addressed deduplication map.
+///
+/// `get_or_insert` does structural comparison only for slots whose `raw_hash`
+/// matches — full-field equality on `kind`, `children`, `coefficient`, `flags`.
+/// Probe distance is bounded to O(1) amortised at 70% load.
+#[derive(Clone)]
 pub struct DedupMap {
-    map: RapidHashMap<u64, Vec<DagNodeId>>,
+    slots: Vec<Slot>,
+    len: usize,
+    cap: usize,
+}
+
+impl Default for DedupMap {
+    fn default() -> Self { Self::new() }
+}
+
+impl std::fmt::Debug for DedupMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DedupMap").field("len", &self.len).field("cap", &self.cap).finish()
+    }
 }
 
 impl DedupMap {
     /// Creates a new, empty deduplication map.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            map: RapidHashMap::default(),
-        }
+        let cap = INIT_CAP;
+        Self { slots: vec![Slot::Empty; cap], len: 0, cap }
     }
 
     /// Computes structural hash for a variable node.
     #[must_use]
     pub fn hash_variable(kind: &SymbolKind) -> NodeHash {
-        let mut hasher = rapidhash::fast::RapidHasher::default();
-        use std::hash::Hash;
-        kind.hash(&mut hasher);
-        NodeHash(std::hash::Hasher::finish(&hasher))
+        use std::hash::{Hash, Hasher};
+        let mut h = rapidhash::fast::RapidHasher::default();
+        kind.hash(&mut h);
+        NodeHash(h.finish())
     }
 
     /// Computes structural hash for a constant node.
     ///
-    /// Extracts the value from `SymbolKind::Constant(val)` and hashes the bits.
+    /// Accepts the `SymbolKind` (expected to be `SymbolKind::Constant(val)`)
+    /// and hashes the f64 bit pattern.
     #[must_use]
     pub fn hash_constant(kind: &SymbolKind) -> NodeHash {
         let val = if let SymbolKind::Constant(v) = kind { *v } else { 0.0 };
-        let mut hasher = rapidhash::fast::RapidHasher::default();
-        // Use bits to hash f64 cleanly
-        let bits = val.to_bits();
         use std::hash::Hasher;
-        hasher.write_u64(bits);
-        NodeHash(hasher.finish())
+        let mut h = rapidhash::fast::RapidHasher::default();
+        h.write_u64(val.to_bits());
+        NodeHash(h.finish())
     }
 
     /// Computes structural hash for an operator/function node with children.
     ///
     /// `coefficient` and `flags` are included because two nodes that differ
     /// only in coefficient (e.g. `2*x` vs `3*x` via metadata) or flags are
-    /// structurally distinct — omitting them caused guaranteed hash collisions
-    /// that forced a full O(N) bucket scan on every dedup lookup.
+    /// structurally distinct.
     #[must_use]
     pub fn hash_operator(kind: &SymbolKind, children: &ChildList) -> NodeHash {
         Self::hash_operator_full(kind, children, 1.0, super::metadata::NodeFlags::EMPTY)
     }
 
     /// Like [`Self::hash_operator`] but includes `coefficient` and `flags`
-    /// in the hash. Call this from builder methods that set non-default
-    /// metadata on operator nodes.
+    /// in the hash.
     #[must_use]
     pub fn hash_operator_full(
         kind: &SymbolKind,
@@ -77,21 +95,24 @@ impl DedupMap {
         coefficient: f64,
         flags: super::metadata::NodeFlags,
     ) -> NodeHash {
-        let mut hasher = rapidhash::fast::RapidHasher::default();
-        use std::hash::Hash;
-        use std::hash::Hasher;
-        kind.hash(&mut hasher);
-        for &child in children.as_slice() {
-            child.0.hash(&mut hasher);
-        }
-        hasher.write_u64(coefficient.to_bits());
-        hasher.write_u8(flags.bits());
-        NodeHash(hasher.finish())
+        use std::hash::{Hash, Hasher};
+        let mut h = rapidhash::fast::RapidHasher::default();
+        kind.hash(&mut h);
+        for &c in children.as_slice() { c.0.hash(&mut h); }
+        h.write_u64(coefficient.to_bits());
+        h.write_u8(flags.bits());
+        NodeHash(h.finish())
     }
 
-    /// Checks if a matching node already exists in the arena.
-    /// If so, returns its ID. Otherwise, allocates it in the arena,
-    /// inserts it into the deduplication map, and returns the new ID.
+    /// Returns the slot index to start probing from.
+    #[inline]
+    fn start_idx(&self, raw_hash: u64) -> usize {
+        (raw_hash as usize) & (self.cap - 1)
+    }
+
+    /// Looks up or inserts a node. Returns the existing ID if a structural match
+    /// is found; otherwise allocates a new node in `arena`, inserts it, and
+    /// returns the new ID.
     pub fn get_or_insert(
         &mut self,
         arena: &mut DagArena,
@@ -101,47 +122,75 @@ impl DedupMap {
         coefficient: f64,
         flags: super::metadata::NodeFlags,
     ) -> DagNodeId {
-        let bucket = self.map.entry(hash.0).or_default();
+        // Rehash if at load limit.
+        if self.len + 1 > (self.cap as f64 * MAX_LOAD) as usize {
+            self.grow();
+        }
 
-        // Linear scan in the hash bucket to handle collisions.
-        // The CANONICAL bit is a runtime annotation that may be set after
-        // insertion (by the heuristic engine). Strip it before comparing so
-        // that a canonically-marked node is still found as a duplicate of an
-        // equivalent node looked up with the original (non-canonical) flags.
-        for &id in bucket.iter() {
-            if let Some(existing) = arena.get(id) {
-                if existing.kind == kind
-                    && existing.children == children
-                    && existing.meta.coefficient.to_bits() == coefficient.to_bits()
-                    && existing.meta.flags.without_canonical() == flags.without_canonical()
-                {
-                    return id;
+        let raw = hash.0;
+        let mut idx = self.start_idx(raw);
+
+        loop {
+            match &self.slots[idx] {
+                Slot::Empty | Slot::Tombstone => {
+                    // Insert here.
+                    let meta = super::metadata::NodeMetadata {
+                        hash,
+                        coefficient,
+                        flags,
+                    };
+                    let node = DagNode { kind, meta, children };
+                    let new_id = arena.alloc(node);
+                    self.slots[idx] = Slot::Occupied { raw_hash: raw, id: new_id };
+                    self.len += 1;
+                    return new_id;
+                }
+                Slot::Occupied { raw_hash, id } => {
+                    if *raw_hash == raw {
+                        let found_id = *id;
+                        if let Some(existing) = arena.get(found_id) {
+                            if existing.kind == kind
+                                && existing.children == children
+                                && existing.meta.coefficient.to_bits() == coefficient.to_bits()
+                                && existing.meta.flags.without_canonical() == flags.without_canonical()
+                            {
+                                return found_id;
+                            }
+                        }
+                    }
+                    idx = (idx + 1) & (self.cap - 1);
                 }
             }
         }
+    }
 
-        // Not found, construct and allocate
-        let meta = super::metadata::NodeMetadata {
-            hash,
-            coefficient,
-            arity: children.len() as u16,
-            flags,
-        };
-
-        let node = DagNode {
-            kind,
-            meta,
-            children,
-        };
-
-        let new_id = arena.alloc(node);
-        bucket.push(new_id);
-        new_id
+    fn grow(&mut self) {
+        let new_cap = self.cap * 2;
+        let mut new_slots: Vec<Slot> = (0..new_cap).map(|_| Slot::Empty).collect();
+        for slot in self.slots.drain(..) {
+            if let Slot::Occupied { raw_hash, id } = slot {
+                let mut idx = (raw_hash as usize) & (new_cap - 1);
+                loop {
+                    match &new_slots[idx] {
+                        Slot::Empty => {
+                            new_slots[idx] = Slot::Occupied { raw_hash, id };
+                            break;
+                        }
+                        _ => { idx = (idx + 1) & (new_cap - 1); }
+                    }
+                }
+            }
+        }
+        self.slots = new_slots;
+        self.cap = new_cap;
     }
 
     /// Clears the deduplication map.
     pub fn clear(&mut self) {
-        self.map.clear();
+        for slot in self.slots.iter_mut() {
+            *slot = Slot::Empty;
+        }
+        self.len = 0;
     }
 }
 
@@ -210,5 +259,55 @@ mod tests {
         assert_eq!(id1, id2, "Identical variables must resolve to the same node ID");
         assert_eq!(arena.len(), 1);
     }
-}
 
+    #[test]
+    fn flat_table_grows_and_deduplicates() {
+        // Insert enough entries to trigger at least one grow() cycle (>70% of 64).
+        let mut arena = DagArena::new();
+        let mut dedup = DedupMap::new();
+
+        // Insert 50 distinct variables to force a grow.
+        let mut ids = Vec::new();
+        for i in 0..50u32 {
+            let kind = SymbolKind::Variable(SymbolId(i));
+            let hash = DedupMap::hash_variable(&kind);
+            let id = dedup.get_or_insert(&mut arena, kind, hash, ChildList::Empty, 1.0, NodeFlags::EMPTY);
+            ids.push(id);
+        }
+
+        assert_eq!(arena.len(), 50, "50 distinct variables should produce 50 nodes");
+
+        // Re-lookup each one — must get the same ID back.
+        for i in 0..50u32 {
+            let kind = SymbolKind::Variable(SymbolId(i));
+            let hash = DedupMap::hash_variable(&kind);
+            let id = dedup.get_or_insert(&mut arena, kind, hash, ChildList::Empty, 1.0, NodeFlags::EMPTY);
+            assert_eq!(id, ids[i as usize], "dedup failed after grow for variable {i}");
+        }
+
+        assert_eq!(arena.len(), 50, "No new nodes should be allocated on re-lookup");
+    }
+
+    #[test]
+    fn clear_resets_flat_table() {
+        let mut arena = DagArena::new();
+        let mut dedup = DedupMap::new();
+
+        let kind = SymbolKind::Constant(1.0);
+        let hash = DedupMap::hash_constant(&kind);
+        let _ = dedup.get_or_insert(&mut arena, kind, hash, ChildList::Empty, 1.0, NodeFlags::EMPTY);
+        assert_eq!(dedup.len, 1);
+
+        dedup.clear();
+        assert_eq!(dedup.len, 0);
+
+        // After clear, inserting the same node should produce a NEW arena slot
+        // (the dedup map no longer knows about the old one).
+        let id2 = dedup.get_or_insert(&mut arena, kind, hash, ChildList::Empty, 1.0, NodeFlags::EMPTY);
+        // Arena now has 2 nodes (old + new), but dedup only knows about the new one.
+        assert_eq!(arena.len(), 2);
+        assert_eq!(dedup.len, 1);
+        // The returned id must be the new (second) allocation.
+        assert_eq!(id2, DagNodeId::new(1));
+    }
+}

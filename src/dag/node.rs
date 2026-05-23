@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn operator_node() {
-        let meta = NodeMetadata::operator(NodeHash(300), 2, NodeFlags::commutative_associative());
+        let meta = NodeMetadata::operator(NodeHash(300), NodeFlags::commutative_associative());
         let children = ChildList::from_slice(&[DagNodeId(0), DagNodeId(1)]);
         let node = DagNode::operator(SymbolKind::Operator(OpKind::Add), meta, children);
         assert!(!node.is_leaf());

@@ -108,6 +108,9 @@ impl NodeFlags {
 ///
 /// This is stored inline in the `DagNode` and contains all the information
 /// needed for hash-consing, algebraic classification, and simplification.
+///
+/// Note: `arity` was removed — it always equalled `node.children.len()`.
+/// Callers that need the arity call `node.children.len()` directly.
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct NodeMetadata {
     /// Structural hash for deduplication lookups.
@@ -115,31 +118,27 @@ pub struct NodeMetadata {
     /// Numeric coefficient (e.g. the `3` in `3*x`).
     /// Defaults to `1.0` for non-coefficient nodes.
     pub coefficient: f64,
-    /// Number of children this node has.
-    pub arity: u16,
     /// Algebraic property flags.
     pub flags: NodeFlags,
 }
 
 impl NodeMetadata {
-    /// Creates metadata for a leaf node (arity 0) with coefficient 1.
+    /// Creates metadata for a leaf node with coefficient 1.
     #[must_use]
     pub const fn leaf(hash: NodeHash) -> Self {
         Self {
             hash,
             coefficient: 1.0,
-            arity: 0,
             flags: NodeFlags::EMPTY,
         }
     }
 
-    /// Creates metadata for an operator node with the given arity and flags.
+    /// Creates metadata for an operator node with the given flags.
     #[must_use]
-    pub const fn operator(hash: NodeHash, arity: u16, flags: NodeFlags) -> Self {
+    pub const fn operator(hash: NodeHash, flags: NodeFlags) -> Self {
         Self {
             hash,
             coefficient: 1.0,
-            arity,
             flags,
         }
     }
@@ -171,7 +170,6 @@ mod tests {
     #[test]
     fn leaf_metadata() {
         let m = NodeMetadata::leaf(NodeHash(42));
-        assert_eq!(m.arity, 0);
         assert_eq!(m.coefficient, 1.0);
         assert_eq!(m.hash, NodeHash(42));
     }

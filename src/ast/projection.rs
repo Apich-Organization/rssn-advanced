@@ -3,6 +3,13 @@
 //! `AstProjection` holds a flat, cache-friendly array of `AstNode` elements.
 //! Instead of using recursive boxed structures, child nodes reference each other
 //! using relative pointers (`RelPtr<AstNode>`).
+//!
+//! ## Children pool
+//!
+//! Variadic children (>4) are stored in a shared `children_pool: Vec<RelPtr<AstNode>>`
+//! on the `AstProjection` itself. The `AstChildList::Many` variant records a
+//! `(start, len)` range into that pool, so all overflow children share a
+//! single contiguous allocation instead of one `Box<[T]>` per node.
 
 use bincode_next::{Decode, Encode};
 
@@ -26,9 +33,13 @@ pub enum AstChildList {
     Three([RelPtr<AstNode>; 3]),
     /// Four children.
     Four([RelPtr<AstNode>; 4]),
-    /// Variadic children (heap spilled). Box<[T]> saves 8 bytes vs Vec<T>
-    /// (16-byte fat pointer vs 24-byte triple), halving the enum's large-variant cost.
-    Many(Box<[RelPtr<AstNode>]>),
+    /// Variadic children stored as a range in `AstProjection::children_pool`.
+    Many {
+        /// Index of the first child in `AstProjection::children_pool`.
+        start: u32,
+        /// Number of children.
+        len: u32,
+    },
 }
 
 impl AstChildList {
@@ -41,7 +52,7 @@ impl AstChildList {
             Self::Two(_) => 2,
             Self::Three(_) => 3,
             Self::Four(_) => 4,
-            Self::Many(v) => v.len(), // Box<[T]> has .len()
+            Self::Many { len, .. } => *len as usize,
         }
     }
 
@@ -51,7 +62,26 @@ impl AstChildList {
         matches!(self, Self::Empty)
     }
 
+    /// Returns children as a slice, borrowing from the projection's pool for
+    /// `Many` variants.
+    #[must_use]
+    pub fn as_slice_with_pool<'a>(&'a self, pool: &'a [RelPtr<AstNode>]) -> &'a [RelPtr<AstNode>] {
+        match self {
+            Self::Empty => &[],
+            Self::One(ptr) => std::slice::from_ref(ptr),
+            Self::Two(arr) => arr,
+            Self::Three(arr) => arr,
+            Self::Four(arr) => arr,
+            Self::Many { start, len } => &pool[*start as usize .. *start as usize + *len as usize],
+        }
+    }
+
     /// Returns the children as a slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a `Many` variant — use `as_slice_with_pool` instead
+    /// when the pool is available (i.e. in projection contexts).
     #[must_use]
     pub fn as_slice(&self) -> &[RelPtr<AstNode>] {
         match self {
@@ -60,7 +90,7 @@ impl AstChildList {
             Self::Two(arr) => arr,
             Self::Three(arr) => arr,
             Self::Four(arr) => arr,
-            Self::Many(v) => v.as_ref(),
+            Self::Many { .. } => panic!("AstChildList::Many: use as_slice_with_pool"),
         }
     }
 }
@@ -92,17 +122,22 @@ pub struct AstNode {
 ///
 /// Because it uses relative pointers, the entire tree can be cloned,
 /// serialized, or iterated over in linear memory with zero pointer patching.
+///
+/// Variadic children (>4) are stored in the shared `children_pool` to avoid
+/// one heap allocation per variadic node.
 #[derive(Debug, Clone, Encode, Decode, Default)]
 pub struct AstProjection {
     /// Contiguous buffer of nodes. Index 0 is typically the root of the projection.
     pub nodes: Vec<AstNode>,
+    /// Shared pool for `AstChildList::Many` ranges.
+    pub children_pool: Vec<RelPtr<AstNode>>,
 }
 
 impl AstProjection {
     /// Creates a new, empty AST projection buffer.
     #[must_use]
     pub fn new() -> Self {
-        Self { nodes: Vec::new() }
+        Self { nodes: Vec::new(), children_pool: Vec::new() }
     }
 
     /// Accesses the root node of the AST projection.
@@ -117,9 +152,16 @@ impl AstProjection {
         ptr.resolve(source_idx).and_then(|idx| self.nodes.get(idx))
     }
 
+    /// Returns a reference to the shared children pool.
+    #[must_use]
+    pub fn children_pool(&self) -> &[RelPtr<AstNode>] {
+        &self.children_pool
+    }
+
     /// Clears the projection buffer.
     pub fn clear(&mut self) {
         self.nodes.clear();
+        self.children_pool.clear();
     }
 
     /// Returns the total number of nodes in the projection.
@@ -173,7 +215,7 @@ impl AstProjection {
             } else {
                 // Push self again with visited=true, then push children.
                 stack.push((idx, true));
-                for ptr in node.children.as_slice().iter().rev() {
+                for ptr in node.children.as_slice_with_pool(&self.children_pool).iter().rev() {
                     if let Some(child_idx) = ptr.resolve(idx) {
                         if child_idx < self.nodes.len() {
                             stack.push((child_idx, false));
