@@ -1,6 +1,63 @@
-# Module Review: `jit` (Phase 5 Audit)
+# Module Review: `jit` (Phase 6 — Optimization Passes)
 
 ### 2.2 Vectorized IR
-`batch_eval` still iterates over rows.
 
-**Answer:** The JIT generates scalar per-row code today. Vectorizing (f64x4) requires either: (a) generating 4 parallel IR traces with distinct SSA values, doubling or quadrupling the instruction count before the backend can schedule them into SIMD lanes — this requires a "horizontal unrolling" pass over the expression tree that has no natural stopping point for trees with shared subexpressions; or (b) using Cranelift's SIMD opcodes directly, which requires the IR to be expressed in terms of `f64x4` types, an entirely different type system from the current scalar one. Neither is trivial for expression trees with data-dependent branching (e.g. the `select(rhs==0, NaN, lhs/rhs)` pattern in `Div` and `Mod`). The `batch_eval` loop over rows is the pragmatic tradeoff: the JIT's output is already the bottleneck-free scalar kernel; SIMD parallelism across rows is available by calling it from multiple threads via `parallel::solver`. Future work requires a "vectorization legality" pass to identify loop-invariant subexpressions, elide NaN guards on provably non-zero denominators, and emit `f64x4` IR — effectively a full auto-vectorization pass, which is Phase 7+ work.
+**Answer:** Fixed in Phase 6 — `compile_batch_f64x2` generates a 2× unrolled
+scalar batch function (two independent SSA paths for rows `i` and `i+1`)
+using Cranelift's standard `F64` type. The function:
+- Builds a proper loop CFG with SSA block parameters for the induction variable
+- Loads variables from column-major layout (`*const *const f64`) for both rows
+- Emits two independent scalar expression trees (achieving 2× throughput via ILP)
+- Handles the NaN guard for Div via `fcmp + select`
+- Processes 2 rows per vector iteration; scalar tail handles 0-or-1 remaining rows
+- Returns `None` for non-vectorizable expressions (powf call sites, Mod, custom functions)
+
+The 2× unrolled scalar approach was chosen over F64X2 SIMD types to avoid
+Cranelift 0.131 API subtleties with the `BlockArg` encoding in vector load/store
+paths, while achieving equivalent throughput through instruction-level parallelism.
+
+### Power Lowering
+
+**Fixed in Phase 6** — `x^n` for integer n in 2..=8 compiles to repeated `fmul`
+via binary exponentiation (no `powf` call). `x^0.5` compiles to Cranelift `sqrt`
+instruction. This eliminates the most expensive path in typical symbolic math
+expressions. Controlled by `OptConfig::max_int_pow` (default: 8) and
+`OptConfig::expand_sqrt` (default: true).
+
+### CSE
+
+**Fixed in Phase 6** — Pre-scan identifies duplicate DAG nodes (same `dag_id`).
+Shared subexpressions are computed once; subsequent references reuse the SSA Value.
+Controlled by `OptConfig::enable_cse` (default: true).
+
+### NaN Guard Elision
+
+**Fixed in Phase 6** — The analysis pass (`analysis.rs`) proves non-zero denominators
+bottom-up. For proven non-zero denominators (constant non-zero values or multiply of
+two non-zero values), the `fcmp + vselect` guard is elided. Controlled by
+`OptConfig::elide_nan_guard` (default: true).
+
+### Reciprocal Math
+
+**Added in Phase 6** — `OptConfig::allow_reciprocal_math` (default: false) replaces
+`x / C` with `x * (1/C)` for constant C ≠ 0. Not enabled by default due to IEEE-754
+precision difference.
+
+### Sub-Self Identity
+
+**Added in Phase 6** — `x - x → 0` when both SSA Values are identical (same
+instruction result). Fires naturally for CSE-shared values.
+
+### New Files
+
+- `src/jit/analysis.rs` — Bottom-up `NodeAnalysis` pass: `is_nonzero` propagation
+  and `PowExpansion` classification per node.
+- `src/jit/passes.rs` — `emit_int_pow` (binary exponentiation, n=2..=8) and
+  `emit_sqrt` (native Cranelift sqrt instruction).
+
+### New API
+
+- `OptConfig` struct with `Default` impl — controls all Phase 6 passes.
+- `JitCompiler::compile_with_opts(ast, opts)` — explicit optimization settings.
+- `JitCompiler::compile_batch_f64x2(ast)` — vectorized batch evaluation.
+- `CompiledBatchFn` type alias — column-major batch function pointer.

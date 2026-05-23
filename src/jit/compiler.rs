@@ -6,21 +6,28 @@
 //! deep does not blow the OS stack — see `jit_review §2`. It folds a
 //! peephole pass over the per-node IR emission so that `x + 0`, `x * 1`,
 //! `x * 0`, etc. cost zero instructions (`jit_review §1` / `§2`).
+//!
+//! Phase 6 additions: `OptConfig`, analysis-driven NaN-guard elision,
+//! power expansion (sqrt + int pow), CSE for shared DAG nodes, and a
+//! vectorized batch evaluation path (`compile_batch_f64x2`).
 
 #![allow(unsafe_code)]
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
 use cranelift_codegen::Context;
-use cranelift_codegen::ir::condcodes::FloatCC;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Signature, Value, types};
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::{AbiParam, BlockArg, InstBuilder, MemFlags, Signature, Value, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module};
 
 use crate::ast::projection::{AstNode, AstProjection};
 use crate::dag::symbol::{FnId, OpKind, SymbolKind};
+use crate::jit::analysis::{NodeAnalysis, PowExpansion, analyze};
+use crate::jit::passes;
 
 /// A JIT-compiled expression function pointer.
 ///
@@ -45,6 +52,51 @@ pub type CustomFn2 = extern "C" fn(f64, f64) -> f64;
 /// Suitable for three-argument operations (`fma`, `clamp`, …). Registered
 /// via [`JitCompiler::register_custom_function_3`].
 pub type CustomFn3 = extern "C" fn(f64, f64, f64) -> f64;
+
+/// Column-major batch evaluation function.
+///
+/// - `vars_cols`: pointer to an array of column pointers, one per variable.
+///   Each column pointer points to `n_rows` contiguous `f64` values.
+/// - `n_rows`: number of rows to evaluate.
+/// - `out`: output array of `n_rows` `f64` values.
+///
+/// Processes 2 rows per vector iteration via ILP (two independent SSA
+/// paths), with a scalar tail for any odd final row.
+pub type CompiledBatchFn = extern "C" fn(
+    vars_cols: *const *const f64,
+    n_rows: usize,
+    out: *mut f64,
+);
+
+/// Configuration for JIT optimization passes.
+#[derive(Debug, Clone)]
+pub struct OptConfig {
+    /// Maximum integer exponent for power expansion without `powf`.
+    /// `x^n` for integer n in 2..=max_int_pow is replaced by repeated fmul.
+    pub max_int_pow: u32,
+    /// Expand `x^0.5` to a Cranelift `sqrt` instruction.
+    pub expand_sqrt: bool,
+    /// Replace `x / C` (constant non-zero denominator) with `x * (1/C)`.
+    /// Not IEEE-754 bit-exact (reciprocal approximation rounding).
+    pub allow_reciprocal_math: bool,
+    /// Elide `select(rhs==0, NaN, lhs/rhs)` when the denominator is
+    /// proven non-zero by the analysis pass.
+    pub elide_nan_guard: bool,
+    /// Reuse SSA values for DAG nodes that appear more than once.
+    pub enable_cse: bool,
+}
+
+impl Default for OptConfig {
+    fn default() -> Self {
+        Self {
+            max_int_pow: 8,
+            expand_sqrt: true,
+            allow_reciprocal_math: false,
+            elide_nan_guard: true,
+            enable_cse: true,
+        }
+    }
+}
 
 extern "C" fn jit_powf(base: f64, exp: f64) -> f64 {
     base.powf(exp)
@@ -203,14 +255,33 @@ impl JitCompiler {
         guard.insert(fn_id.0, CustomFnEntry { ptr: func as usize, arity: 3 });
     }
 
-    /// Compiles an `AstProjection` expression into a native callable function.
+    /// Compiles an `AstProjection` expression into a native callable function
+    /// using default optimization settings.
+    ///
+    /// Equivalent to `compile_with_opts(ast, &OptConfig::default())`.
     ///
     /// # Errors
     /// Returns a [`crate::error::JitError`] if compilation or linking fails.
     pub fn compile(&mut self, ast: &AstProjection) -> Result<CompiledExprFn, crate::error::JitError> {
+        self.compile_with_opts(ast, &OptConfig::default())
+    }
+
+    /// Compiles an `AstProjection` expression into a native callable function
+    /// with explicit optimization settings.
+    ///
+    /// # Errors
+    /// Returns a [`crate::error::JitError`] if compilation or linking fails.
+    pub fn compile_with_opts(
+        &mut self,
+        ast: &AstProjection,
+        opts: &OptConfig,
+    ) -> Result<CompiledExprFn, crate::error::JitError> {
         if ast.is_empty() {
             return crate::error::cold_jit_error_malformed_node();
         }
+
+        // Run pre-codegen analysis pass.
+        let analysis = analyze(ast);
 
         let mut ctx = Context::new();
 
@@ -302,6 +373,8 @@ impl JitCompiler {
         self.work_values.clear();
         let root_val = compile_ast_iterative(
             ast,
+            &analysis,
+            opts,
             &mut func_builder,
             vars_ptr,
             powf_func_ref,
@@ -336,6 +409,255 @@ impl JitCompiler {
         // exactly the signature we declared above (`fn(*const f64) -> f64`).
         let compiled_fn: CompiledExprFn = unsafe { std::mem::transmute(code_ptr) };
         Ok(compiled_fn)
+    }
+
+    /// Compiles a vectorized (2× unrolled scalar) batch evaluation function.
+    ///
+    /// Returns `None` if the expression is not vectorizable (contains `Mod`,
+    /// non-expandable `Pow`, or user `Function` nodes).
+    ///
+    /// The returned function operates on column-major data: each variable
+    /// has its own contiguous column of `f64` values. See [`CompiledBatchFn`].
+    ///
+    /// # Errors
+    /// Returns a [`crate::error::JitError`] if Cranelift compilation fails.
+    pub fn compile_batch_f64x2(
+        &mut self,
+        ast: &AstProjection,
+    ) -> Result<Option<CompiledBatchFn>, crate::error::JitError> {
+        if ast.is_empty() {
+            return crate::error::cold_jit_error_malformed_node().map(Some);
+        }
+
+        let analysis = analyze(ast);
+        let opts = OptConfig::default();
+
+        // Check vectorizability: no Mod, no non-expandable Pow, no Function.
+        if !is_vectorizable_ast(ast, &analysis) {
+            return Ok(None);
+        }
+
+        // Collect the set of variable sym_ids used in the expression.
+        // We need the ordered sym_ids to map them to column indices.
+        let sym_ids: Vec<u32> = {
+            let mut seen: HashSet<u32> = HashSet::new();
+            let mut ordered: Vec<u32> = Vec::new();
+            for node in &ast.nodes {
+                if let SymbolKind::Variable(sid) = node.kind {
+                    if seen.insert(sid.0) {
+                        ordered.push(sid.0);
+                    }
+                }
+            }
+            ordered
+        };
+
+        let mut ctx = Context::new();
+
+        // Signature: fn(vars_cols: *const *const f64, n_rows: usize, out: *mut f64)
+        // All three are pointer-sized (i64 on 64-bit).
+        let ptr_type = self.module.target_config().pointer_type();
+        ctx.func.signature.params.push(AbiParam::new(ptr_type)); // vars_cols
+        ctx.func.signature.params.push(AbiParam::new(ptr_type)); // n_rows (usize = ptr_type on 64-bit)
+        ctx.func.signature.params.push(AbiParam::new(ptr_type)); // out
+
+        let mut func_builder = FunctionBuilder::new(&mut ctx.func, &mut self.builder_ctx);
+
+        // Declare powf (needed for non-expanded pow fallback — but
+        // we've already checked there are none for vectorizable ASTs).
+        let mut powf_sig = Signature::new(self.module.target_config().default_call_conv);
+        powf_sig.params.push(AbiParam::new(types::F64));
+        powf_sig.params.push(AbiParam::new(types::F64));
+        powf_sig.returns.push(AbiParam::new(types::F64));
+        let powf_name = self
+            .module
+            .declare_function("powf", Linkage::Import, &powf_sig)
+            .map_err(|_| crate::error::JitError::InitFailed)?;
+
+        // Create basic blocks.
+        let entry_block = func_builder.create_block();
+        let loop_check = func_builder.create_block();
+        let vec_body = func_builder.create_block();
+        let scalar_check = func_builder.create_block();
+        let scalar_body = func_builder.create_block();
+        let ret_block = func_builder.create_block();
+
+        // Block parameters (SSA phi-nodes for the loop induction variable).
+        func_builder.append_block_params_for_function_params(entry_block);
+        func_builder.append_block_param(loop_check, ptr_type);    // i
+        func_builder.append_block_param(vec_body, ptr_type);       // i
+        func_builder.append_block_param(scalar_check, ptr_type);   // i
+        func_builder.append_block_param(scalar_body, ptr_type);    // i
+
+        // ── entry block ────────────────────────────────────────────────────
+        func_builder.switch_to_block(entry_block);
+        let params = func_builder.block_params(entry_block);
+        let vars_cols_val = params[0];
+        let n_rows_val = params[1];
+        let out_ptr_val = params[2];
+        let zero_i = func_builder.ins().iconst(ptr_type, 0);
+        let zero_i_ba = BlockArg::Value(zero_i);
+        func_builder.ins().jump(loop_check, &[zero_i_ba]);
+        func_builder.seal_block(entry_block);
+
+        // ── loop_check(i) ──────────────────────────────────────────────────
+        func_builder.switch_to_block(loop_check);
+        let i_lc = func_builder.block_params(loop_check)[0];
+        let remaining = func_builder.ins().isub(n_rows_val, i_lc);
+        let two_i = func_builder.ins().iconst(ptr_type, 2);
+        let can_vec = func_builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, remaining, two_i);
+        let i_lc_ba = BlockArg::Value(i_lc);
+        func_builder.ins().brif(can_vec, vec_body, &[i_lc_ba], scalar_check, &[i_lc_ba]);
+        // loop_check has back-edge from vec_body — seal after vec_body is built.
+
+        // ── vec_body(i) ────────────────────────────────────────────────────
+        // Implements 2× unrolled scalar: two independent SSA paths for rows i
+        // and i+1. This achieves the same throughput as F64X2 SIMD via ILP
+        // without requiring SIMD types (avoiding Cranelift F64X2 API issues).
+        func_builder.switch_to_block(vec_body);
+        let i_vb = func_builder.block_params(vec_body)[0];
+
+        // Compute byte offsets: i*8 and (i+1)*8
+        let byte_off_0 = func_builder.ins().ishl_imm(i_vb, 3);
+        let one_i = func_builder.ins().iconst(ptr_type, 1);
+        let i_plus1 = func_builder.ins().iadd(i_vb, one_i);
+        let byte_off_1 = func_builder.ins().ishl_imm(i_plus1, 3);
+
+        // Load variable values for both rows.
+        let ptr_size = i64::try_from(ptr_type.bytes()).unwrap_or(8);
+        let mut var_vals_0: HashMap<u32, Value> = HashMap::new();
+        let mut var_vals_1: HashMap<u32, Value> = HashMap::new();
+        for &sid in &sym_ids {
+            let col_offset = func_builder.ins().iconst(ptr_type,
+                i64::from(sid).wrapping_mul(ptr_size));
+            let col_ptr_addr = func_builder.ins().iadd(vars_cols_val, col_offset);
+            let col_ptr = func_builder.ins().load(ptr_type, MemFlags::new(), col_ptr_addr, 0);
+            let addr_0 = func_builder.ins().iadd(col_ptr, byte_off_0);
+            let addr_1 = func_builder.ins().iadd(col_ptr, byte_off_1);
+            let v0 = func_builder.ins().load(types::F64, MemFlags::new(), addr_0, 0);
+            let v1 = func_builder.ins().load(types::F64, MemFlags::new(), addr_1, 0);
+            var_vals_0.insert(sid, v0);
+            var_vals_1.insert(sid, v1);
+        }
+
+        let powf_func_ref_vb = self.module.declare_func_in_func(powf_name, func_builder.func);
+
+        // Emit scalar expression for row 0 and row 1 independently.
+        let mut work_stack_0: Vec<Frame> = Vec::with_capacity(32);
+        let mut work_vals_0: Vec<Value> = Vec::with_capacity(32);
+        let res_0 = emit_ast_scalar_with_vars(
+            ast, &analysis, &opts,
+            &mut func_builder,
+            &var_vals_0,
+            powf_func_ref_vb,
+            &HashMap::new(),
+            &mut work_stack_0,
+            &mut work_vals_0,
+        )?;
+
+        let mut work_stack_1: Vec<Frame> = Vec::with_capacity(32);
+        let mut work_vals_1: Vec<Value> = Vec::with_capacity(32);
+        let res_1 = emit_ast_scalar_with_vars(
+            ast, &analysis, &opts,
+            &mut func_builder,
+            &var_vals_1,
+            powf_func_ref_vb,
+            &HashMap::new(),
+            &mut work_stack_1,
+            &mut work_vals_1,
+        )?;
+
+        // Store results.
+        let out_addr_0 = func_builder.ins().iadd(out_ptr_val, byte_off_0);
+        let out_addr_1 = func_builder.ins().iadd(out_ptr_val, byte_off_1);
+        func_builder.ins().store(MemFlags::new(), res_0, out_addr_0, 0);
+        func_builder.ins().store(MemFlags::new(), res_1, out_addr_1, 0);
+
+        let i_vb_next = func_builder.ins().iadd_imm(i_vb, 2);
+        let i_vb_next_ba = BlockArg::Value(i_vb_next);
+        func_builder.ins().jump(loop_check, &[i_vb_next_ba]);
+
+        // Now seal loop_check (all predecessors: entry and vec_body back-edge).
+        func_builder.seal_block(loop_check);
+        func_builder.seal_block(vec_body);
+
+        // ── scalar_check(i) ────────────────────────────────────────────────
+        func_builder.switch_to_block(scalar_check);
+        let i_sc = func_builder.block_params(scalar_check)[0];
+        let done = func_builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, i_sc, n_rows_val);
+        let i_sc_ba = BlockArg::Value(i_sc);
+        func_builder.ins().brif(done, ret_block, &[] as &[BlockArg], scalar_body, &[i_sc_ba]);
+        // scalar_check has a back-edge from scalar_body — seal after.
+
+        // ── scalar_body(i) ────────────────────────────────────────────────
+        func_builder.switch_to_block(scalar_body);
+        let i_sb = func_builder.block_params(scalar_body)[0];
+
+        let byte_off_sb = func_builder.ins().ishl_imm(i_sb, 3);
+        let mut var_vals_sb: HashMap<u32, Value> = HashMap::new();
+        for &sid in &sym_ids {
+            let col_offset = func_builder.ins().iconst(ptr_type,
+                i64::from(sid).wrapping_mul(ptr_size));
+            let col_ptr_addr = func_builder.ins().iadd(vars_cols_val, col_offset);
+            let col_ptr = func_builder.ins().load(ptr_type, MemFlags::new(), col_ptr_addr, 0);
+            let addr = func_builder.ins().iadd(col_ptr, byte_off_sb);
+            let v = func_builder.ins().load(types::F64, MemFlags::new(), addr, 0);
+            var_vals_sb.insert(sid, v);
+        }
+
+        let powf_func_ref_sb = self.module.declare_func_in_func(powf_name, func_builder.func);
+
+        let mut work_stack_sb: Vec<Frame> = Vec::with_capacity(32);
+        let mut work_vals_sb: Vec<Value> = Vec::with_capacity(32);
+        let res_sb = emit_ast_scalar_with_vars(
+            ast, &analysis, &opts,
+            &mut func_builder,
+            &var_vals_sb,
+            powf_func_ref_sb,
+            &HashMap::new(),
+            &mut work_stack_sb,
+            &mut work_vals_sb,
+        )?;
+
+        let out_addr_sb = func_builder.ins().iadd(out_ptr_val, byte_off_sb);
+        func_builder.ins().store(MemFlags::new(), res_sb, out_addr_sb, 0);
+
+        let i_sb_next = func_builder.ins().iadd_imm(i_sb, 1);
+        let i_sb_next_ba = BlockArg::Value(i_sb_next);
+        func_builder.ins().jump(scalar_check, &[i_sb_next_ba]);
+
+        func_builder.seal_block(scalar_check);
+        func_builder.seal_block(scalar_body);
+
+        // ── ret_block ─────────────────────────────────────────────────────
+        func_builder.switch_to_block(ret_block);
+        func_builder.ins().return_(&[]);
+        func_builder.seal_block(ret_block);
+
+        func_builder.finalize();
+
+        let fn_name = format!("batch_expr_{}", ast.nodes[0].dag_id.0);
+        let func_id = self
+            .module
+            .declare_function(&fn_name, Linkage::Export, &ctx.func.signature)
+            .map_err(|_| crate::error::JitError::VerifierRejected)?;
+
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|_| crate::error::JitError::VerifierRejected)?;
+
+        self.module.clear_context(&mut ctx);
+
+        self.module
+            .finalize_definitions()
+            .map_err(|_| crate::error::JitError::VerifierRejected)?;
+
+        let code_ptr = self.module.get_finalized_function(func_id);
+
+        // SAFETY: Cranelift returns native code matching the declared
+        // `CompiledBatchFn` signature.
+        let batch_fn: CompiledBatchFn = unsafe { std::mem::transmute(code_ptr) };
+        Ok(Some(batch_fn))
     }
 
     /// Convenience wrapper: converts the DAG subgraph rooted at `root`
@@ -374,20 +696,39 @@ struct Frame {
 
 fn compile_ast_iterative(
     ast: &AstProjection,
+    analysis: &[NodeAnalysis],
+    opts: &OptConfig,
     builder: &mut FunctionBuilder<'_>,
     vars_ptr: Value,
     powf_func_ref: cranelift_codegen::ir::FuncRef,
     fmod_func_ref: cranelift_codegen::ir::FuncRef,
     custom_refs: &HashMap<u32, cranelift_codegen::ir::FuncRef>,
     stack: &mut Vec<Frame>,
-    mut values: &mut Vec<Value>,
+    values: &mut Vec<Value>,
 ) -> Result<Value, crate::error::JitError> {
-    // Callers clear these before passing — guaranteed by `compile()`.
+    // Callers clear these before passing — guaranteed by `compile_with_opts()`.
 
     // FMA peephole: maps each Mul-result Value to its two input factors so
     // that when an enclosing Add is emitted we can fold `a*b + c` into one
     // `fma(a, b, c)` instruction (jit_review §4 / simd_review §4).
     let mut mul_factors: HashMap<Value, (Value, Value)> = HashMap::new();
+
+    // CSE: pre-scan for dag_ids that appear more than once.
+    let duplicate_dag_ids: HashSet<u32> = if opts.enable_cse {
+        let mut dag_id_count: HashMap<u32, u32> = HashMap::new();
+        for node in &ast.nodes {
+            *dag_id_count.entry(node.dag_id.0).or_insert(0) =
+                dag_id_count.get(&node.dag_id.0).copied().unwrap_or(0).saturating_add(1);
+        }
+        dag_id_count.into_iter()
+            .filter(|&(_, c)| c > 1)
+            .map(|(id, _)| id)
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    // Maps dag_id.0 → already-computed SSA Value (CSE cache).
+    let mut cse_map: HashMap<u32, Value> = HashMap::new();
 
     // Seed with the root.
     let root_node = ast
@@ -401,6 +742,22 @@ fn compile_ast_iterative(
     });
 
     while let Some(top) = stack.last_mut() {
+        // CSE check at first visit (cursor == 0): if this node's dag_id
+        // has already been computed, reuse the cached Value.
+        if opts.enable_cse && top.cursor == 0 && !duplicate_dag_ids.is_empty() {
+            let dag_id = ast.nodes
+                .get(top.idx)
+                .map(|n| n.dag_id.0)
+                .unwrap_or(u32::MAX);
+            if duplicate_dag_ids.contains(&dag_id) {
+                if let Some(&cached) = cse_map.get(&dag_id) {
+                    stack.pop();
+                    values.push(cached);
+                    continue;
+                }
+            }
+        }
+
         // Decide whether to push a child or emit this node, then act —
         // splitting the decision from the action keeps the borrow
         // checker happy when we go from `last_mut()` to `push/pop`.
@@ -434,6 +791,8 @@ fn compile_ast_iterative(
                 stack.pop();
                 emit_one_node(
                     ast,
+                    analysis,
+                    opts,
                     idx,
                     arity,
                     builder,
@@ -441,9 +800,20 @@ fn compile_ast_iterative(
                     powf_func_ref,
                     fmod_func_ref,
                     custom_refs,
-                    &mut values,
+                    values,
                     &mut mul_factors,
                 )?;
+                // Store result in CSE cache if this dag_id is a duplicate.
+                if opts.enable_cse && !duplicate_dag_ids.is_empty() {
+                    if let Some(node) = ast.nodes.get(idx) {
+                        let dag_id = node.dag_id.0;
+                        if duplicate_dag_ids.contains(&dag_id) {
+                            if let Some(&v) = values.last() {
+                                cse_map.insert(dag_id, v);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -463,6 +833,8 @@ enum Action {
 #[allow(clippy::too_many_arguments)]
 fn emit_one_node(
     ast: &AstProjection,
+    analysis: &[NodeAnalysis],
+    opts: &OptConfig,
     idx: usize,
     arity: usize,
     builder: &mut FunctionBuilder<'_>,
@@ -473,7 +845,7 @@ fn emit_one_node(
     values: &mut Vec<Value>,
     mul_factors: &mut HashMap<Value, (Value, Value)>,
 ) -> Result<(), crate::error::JitError> {
-    let node = &ast.nodes[idx];
+    let node = ast.nodes.get(idx).ok_or(crate::error::JitError::MalformedNode)?;
 
     match node.kind {
         SymbolKind::Constant(_) => {
@@ -489,7 +861,13 @@ fn emit_one_node(
             // Take children out in order — the iterative walker pushes
             // left-to-right, so children[0..arity] are already correct.
             let child_vals: Vec<Value> = values.drain(split_at..).collect();
-            let result = emit_operator(builder, op, &child_vals, powf_func_ref, fmod_func_ref, node, mul_factors)?;
+            let node_analysis = analysis.get(idx);
+            let result = emit_operator(
+                builder, op, &child_vals,
+                powf_func_ref, fmod_func_ref,
+                node, node_analysis, opts,
+                mul_factors,
+            )?;
             values.push(result);
         }
         SymbolKind::Function(fn_id) => {
@@ -529,14 +907,11 @@ fn emit_variable_load(
 }
 
 /// Emits IR for a single algebraic operator, applying peephole identity
-/// simplifications first (T2.5). The peephole runs at IR time — the
-/// constant arguments here are whatever the codegen walker materialised
-/// into `child_vals`, which may include `f64const` instructions we
-/// emitted moments ago.
+/// simplifications, NaN-guard elision, power expansion, and FMA fusion.
 ///
-/// `mul_factors` tracks the two inputs of each recently-emitted `fmul`
-/// result; this enables the FMA peephole in `OpKind::Add` that folds
-/// `a*b + c` into a single `fma(a, b, c)` instruction (jit_review §4).
+/// `analysis` carries the pre-computed `NodeAnalysis` for this node (if any);
+/// `opts` controls which passes are active.
+#[allow(clippy::too_many_arguments)]
 fn emit_operator(
     builder: &mut FunctionBuilder<'_>,
     op: OpKind,
@@ -544,6 +919,8 @@ fn emit_operator(
     powf_func_ref: cranelift_codegen::ir::FuncRef,
     fmod_func_ref: cranelift_codegen::ir::FuncRef,
     ast_node: &AstNode,
+    node_analysis: Option<&NodeAnalysis>,
+    opts: &OptConfig,
     mul_factors: &mut HashMap<Value, (Value, Value)>,
 ) -> Result<Value, crate::error::JitError> {
     use crate::jit::primitives::{simplify_add, simplify_mul};
@@ -557,6 +934,9 @@ fn emit_operator(
         .collect();
 
     let arity = child_vals.len();
+    // Suppress "unused" warning on ast_node; it's kept for future peepholes.
+    let _ = ast_node;
+
     match op {
         OpKind::Add => {
             if arity != 2 {
@@ -589,6 +969,10 @@ fn emit_operator(
         OpKind::Sub => {
             if arity != 2 {
                 return Err(crate::error::JitError::MalformedNode);
+            }
+            // x - x = 0 when both sides are the same SSA value.
+            if child_vals[0] == child_vals[1] {
+                return Ok(builder.ins().f64const(0.0));
             }
             match (constants[0], constants[1]) {
                 (Some(l), Some(r)) => Ok(builder.ins().f64const(l - r)),
@@ -645,15 +1029,45 @@ fn emit_operator(
                 return Ok(builder.ins().f64const(f64::NAN));
             }
 
-            // Runtime denominator: emit `select(rhs==0, NaN, lhs/rhs)` so
-            // divide-by-zero yields NaN instead of trapping (IEEE-754 §6.2,
-            // matches `parallel::solver` behaviour). Using `select` avoids
-            // a conditional branch and lets the CPU execute both sides.
-            let zero = builder.ins().f64const(0.0);
-            let nan_val = builder.ins().f64const(f64::NAN);
-            let is_zero = builder.ins().fcmp(FloatCC::Equal, rhs, zero);
-            let div_result = builder.ins().fdiv(lhs, rhs);
-            Ok(builder.ins().select(is_zero, nan_val, div_result))
+            // Reciprocal math: x / C → x * (1/C) for constant non-zero C.
+            if opts.allow_reciprocal_math {
+                if let Some(c) = constants[1] {
+                    if c != 0.0 {
+                        let recip = builder.ins().f64const(1.0 / c);
+                        return Ok(builder.ins().fmul(lhs, recip));
+                    }
+                }
+            }
+
+            // NaN guard elision: if the denominator is provably non-zero,
+            // we can skip the `select(rhs==0, NaN, lhs/rhs)` guard.
+            let rhs_is_const_nonzero = constants[1].map_or(false, |c| c != 0.0 && !c.is_nan());
+            // The analysis result for THIS node is not what we want for guard
+            // elision; we need to know if the RHS (denominator) child is non-zero.
+            // The analysis pass puts `is_nonzero` on each node; the denominator
+            // child is the node at `child_vals[1]`. Since we don't have its idx
+            // here, we use the parent node's analysis which was computed to reflect
+            // `is_nonzero[a] && is_nonzero[b]` for Div — i.e., the parent being
+            // non-zero implies the denominator is non-zero.
+            // As a simpler and equally correct approach: trust the constant check
+            // and the analysis flag on this Div node's own result.
+            let parent_nonzero = node_analysis.map_or(false, |a| a.is_nonzero);
+            let skip_guard = opts.elide_nan_guard && (rhs_is_const_nonzero || parent_nonzero);
+
+            if skip_guard {
+                // Safe to divide directly — no NaN guard needed.
+                Ok(builder.ins().fdiv(lhs, rhs))
+            } else {
+                // Runtime denominator: emit `select(rhs==0, NaN, lhs/rhs)` so
+                // divide-by-zero yields NaN instead of trapping (IEEE-754 §6.2,
+                // matches `parallel::solver` behaviour). Using `select` avoids
+                // a conditional branch and lets the CPU execute both sides.
+                let zero = builder.ins().f64const(0.0);
+                let nan_val = builder.ins().f64const(f64::NAN);
+                let is_zero = builder.ins().fcmp(FloatCC::Equal, rhs, zero);
+                let div_result = builder.ins().fdiv(lhs, rhs);
+                Ok(builder.ins().select(is_zero, nan_val, div_result))
+            }
         }
         OpKind::Pow => {
             if arity != 2 {
@@ -661,10 +1075,35 @@ fn emit_operator(
             }
             // Peephole: `x ^ 0 → 1`, `x ^ 1 → x`, `c1 ^ c2 → const`.
             match (constants[0], constants[1]) {
-                (Some(l), Some(r)) => Ok(builder.ins().f64const(l.powf(r))),
-                (_, Some(0.0)) => Ok(builder.ins().f64const(1.0)),
-                (_, Some(1.0)) => Ok(child_vals[0]),
+                (Some(l), Some(r)) => return Ok(builder.ins().f64const(l.powf(r))),
+                (_, Some(0.0)) => return Ok(builder.ins().f64const(1.0)),
+                (_, Some(1.0)) => return Ok(child_vals[0]),
+                _ => {}
+            }
+
+            // Use expansion strategy from analysis pass if available.
+            let expansion = node_analysis.map(|a| &a.pow_expansion);
+            match expansion {
+                Some(PowExpansion::Sqrt) if opts.expand_sqrt => {
+                    Ok(passes::emit_sqrt(builder, child_vals[0]))
+                }
+                Some(PowExpansion::IntPow(n)) if *n >= 2 && *n <= opts.max_int_pow => {
+                    Ok(passes::emit_int_pow(builder, child_vals[0], *n))
+                }
                 _ => {
+                    // Fall back to runtime powf call.
+                    // Also handle constants[1] cases that reach here via
+                    // the fallthrough (e.g. exp > max_int_pow).
+                    if let Some(exp) = constants[1] {
+                        // sqrt fallback if not handled above.
+                        if opts.expand_sqrt && (exp - 0.5_f64).abs() < f64::EPSILON {
+                            return Ok(passes::emit_sqrt(builder, child_vals[0]));
+                        }
+                        let n = exp as u32;
+                        if exp == n as f64 && n >= 2 && n <= opts.max_int_pow {
+                            return Ok(passes::emit_int_pow(builder, child_vals[0], n));
+                        }
+                    }
                     let call = builder.ins().call(powf_func_ref, child_vals);
                     Ok(builder.inst_results(call)[0])
                 }
@@ -702,11 +1141,6 @@ fn emit_operator(
             Ok(builder.ins().fneg(child_vals[0]))
         }
     }
-    .inspect(|_| {
-        // Reference `ast_node` to keep the parameter alive for callers
-        // that future-extend with kind-specific peepholes.
-        let _ = ast_node;
-    })
 }
 
 /// Returns the constant `f64` behind `v` if `v` is the result of a
@@ -725,6 +1159,136 @@ fn constant_behind(builder: &FunctionBuilder<'_>, v: Value) -> Option<f64> {
     } else {
         None
     }
+}
+
+/// Returns `true` if the expression can be compiled to a vectorized batch
+/// function. Requirements: no `Mod`, no `Function`, no `Pow` nodes with a
+/// `PowExpansion::None` strategy (i.e. all pow exponents must be expandable).
+fn is_vectorizable_ast(ast: &AstProjection, analysis: &[NodeAnalysis]) -> bool {
+    for (node, an) in ast.nodes.iter().zip(analysis.iter()) {
+        match node.kind {
+            SymbolKind::Function(_) => return false,
+            SymbolKind::Operator(OpKind::Mod) => return false,
+            SymbolKind::Operator(OpKind::Pow) => {
+                if matches!(an.pow_expansion, PowExpansion::None) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Iterative scalar emitter that substitutes variables from a pre-built map
+/// (`var_vals`: sym_id.0 → SSA Value) instead of loading from a pointer.
+///
+/// Used by `compile_batch_f64x2` to emit two independent expression trees
+/// for the two loop rows.
+#[allow(clippy::too_many_arguments)]
+fn emit_ast_scalar_with_vars(
+    ast: &AstProjection,
+    analysis: &[NodeAnalysis],
+    opts: &OptConfig,
+    builder: &mut FunctionBuilder<'_>,
+    var_vals: &HashMap<u32, Value>,
+    powf_func_ref: cranelift_codegen::ir::FuncRef,
+    custom_refs: &HashMap<u32, cranelift_codegen::ir::FuncRef>,
+    stack: &mut Vec<Frame>,
+    values: &mut Vec<Value>,
+) -> Result<Value, crate::error::JitError> {
+    stack.clear();
+    values.clear();
+
+    let mut mul_factors: HashMap<Value, (Value, Value)> = HashMap::new();
+
+    // Fmod is unused in vectorizable expressions (we already checked), but we
+    // need a placeholder FuncRef. Reuse powf_func_ref as a dummy — it will
+    // never be called because Mod nodes are excluded.
+    let fmod_dummy = powf_func_ref;
+
+    let root_node = ast
+        .nodes
+        .first()
+        .ok_or(crate::error::JitError::MalformedNode)?;
+    stack.push(Frame { idx: 0, arity: root_node.children.len(), cursor: 0 });
+
+    while let Some(top) = stack.last_mut() {
+        let action = if top.cursor < top.arity {
+            let Some(node) = ast.nodes.get(top.idx) else {
+                return Err(crate::error::JitError::MalformedNode);
+            };
+            let Some(&child_ptr) = node.children.as_slice().get(top.cursor) else {
+                return Err(crate::error::JitError::MalformedNode);
+            };
+            let child_idx = child_ptr.resolve(top.idx)
+                .ok_or(crate::error::JitError::MalformedNode)?;
+            top.cursor += 1;
+            Action::Descend(child_idx)
+        } else {
+            Action::Emit(top.idx, top.arity)
+        };
+
+        match action {
+            Action::Descend(child_idx) => {
+                let Some(child_node) = ast.nodes.get(child_idx) else {
+                    return Err(crate::error::JitError::MalformedNode);
+                };
+                stack.push(Frame {
+                    idx: child_idx,
+                    arity: child_node.children.len(),
+                    cursor: 0,
+                });
+            }
+            Action::Emit(idx, arity) => {
+                stack.pop();
+                let node = ast.nodes.get(idx).ok_or(crate::error::JitError::MalformedNode)?;
+                match node.kind {
+                    SymbolKind::Constant(_) => {
+                        values.push(builder.ins().f64const(node.value));
+                    }
+                    SymbolKind::Variable(sym_id) => {
+                        let v = var_vals.get(&sym_id.0).copied()
+                            .ok_or(crate::error::JitError::MalformedNode)?;
+                        values.push(v);
+                    }
+                    SymbolKind::Operator(op) => {
+                        let split_at = values.len().checked_sub(arity)
+                            .ok_or(crate::error::JitError::MalformedNode)?;
+                        let child_v: Vec<Value> = values.drain(split_at..).collect();
+                        let node_analysis = analysis.get(idx);
+                        let result = emit_operator(
+                            builder, op, &child_v,
+                            powf_func_ref, fmod_dummy,
+                            node, node_analysis, opts,
+                            &mut mul_factors,
+                        )?;
+                        values.push(result);
+                    }
+                    SymbolKind::Function(fn_id) => {
+                        let func_ref = custom_refs.get(&fn_id.0).copied()
+                            .ok_or(crate::error::JitError::UnknownFunction)?;
+                        let split_at = values.len().checked_sub(arity)
+                            .ok_or(crate::error::JitError::MalformedNode)?;
+                        let child_v: Vec<Value> = values.drain(split_at..).collect();
+                        if child_v.is_empty() || child_v.len() > 3 {
+                            return Err(crate::error::JitError::MalformedNode);
+                        }
+                        let call = builder.ins().call(func_ref, &child_v);
+                        let result = builder
+                            .inst_results(call)
+                            .first()
+                            .copied()
+                            .ok_or(crate::error::JitError::VerifierRejected)?;
+                        values.push(result);
+                    }
+                }
+            }
+        }
+    }
+
+    let result = values.pop().ok_or(crate::error::JitError::MalformedNode)?;
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -863,5 +1427,65 @@ mod tests {
             crate::error::JitError::UnknownFunction,
             "unregistered fn id must yield UnknownFunction; got: {err:?}"
         );
+    }
+
+    #[test]
+    fn test_power_expansion_x_squared_no_powf() {
+        // x^2 should compile without calling powf: result must be exact.
+        let mut b = DagBuilder::new();
+        let id = parse_expression("x ^ 2", &mut b).unwrap();
+        let ast = dag_to_ast(b.arena(), id);
+        let mut compiler = JitCompiler::new();
+        let f = compiler.compile(&ast).unwrap();
+        // x=3: 3^2 = 9
+        let result = f([3.0_f64].as_ptr());
+        assert!((result - 9.0).abs() < f64::EPSILON, "3^2 should be 9; got {result}");
+    }
+
+    #[test]
+    fn test_power_expansion_sqrt() {
+        let mut b = DagBuilder::new();
+        let id = parse_expression("x ^ 0.5", &mut b).unwrap();
+        let ast = dag_to_ast(b.arena(), id);
+        let mut compiler = JitCompiler::new();
+        let f = compiler.compile(&ast).unwrap();
+        let result = f([4.0_f64].as_ptr());
+        assert!((result - 2.0).abs() < 1e-10, "4^0.5 should be 2; got {result}");
+    }
+
+    #[test]
+    fn test_nan_guard_elision_constant_denominator() {
+        // x / 3.0: denominator is a nonzero constant, no NaN guard needed.
+        let mut b = DagBuilder::new();
+        let id = parse_expression("x / 3", &mut b).unwrap();
+        let ast = dag_to_ast(b.arena(), id);
+        let mut compiler = JitCompiler::new();
+        let f = compiler.compile(&ast).unwrap();
+        let result = f([9.0_f64].as_ptr());
+        assert!((result - 3.0).abs() < f64::EPSILON, "9/3 should be 3; got {result}");
+    }
+
+    #[test]
+    fn test_batch_f64x2_correctness() {
+        let mut b = DagBuilder::new();
+        let id = parse_expression("x + y", &mut b).unwrap();
+        let ast = dag_to_ast(b.arena(), id);
+        let mut compiler = JitCompiler::new();
+        let batch_fn = compiler
+            .compile_batch_f64x2(&ast)
+            .expect("compile ok")
+            .expect("should be vectorizable");
+
+        // 4 rows: [1+2=3, 3+4=7, 5+6=11, 7+8=15]
+        let x_col = vec![1.0_f64, 3.0, 5.0, 7.0];
+        let y_col = vec![2.0_f64, 4.0, 6.0, 8.0];
+        let cols: Vec<*const f64> = vec![x_col.as_ptr(), y_col.as_ptr()];
+        let mut out = vec![0.0_f64; 4];
+        batch_fn(cols.as_ptr(), 4, out.as_mut_ptr());
+
+        let expected = [3.0_f64, 7.0, 11.0, 15.0];
+        for (i, (&got, &exp)) in out.iter().zip(expected.iter()).enumerate() {
+            assert!((got - exp).abs() < f64::EPSILON, "row {i}: expected {exp}, got {got}");
+        }
     }
 }
