@@ -41,25 +41,6 @@ impl fmt::Display for SymbolId {
     }
 }
 
-/// The kind of an operator node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
-pub enum OpKind {
-    /// Addition (`+`).
-    Add,
-    /// Subtraction (`-`).
-    Sub,
-    /// Multiplication (`*`).
-    Mul,
-    /// Division (`/`).
-    Div,
-    /// Exponentiation (`^`).
-    Pow,
-    /// Unary negation (`-x`).
-    Neg,
-    /// IEEE-754 floating-point remainder (`%`). Same precedence as `*` and `/`.
-    Mod,
-}
-
 impl fmt::Display for OpKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
@@ -79,6 +60,26 @@ impl fmt::Display for OpKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
 pub struct FnId(pub(crate) u32);
 
+/// The kind of an operator node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
+#[repr(u8)]
+pub enum OpKind {
+    /// Addition (`+`).
+    Add = 0,
+    /// Subtraction (`-`).
+    Sub = 1,
+    /// Multiplication (`*`).
+    Mul = 2,
+    /// Division (`/`).
+    Div = 3,
+    /// Exponentiation (`^`).
+    Pow = 4,
+    /// IEEE-754 floating-point remainder (`%`). Same precedence as `*` and `/`.
+    Mod = 5,
+    /// Unary negation (`-x`).
+    Neg = 6,
+}
+
 /// Classification of a symbol node.
 ///
 /// Every node in the DAG is one of these four kinds:
@@ -86,16 +87,42 @@ pub struct FnId(pub(crate) u32);
 /// - A numeric **constant** (e.g. `3.14`).
 /// - An **operator** (e.g. `+`, `*`).
 /// - A **function** call (e.g. `sin`, `log`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
+#[derive(Debug, Clone, Copy, Encode, Decode)]
 pub enum SymbolKind {
     /// A named variable, identified by its `SymbolId` in the symbol table.
     Variable(SymbolId),
-    /// A numeric constant value.
-    Constant,
+    /// A numeric constant value (the f64 value is stored inline).
+    Constant(f64),
     /// An algebraic operator.
     Operator(OpKind),
     /// A function call, identified by its `FnId`.
     Function(FnId),
+}
+
+impl PartialEq for SymbolKind {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Variable(a), Self::Variable(b)) => a == b,
+            (Self::Constant(a), Self::Constant(b)) => a.to_bits() == b.to_bits(),
+            (Self::Operator(a), Self::Operator(b)) => a == b,
+            (Self::Function(a), Self::Function(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for SymbolKind {}
+
+impl std::hash::Hash for SymbolKind {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Self::Variable(sym) => sym.hash(state),
+            Self::Constant(v) => v.to_bits().hash(state),
+            Self::Operator(op) => op.hash(state),
+            Self::Function(fn_id) => fn_id.hash(state),
+        }
+    }
 }
 
 /// The symbol registry: maps symbol IDs to their string names.

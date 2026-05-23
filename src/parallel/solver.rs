@@ -56,6 +56,109 @@ impl FnEvalRegistry {
     }
 }
 
+/// Registry of operator-evaluation overrides for the parallel evaluator.
+///
+/// Overrides are keyed by `OpKind` discriminant. When a registered override
+/// exists for an op, it is called instead of `apply_op`.
+#[derive(Default)]
+pub struct OpEvalRegistry {
+    overrides: std::collections::HashMap<u8, fn(&[f64]) -> f64>,
+}
+
+impl OpEvalRegistry {
+    /// Creates an empty registry.
+    #[must_use]
+    pub fn new() -> Self { Self { overrides: std::collections::HashMap::new() } }
+
+    /// Registers a custom evaluation function for `op`.
+    pub fn register(&mut self, op: crate::dag::symbol::OpKind, f: fn(&[f64]) -> f64) {
+        self.overrides.insert(op as u8, f);
+    }
+
+    /// Looks up an override for `op`, if any.
+    #[must_use]
+    pub fn get(&self, op: crate::dag::symbol::OpKind) -> Option<fn(&[f64]) -> f64> {
+        self.overrides.get(&(op as u8)).copied()
+    }
+}
+
+/// Variant of [`evaluate_node_with_fns`] that also accepts an [`OpEvalRegistry`]
+/// for overriding built-in operator evaluation.
+///
+/// When an operator has a registered override, it is called instead of
+/// `apply_op`. Unregistered operators use the default `apply_op` logic.
+#[must_use]
+pub fn evaluate_node_with_overrides(
+    arena: &DagArena,
+    id: DagNodeId,
+    vars: &[f64],
+    fn_registry: &FnEvalRegistry,
+    op_registry: &OpEvalRegistry,
+) -> f64 {
+    if id.is_none() {
+        return 0.0;
+    }
+
+    let mut stack: Vec<Frame> = Vec::with_capacity(64);
+    let mut values: Vec<f64> = Vec::with_capacity(64);
+
+    let root_arity = arena.get(id).map_or(0, |n| n.children.len());
+    stack.push(Frame { id, arity: root_arity, cursor: 0 });
+
+    while let Some(top) = stack.last_mut() {
+        let next_child: Option<DagNodeId> = arena.get(top.id).and_then(|node| {
+            let kids = node.children.as_slice();
+            kids.get(top.cursor).copied()
+        });
+
+        if let Some(child_id) = next_child {
+            top.cursor += 1;
+            let child_arity = arena.get(child_id).map_or(0, |c| c.children.len());
+            stack.push(Frame { id: child_id, arity: child_arity, cursor: 0 });
+        } else {
+            let Some(frame) = stack.pop() else { break };
+            let v = reduce_frame_with_overrides(arena, frame.id, frame.arity, &mut values, vars, fn_registry, op_registry);
+            values.push(v);
+        }
+    }
+
+    values.pop().unwrap_or(0.0)
+}
+
+fn reduce_frame_with_overrides(
+    arena: &DagArena,
+    id: DagNodeId,
+    arity: usize,
+    values: &mut Vec<f64>,
+    vars: &[f64],
+    fn_registry: &FnEvalRegistry,
+    op_registry: &OpEvalRegistry,
+) -> f64 {
+    let Some(node) = arena.get(id) else {
+        values.truncate(values.len().saturating_sub(arity));
+        return 0.0;
+    };
+
+    match node.kind {
+        SymbolKind::Constant(v) => v,
+        SymbolKind::Variable(sym_id) => vars.get(sym_id.0 as usize).copied().unwrap_or(0.0),
+        SymbolKind::Function(fn_id) => {
+            values.truncate(values.len().saturating_sub(arity));
+            fn_registry.get(fn_id).map_or(0.0, |f| f(vars.as_ptr()))
+        }
+        SymbolKind::Operator(op) => {
+            let split_at = values.len().saturating_sub(arity);
+            let result = if let Some(override_fn) = op_registry.get(op) {
+                override_fn(&values[split_at..])
+            } else {
+                apply_op(op, &values[split_at..])
+            };
+            values.truncate(split_at);
+            result
+        }
+    }
+}
+
 /// Solves and evaluates a set of expression-leaf chunks in parallel.
 ///
 /// Convenience wrapper: if you already hold an `Arc<DagArena>`, call
@@ -188,7 +291,7 @@ fn reduce_frame(
     };
 
     match node.kind {
-        SymbolKind::Constant => node.value.unwrap_or(0.0),
+        SymbolKind::Constant(v) => v,
         SymbolKind::Variable(sym_id) => vars.get(sym_id.0 as usize).copied().unwrap_or(0.0),
         SymbolKind::Function(_) => {
             // Custom functions aren't lowered here; consume their args.
@@ -264,7 +367,7 @@ fn reduce_frame_with_fns(
     };
 
     match node.kind {
-        SymbolKind::Constant => node.value.unwrap_or(0.0),
+        SymbolKind::Constant(v) => v,
         SymbolKind::Variable(sym_id) => vars.get(sym_id.0 as usize).copied().unwrap_or(0.0),
         SymbolKind::Function(fn_id) => {
             values.truncate(values.len().saturating_sub(arity));

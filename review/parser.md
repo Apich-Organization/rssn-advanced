@@ -1,20 +1,19 @@
-# Module Review: `parser` (Post-Upgrade)
+# Module Review: `parser` (Phase 3 Audit)
 
-## 1. Performance & Memory
+## 1. Performance
 
-### 1.1 Recursion Capping
-The addition of `MAX_PAREN_DEPTH` and depth checks for right-associative chains (`^`) protects the OS stack from overflows, fulfilling a key requirement of the "Phase 7" stability overhaul.
+### 1.1 The "Trim" Tax
+`parse_expr_climbing` calls `.trim_start()` on the input in every loop iteration.
+- **Sharp Question:** If we are parsing a 1MB expression string, how many millions of times are we re-scanning the same leading whitespace? Why not use a proper lexer that consumes whitespace once and for all?
 
-## 2. Dead Code & Functionality
+## 2. Extensibility
 
-### 2.1 Missing Operator Support
-While the parser now supports function calls, it still lacks support for several common symbolic operators (e.g. `!`, `==`, `!=`, `<`, `>`) that are mentioned in the broader `plan.md`.
+### 2.1 Static Precedence
+Precedence is hardcoded in a `match` on `char`.
+- **Sharp Question:** How does a user add a new infix operator (e.g. `xor` or `dot`) with custom precedence? Is our parser's grammar "fixed" at compile-time?
 
-## 3. Extensibility
+## 3. Correctness
 
-### 3.1 Static Precedence Table
-The `op_precedence` and `op_right_associative` functions are hardcoded. Users cannot register new infix operators with custom precedence levels without modifying the parser's source code.
-
-## 4. Suggestions
-- Implement a dynamic precedence-climbing table that can be extended at runtime.
-- Add support for variadic operators and more complex function argument patterns.
+### 3.1 Unary Minus Precedence
+Unary minus is handled in `parse_atom` with a hardcoded precedence of `4`.
+- **Sharp Question:** Is this correct for all expressions? Does `-x^y` parse as `-(x^y)` or `(-x)^y`? Are we sure our hardcoded "precedence climbing" matches standard mathematical conventions for all edge cases?

@@ -122,9 +122,10 @@ fn push_dag_frame(
     };
     let ast_idx = projection.nodes.len();
     let arity = node.children.len();
+    let const_val = if let SymbolKind::Constant(v) = node.kind { v } else { 0.0 };
     projection.nodes.push(AstNode {
         kind: node.kind,
-        value: node.value.unwrap_or(0.0), // DagNode.value is Option<f64>; 0.0 for non-constants
+        value: const_val, // extract from SymbolKind::Constant(v); 0.0 for non-constants
         dag_id,
         children: AstChildList::Empty,
     });
@@ -248,7 +249,7 @@ fn build_dag_node(
         return DagNodeId::NONE;
     };
     match ast_node.kind {
-        SymbolKind::Constant => builder.constant(ast_node.value),
+        SymbolKind::Constant(_) => builder.constant(ast_node.value),
         SymbolKind::Variable(sym_id) => {
             // Round-trip the variable through the builder's registry. If the
             // SymbolId isn't in the new registry (cross-builder conversion),
@@ -277,6 +278,31 @@ fn build_dag_node(
         SymbolKind::Function(_) => {
             builder.operator(ast_node.kind, child_ids, crate::dag::metadata::NodeFlags::EMPTY)
         }
+    }
+}
+
+/// Like [`dag_to_ast`] but returns `Err(AstError)` instead of an empty
+/// or partial projection when the input is empty or `root` is `DagNodeId::NONE`.
+///
+/// This variant integrates with the `rssn_error!`-based error system so callers
+/// can distinguish "empty input" from "conversion succeeded".
+///
+/// # Errors
+///
+/// Returns [`crate::error::AstError::UnknownSymbolKind`] if `root` is `DagNodeId::NONE`
+/// or the arena returns no node for `root`.
+pub fn dag_to_ast_checked(
+    arena: &DagArena,
+    root: DagNodeId,
+) -> Result<AstProjection, crate::error::AstError> {
+    if root.is_none() || arena.get(root).is_none() {
+        return Err(crate::error::AstError::UnknownSymbolKind);
+    }
+    let proj = dag_to_ast(arena, root);
+    if proj.is_empty() {
+        Err(crate::error::AstError::UnknownSymbolKind)
+    } else {
+        Ok(proj)
     }
 }
 

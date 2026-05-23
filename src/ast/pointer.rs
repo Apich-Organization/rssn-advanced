@@ -11,8 +11,11 @@ use core::marker::PhantomData;
 
 /// A relative pointer representing an offset in a contiguous buffer.
 ///
-/// It stores a relative offset of type `O` (typically `i32` or `i64`) from the
-/// current element position to the target element position of type `T`.
+/// The offset type `O` is generic; in practice only `i32` (the default) is
+/// used. Arena sizes are bounded to `u32::MAX` nodes, making a 4-byte offset
+/// sufficient. The `i64` variant is kept generic but is not instantiated
+/// anywhere in this library — remove or seal it if you need to minimize the
+/// public API surface.
 pub struct RelPtr<T, O = i32> {
     offset: O,
     _phantom: PhantomData<T>,

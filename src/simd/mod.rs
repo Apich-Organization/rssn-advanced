@@ -16,7 +16,7 @@ pub mod hash;
 
 pub use arithmetic::{
     BatchError, batch_add, batch_add_scalar, batch_cmp_eq, batch_coef_merge, batch_eval,
-    batch_fma, batch_mul, batch_pow,
+    batch_eval_parallel, batch_fma, batch_mul, batch_pow,
 };
-pub use detect::{has_avx2, has_sse42};
+pub use detect::{has_avx2, has_neon, has_sse42};
 pub use hash::batch_hash;

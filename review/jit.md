@@ -1,27 +1,19 @@
-# Module Review: `jit` (Post-Upgrade)
+# Module Review: `jit` (Phase 3 Audit)
 
-## 1. Performance & Memory
+## 1. Performance & Numerics
 
-### 1.1 Effective Resource Reuse
-The `JitCompiler` now correctly reuses `work_stack` and `work_values` buffers, eliminating per-compilation allocation overhead for the iterative walker. The `RssnJitContext` in the FFI layer also addresses the expensive ISA initialization issue.
+### 1.1 The "Splat" Bottleneck
+`batch_eval` iterates over input rows and calls the JIT function one by one.
+- **Sharp Question:** We have a JIT and we have SIMD presets. Why are we not emitting vectorized IR in the JIT to process 4 or 8 rows at a time? Is our "batch evaluation" just a loop wrapper over a scalar function, and if so, where is the "advanced" part?
 
-### 1.2 Branch-Free Division
-The use of `select` in `emit_operator` for division by zero ensures that the generated code is branch-free and numerically consistent with standard floating-point behavior (returning `NaN`).
+## 2. Extensibility
 
-## 2. Dead Code & Functionality
+### 2.1 The Unary Function Prison
+`register_custom_function` is hardcoded to `fn(f64) -> f64`.
+- **Sharp Question:** In a world of `pow(x, y)`, `atan2(y, x)`, and `min(a, b)`, why is our custom function registry limited to unary operators? How does a user implement a binary custom function without rewriting the `codegen.rs` logic?
 
-### 2.1 Unfinished `CustomRule`
-The `CustomRule` struct in `src/jit/custom.rs` is currently **dead code**. It is defined but not referenced anywhere in the `JitCompiler` or the `codegen` logic. The "User-defined pattern-rewrite derivation rules" mentioned in the module header are not implemented.
+## 3. Dead Code
 
-## 3. Extensibility
-
-### 3.1 Limited Custom Function Support
-`register_custom_function` only supports `extern "C" fn(f64) -> f64`. There is no support for functions with multiple arguments or specialized signatures (e.g. SIMD vectors) without modifying the `emit_one_node` logic.
-
-### 3.2 Closed Peephole Pass
-The `emit_operator` peephole simplifications are hardcoded. Users cannot define their own IR-level folding rules (e.g. `x * 2.0 -> x + x`).
-
-## 4. Suggestions
-- Implement the `CustomRule` logic or remove the shell if it was a discarded idea.
-- Provide a way to register custom IR emission handlers for specific `SymbolKind::Function` IDs to enable true extensibility.
-- Expand the peephole pass to be more comprehensive or programmable.
+### 3.1 The `CustomRule` Ghost
+`src/jit/custom.rs` defines a `CustomRule` struct that is never used by the compiler.
+- **Sharp Question:** Is this a forgotten feature or an abandoned design? Why is dead code sitting in the middle of our performance-critical JIT pipeline?

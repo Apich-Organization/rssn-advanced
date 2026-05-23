@@ -149,6 +149,9 @@ impl ChildList {
 /// - What **kind** of symbol it is (variable, constant, operator, function).
 /// - **Metadata** (hash, coefficient, arity, flags).
 /// - **Children** (references to other DAG nodes via `DagNodeId`).
+///
+/// For constant nodes, the value is stored inline in `kind` as
+/// `SymbolKind::Constant(val)` — no separate `Option<f64>` field.
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct DagNode {
     /// The classification of this node.
@@ -157,8 +160,6 @@ pub struct DagNode {
     pub meta: NodeMetadata,
     /// References to child nodes in the arena.
     pub children: ChildList,
-    /// The constant value, if `kind` is `SymbolKind::Constant`.
-    pub value: Option<f64>,
 }
 
 impl DagNode {
@@ -169,7 +170,6 @@ impl DagNode {
             kind,
             meta,
             children: ChildList::Empty,
-            value: None,
         }
     }
 
@@ -177,10 +177,9 @@ impl DagNode {
     #[must_use]
     pub fn constant(val: f64, meta: NodeMetadata) -> Self {
         Self {
-            kind: SymbolKind::Constant,
+            kind: SymbolKind::Constant(val),
             meta,
             children: ChildList::Empty,
-            value: Some(val),
         }
     }
 
@@ -191,7 +190,6 @@ impl DagNode {
             kind,
             meta,
             children,
-            value: None,
         }
     }
 
@@ -229,7 +227,7 @@ mod tests {
         let meta = NodeMetadata::leaf(NodeHash(100));
         let node = DagNode::variable(SymbolKind::Variable(SymbolId(0)), meta);
         assert!(node.is_leaf());
-        assert!(node.value.is_none());
+        assert!(!matches!(node.kind, SymbolKind::Constant(_)));
     }
 
     #[test]
@@ -237,7 +235,7 @@ mod tests {
         let meta = NodeMetadata::leaf(NodeHash(200));
         let node = DagNode::constant(3.14, meta);
         assert!(node.is_leaf());
-        assert_eq!(node.value, Some(3.14));
+        assert!(matches!(node.kind, SymbolKind::Constant(v) if (v - 3.14).abs() < f64::EPSILON));
     }
 
     #[test]

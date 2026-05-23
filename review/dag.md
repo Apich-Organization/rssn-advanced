@@ -1,27 +1,29 @@
-# Module Review: `dag` (Post-Upgrade)
+# Module Review: `dag` (Phase 3 Audit)
 
-## 1. Performance & Memory
+## 1. Architectural Integrity
 
-### 1.1 Persistently Bloated Node Representation
-Despite improvements in other areas, the core `DagNode` remains **80 bytes** in size.
-- The `ChildList` enum, although optimized with inline arrays, still forces the variant size to be large due to the `Many(Vec<DagNodeId>)` variant.
-- The `value: Option<f64>` field adds 16 bytes to every node, even though it's only used for constants.
-This 80-byte stride is the primary bottleneck for cache-heavy graph traversals.
+### 1.1 The 80-Byte Albatross
+The core `DagNode` remains 80 bytes. 
+- **Sharp Question:** If the goal is "industrial-scale" symbolic computation with millions of nodes, why are we settling for a data structure that is 2.5x larger than our own 32-byte wire format? Are we prioritizing the convenience of `Option<f64>` and `Vec<DagNodeId>` over the massive L1/L2 cache pressure they create?
 
-## 2. Dead Code & Unfinished Updates
+### 1.2 Redundant Numeric Storage
+`DagNode` carries both an `Option<f64>` and `NodeMetadata` with a `coefficient: f64`.
+- **Sharp Question:** Why do we have two separate fields for numeric values? Could we not represent constants as nodes where the `coefficient` *is* the value, or is this dual-tracking of numbers a signal that our metadata model is poorly defined?
 
-### 2.1 Unused `NodeFlags::CANONICAL`
-The `CANONICAL` flag is defined in `metadata.rs` and can be set via `with_canonical()`. However, the `HeuristicEngine` in `src/heuristic/engine.rs` uses a local `HashSet<DagNodeId>` to track simplified nodes instead of utilizing this bit. This leads to redundant memory usage during simplification and misses an opportunity to persist the "simplified" state across different engine calls.
+## 2. Correctness & Performance
 
-### 2.2 Hash-Consing "Wait-and-See"
-The `DedupMap` still uses `HashMap<u64, Vec<DagNodeId>>`. While `rapidhash` makes the hashing fast, the bucket-based approach with `Vec` per collision is still less efficient than a flat, open-addressed hash table which would further reduce allocations.
+### 2.1 Bucket-Scan Bottleneck
+`DedupMap` still uses `HashMap<u64, Vec<DagNodeId>>`. 
+- **Sharp Question:** In a "perfectly shared" DAG, collisions are common for similar structures. Why are we performing a linear scan of a `Vec` for every `get_or_insert` instead of using a flat, open-addressed hash table? Is our "RapidHash" gains being squandered on `std::collections::HashMap` overhead?
 
 ## 3. Extensibility
 
-### 3.1 Hardcoded Operator Set
-The `OpKind` enum is fixed. There is no mechanism for users to define "Custom Operators" that carry their own algebraic properties (commutativity, associativity) or evaluation logic without modifying the core `dag` and `symbol` modules. This limits the library's use in domains with specialized mathematical operators (e.g. quantum gates, tensor contractions).
+### 3.1 Hardcoded Operator Universe
+`OpKind` is a closed enum. 
+- **Sharp Question:** How does a user implement a "Softmax" operator or a "Quantum Gate" without modifying the core library? Is this a "pluggable symbolic core" or a fixed mathematical calculator?
 
-## 4. Suggestions
-- Use a "Struct of Arrays" (SoA) or a more compact `DagNode` (e.g. 32 bytes) for the main arena, moving `value` and `Many` children to side-tables.
-- Integrate `NodeFlags::CANONICAL` into the `HeuristicEngine` to skip redundant work across multiple `simplify` calls.
-- Transition `OpKind` to a more extensible registration system if user-defined operators are a priority.
+## 4. Dead Code
+
+### 4.1 Orphaned Flags
+`NodeFlags::CANONICAL` is defined but ignored by the `HeuristicEngine`, which uses a local `HashSet`.
+- **Sharp Question:** Why define a persistent bit in the metadata if the primary consumer (the engine) is just going to allocate a transient `HashSet` on every call anyway?

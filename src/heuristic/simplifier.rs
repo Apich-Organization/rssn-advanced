@@ -118,7 +118,7 @@ fn balanced_add(builder: &mut DagBuilder, terms: &[DagNodeId]) -> DagNodeId {
 
 fn magnitude_of_term(builder: &DagBuilder, id: DagNodeId) -> f64 {
     builder.arena().get(id).map_or(0.0, |n| match n.kind {
-        SymbolKind::Constant => n.value.unwrap_or(0.0).abs(),
+        SymbolKind::Constant(v) => v.abs(),
         _ => n.meta.coefficient.abs(),
     })
 }
@@ -169,11 +169,8 @@ mod tests {
         let tiny2 = b.constant(2e-6);
         let sum = b.add(tiny1, tiny2);
         let result = approximate_simplify(&mut b, sum, 1.0);
-        let v = b
-            .arena()
-            .get(result)
-            .and_then(|n| n.value)
-            .expect("constant 0 expected");
+        let node = b.arena().get(result).expect("constant 0 expected");
+        let v: f64 = if let crate::dag::symbol::SymbolKind::Constant(v) = node.kind { v } else { panic!("expected Constant kind") };
         assert!(v.abs() < f64::EPSILON);
     }
 

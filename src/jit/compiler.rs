@@ -493,7 +493,7 @@ fn emit_one_node(
     let node = &ast.nodes[idx];
 
     match node.kind {
-        SymbolKind::Constant => {
+        SymbolKind::Constant(_) => {
             values.push(builder.ins().f64const(node.value)); // AstNode.value: f64 (not Option)
         }
         SymbolKind::Variable(sym_id) => {

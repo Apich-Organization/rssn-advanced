@@ -122,8 +122,14 @@ pub struct PackedDagNode {
     pub flags: u8,
 }
 
-const _: () = assert!(core::mem::size_of::<PackedDagNode>() == 32);
-const _: () = assert!(core::mem::align_of::<PackedDagNode>() == 8);
+const _: () = assert!(
+    core::mem::size_of::<PackedDagNode>() == 32,
+    "PackedDagNode must be exactly 32 bytes"
+);
+const _: () = assert!(
+    core::mem::align_of::<PackedDagNode>() <= 8,
+    "PackedDagNode align must be ≤ 8 bytes"
+);
 
 // SAFETY: `#[repr(C)]`, all-`Copy` fields, no padding (verified by the
 // static asserts above), no references, no NonZero, alignment 8 ≤ 8.
@@ -132,13 +138,16 @@ unsafe impl Pod for PackedDagNode {}
 impl PackedDagNode {
     /// Reconstructs the rich [`SymbolKind`] from the packed tags.
     ///
+    /// For constant nodes, the value is stored in `coefficient` and returned
+    /// as `SymbolKind::Constant(val)`.
+    ///
     /// Returns `None` if the tags are out of range — which can only
     /// happen when reading a corrupt buffer.
     #[must_use]
     pub const fn kind(&self) -> Option<SymbolKind> {
         match self.kind_tag {
             kind_tag::VARIABLE => Some(SymbolKind::Variable(SymbolId(self.kind_payload))),
-            kind_tag::CONSTANT => Some(SymbolKind::Constant),
+            kind_tag::CONSTANT => Some(SymbolKind::Constant(self.coefficient)),
             kind_tag::OPERATOR => match self.op_tag {
                 op_tag::ADD => Some(SymbolKind::Operator(OpKind::Add)),
                 op_tag::SUB => Some(SymbolKind::Operator(OpKind::Sub)),
@@ -313,8 +322,8 @@ enum PackOne {
 fn pack_one_node_ref(node: &DagNode) -> PackOne {
     let mut packed = PackedDagNode {
         hash: node.meta.hash.0,
-        coefficient: if matches!(node.kind, SymbolKind::Constant) {
-            node.value.unwrap_or(0.0)
+        coefficient: if let SymbolKind::Constant(val) = node.kind {
+            val
         } else {
             node.meta.coefficient
         },
@@ -332,7 +341,7 @@ fn pack_one_node_ref(node: &DagNode) -> PackOne {
             packed.kind_tag = kind_tag::VARIABLE;
             packed.kind_payload = sym.0;
         }
-        SymbolKind::Constant => {
+        SymbolKind::Constant(_) => {
             packed.kind_tag = kind_tag::CONSTANT;
         }
         SymbolKind::Operator(op) => {
@@ -519,10 +528,10 @@ impl<'a> BorrowedArenaView<'a> {
     pub fn to_owned_arena(&self) -> DagArena {
         let mut arena = DagArena::new();
         for packed in self.nodes() {
-            let kind = packed.kind().unwrap_or(SymbolKind::Constant);
+            let kind = packed.kind().unwrap_or(SymbolKind::Constant(0.0));
             let meta = NodeMetadata {
                 hash: NodeHash(packed.hash),
-                coefficient: if matches!(kind, SymbolKind::Constant) {
+                coefficient: if matches!(kind, SymbolKind::Constant(_)) {
                     1.0
                 } else {
                     packed.coefficient
@@ -532,10 +541,9 @@ impl<'a> BorrowedArenaView<'a> {
             };
             let kids: Vec<DagNodeId> = self.children(packed).iter().collect();
             let children = ChildList::from_slice(&kids);
-            let value = packed.value();
             let node = match kind {
-                SymbolKind::Constant => {
-                    DagNode::constant(value.unwrap_or(0.0), meta)
+                SymbolKind::Constant(val) => {
+                    DagNode::constant(val, meta)
                 }
                 SymbolKind::Variable(_) => DagNode::variable(kind, meta),
                 SymbolKind::Operator(_) | SymbolKind::Function(_) => {
@@ -698,7 +706,9 @@ mod tests {
             let original = builder.arena().get(id).expect("rich node");
             let packed = view.get(id).expect("packed node");
             assert_eq!(packed.kind(), Some(original.kind), "kind mismatch at {i}");
-            assert_eq!(packed.value(), original.value, "value mismatch at {i}");
+            // For constant nodes, value is encoded in the kind itself.
+            let orig_value = if let SymbolKind::Constant(v) = original.kind { Some(v) } else { None };
+            assert_eq!(packed.value(), orig_value, "value mismatch at {i}");
             assert_eq!(packed.meta().hash, original.meta.hash);
             assert_eq!(packed.meta().arity, original.meta.arity);
             let kids: Vec<DagNodeId> = view.children(packed).iter().collect();

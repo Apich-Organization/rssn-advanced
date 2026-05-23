@@ -20,8 +20,6 @@
 //! The return value bundles the new arena with the remap table so
 //! callers can update their root pointers.
 
-use std::collections::HashMap;
-
 use super::hotspot::DynamicHotspotTable;
 use crate::dag::arena::DagArena;
 use crate::dag::node::{ChildList, DagNode, DagNodeId};
@@ -29,15 +27,20 @@ use crate::dag::node::{ChildList, DagNode, DagNodeId};
 /// Result of an eviction pass.
 ///
 /// `arena` is the compacted DAG with every protected node remapped to
-/// a fresh contiguous index range. `remap[old_id]` returns the new
-/// `DagNodeId` (or `None` if `old_id` was evicted).
+/// a fresh contiguous index range.
+///
+/// `remap[old_id.index()]` is the new `DagNodeId` for that old id, or
+/// `DagNodeId::NONE` if the node was evicted. Arena IDs are dense
+/// integers so a `Vec` gives O(1) cache-friendly lookups instead of a
+/// `HashMap`.
 #[derive(Debug)]
 pub struct EvictionResult {
     /// Compacted arena, every child reference resolved against
     /// `remap`.
     pub arena: DagArena,
-    /// Forward index table: `remap.get(&old_id) → new_id`.
-    pub remap: HashMap<DagNodeId, DagNodeId>,
+    /// Forward index: `remap[old_id.index()]` is the new id, or
+    /// `DagNodeId::NONE` if evicted.
+    pub remap: Vec<DagNodeId>,
 }
 
 impl EvictionResult {
@@ -48,7 +51,9 @@ impl EvictionResult {
         if old.is_none() {
             return Some(DagNodeId::NONE);
         }
-        self.remap.get(&old).copied()
+        self.remap.get(old.index())
+            .copied()
+            .filter(|id| !id.is_none())
     }
 }
 
@@ -84,6 +89,63 @@ impl EvictionPolicy for FrequencyPolicy {
     }
 }
 
+/// Protects nodes that contribute at least `min_ratio` of total accesses.
+/// Provides decay-like behaviour: a frequently-accessed node that hasn't
+/// been touched recently will see its ratio fall as other nodes are accessed.
+pub struct RecencyWeightedPolicy {
+    /// Minimum raw access count.
+    pub min_freq: u64,
+    /// node.freq / total_accesses must be >= this to be considered hot.
+    pub min_ratio: f64,
+}
+
+impl RecencyWeightedPolicy {
+    /// Creates a new `RecencyWeightedPolicy`.
+    #[must_use]
+    pub fn new(min_freq: u64, min_ratio: f64) -> Self {
+        Self { min_freq, min_ratio }
+    }
+}
+
+impl EvictionPolicy for RecencyWeightedPolicy {
+    fn is_hot(&self, hotspots: &super::hotspot::DynamicHotspotTable, id: crate::dag::node::DagNodeId) -> bool {
+        let freq = hotspots.get_frequency(id);
+        if freq < self.min_freq { return false; }
+        let total = hotspots.total_accesses();
+        if total == 0 { return false; }
+        (freq as f64 / total as f64) >= self.min_ratio
+    }
+}
+
+/// Composes two policies with AND or OR logic.
+pub struct CompositePolicy<A: EvictionPolicy, B: EvictionPolicy> {
+    /// First policy.
+    pub primary: A,
+    /// Second policy.
+    pub secondary: B,
+    /// `true` = AND (both must be hot), `false` = OR (either must be hot).
+    pub require_both: bool,
+}
+
+impl<A: EvictionPolicy, B: EvictionPolicy> CompositePolicy<A, B> {
+    /// Creates a policy that requires **both** `a` and `b` to consider a node hot.
+    #[must_use]
+    pub fn and(a: A, b: B) -> Self { Self { primary: a, secondary: b, require_both: true } }
+    /// Creates a policy that requires **either** `a` or `b` to consider a node hot.
+    #[must_use]
+    pub fn or(a: A, b: B) -> Self { Self { primary: a, secondary: b, require_both: false } }
+}
+
+impl<A: EvictionPolicy, B: EvictionPolicy> EvictionPolicy for CompositePolicy<A, B> {
+    fn is_hot(&self, hotspots: &super::hotspot::DynamicHotspotTable, id: crate::dag::node::DagNodeId) -> bool {
+        if self.require_both {
+            self.primary.is_hot(hotspots, id) && self.secondary.is_hot(hotspots, id)
+        } else {
+            self.primary.is_hot(hotspots, id) || self.secondary.is_hot(hotspots, id)
+        }
+    }
+}
+
 /// Compacts `arena` by keeping only nodes reachable from a hot root.
 ///
 /// The `keep_threshold` parameter controls hotness: any node whose
@@ -110,6 +172,31 @@ pub fn evict_nodes_with_policy<P: EvictionPolicy>(
     arena: &DagArena,
     hotspots: &DynamicHotspotTable,
     policy: P,
+) -> EvictionResult {
+    evict_nodes_budgeted_with_policy(arena, hotspots, policy, usize::MAX)
+}
+
+/// Like `evict_cold_nodes` but limits compaction to at most `budget` protected nodes.
+/// The mark phase always runs fully; only the sweep is bounded.
+/// Pass `usize::MAX` for unlimited (equivalent to the original).
+#[must_use]
+pub fn evict_cold_nodes_budgeted(
+    arena: &DagArena,
+    hotspots: &DynamicHotspotTable,
+    keep_threshold: u64,
+    budget: usize,
+) -> EvictionResult {
+    evict_nodes_budgeted_with_policy(arena, hotspots, FrequencyPolicy::new(keep_threshold), budget)
+}
+
+/// Like [`evict_nodes_with_policy`] but limits the sweep to at most `budget` protected nodes.
+/// The mark phase always runs fully; only the sweep is bounded.
+#[must_use]
+pub fn evict_nodes_budgeted_with_policy<P: EvictionPolicy>(
+    arena: &DagArena,
+    hotspots: &DynamicHotspotTable,
+    policy: P,
+    budget: usize,
 ) -> EvictionResult {
     let total = arena.len();
     let mut protected: Vec<bool> = vec![false; total];
@@ -139,12 +226,17 @@ pub fn evict_nodes_with_policy<P: EvictionPolicy>(
     }
 
     let mut compacted = DagArena::new();
-    let mut remap: HashMap<DagNodeId, DagNodeId> = HashMap::with_capacity(total / 2);
+    let mut remap: Vec<DagNodeId> = vec![DagNodeId::NONE; total];
+    let mut count = 0usize;
 
     for (i, is_protected) in protected.iter().enumerate() {
         if !*is_protected {
             continue;
         }
+        if count >= budget {
+            break;
+        }
+        count += 1;
         #[allow(clippy::cast_possible_truncation)]
         let old_id = DagNodeId::new(i as u32);
         let Some(original) = arena.get(old_id) else {
@@ -154,7 +246,10 @@ pub fn evict_nodes_with_policy<P: EvictionPolicy>(
         let new_children: Vec<DagNodeId> = original
             .children
             .iter()
-            .filter_map(|c| remap.get(&c).copied())
+            .filter_map(|c| {
+                let mapped = remap.get(c.index()).copied().unwrap_or(DagNodeId::NONE);
+                if mapped.is_none() { None } else { Some(mapped) }
+            })
             .collect();
         let child_list = ChildList::from_slice(&new_children);
 
@@ -162,10 +257,9 @@ pub fn evict_nodes_with_policy<P: EvictionPolicy>(
             kind: original.kind,
             meta: original.meta.clone(),
             children: child_list,
-            value: original.value,
         };
         let new_id = compacted.alloc(new_node);
-        remap.insert(old_id, new_id);
+        remap[old_id.index()] = new_id;
     }
 
     EvictionResult {
@@ -217,7 +311,8 @@ mod tests {
         let hot = DynamicHotspotTable::new();
         let result = evict_cold_nodes(b.arena(), &hot, 1);
         assert_eq!(result.arena.len(), 0);
-        assert!(result.remap.is_empty());
+        // Vec remap has entries (one per old node) but all are NONE (evicted).
+        assert!(result.remap.iter().all(|id| id.is_none()));
     }
 
     #[test]
@@ -287,5 +382,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn recency_weighted_policy_protects_dominant_nodes() {
+        let mut b = DagBuilder::new();
+        let x = b.variable("x");
+        let y = b.variable("y");
+        let sum = b.add(x, y);
+
+        let hot = DynamicHotspotTable::new();
+        // x+y gets 90 accesses, x gets 10 — ratio 0.9 vs 0.1 total 100.
+        for _ in 0..90 { hot.record_access(sum); }
+        for _ in 0..10 { hot.record_access(x); }
+
+        // min_freq=5, min_ratio=0.5 → only sum qualifies (ratio 0.9 >= 0.5).
+        let policy = RecencyWeightedPolicy::new(5, 0.5);
+        let result = evict_nodes_with_policy(b.arena(), &hot, policy);
+        // sum + its children (x, y) must survive.
+        assert_eq!(result.arena.len(), 3);
+        assert!(result.translate(sum).is_some());
+    }
+
+    #[test]
+    fn composite_and_policy_requires_both_conditions() {
+        let mut b = DagBuilder::new();
+        let x = b.variable("x");
+        let y = b.variable("y");
+        let sum = b.add(x, y);
+
+        let hot = DynamicHotspotTable::new();
+        for _ in 0..10 { hot.record_access(sum); }
+
+        // AND: freq >= 5 AND ratio >= 0.05. sum satisfies both; x/y have freq=0.
+        let policy = CompositePolicy::and(
+            FrequencyPolicy::new(5),
+            RecencyWeightedPolicy::new(1, 0.05),
+        );
+        let result = evict_nodes_with_policy(b.arena(), &hot, policy);
+        assert!(result.translate(sum).is_some());
+        // x and y have 0 accesses so they're cold in the AND policy,
+        // but they're transitively reachable from sum, so they survive.
+        assert_eq!(result.arena.len(), 3);
+    }
+
+    #[test]
+    fn budgeted_eviction_respects_limit() {
+        let mut b = DagBuilder::new();
+        // 6 constants — all will be hot.
+        for i in 0..6 { let _ = b.constant(f64::from(i)); }
+        let hot = DynamicHotspotTable::new();
+        for i in 0..6_u32 {
+            for _ in 0..10 { hot.record_access(DagNodeId::new(i)); }
+        }
+        // Budget of 3: only 3 nodes should be swept.
+        let result = evict_cold_nodes_budgeted(b.arena(), &hot, 5, 3);
+        assert_eq!(result.arena.len(), 3);
     }
 }

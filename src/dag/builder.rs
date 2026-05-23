@@ -85,7 +85,6 @@ impl DagBuilder {
             kind,
             hash,
             ChildList::Empty,
-            None,
             1.0,
             NodeFlags::EMPTY,
         )
@@ -93,15 +92,14 @@ impl DagBuilder {
 
     /// Constructs a unique numeric constant node.
     pub fn constant(&mut self, val: f64) -> DagNodeId {
-        let kind = SymbolKind::Constant;
-        let hash = DedupMap::hash_constant(val);
+        let kind = SymbolKind::Constant(val);
+        let hash = DedupMap::hash_constant(&kind);
 
         self.dedup.get_or_insert(
             &mut self.arena,
             kind,
             hash,
             ChildList::Empty,
-            Some(val),
             val, // coefficient matches the constant value for leaf constants
             NodeFlags::EMPTY,
         )
@@ -119,7 +117,6 @@ impl DagBuilder {
             kind,
             hash,
             children,
-            None,
             1.0,
             flags,
         )
@@ -136,7 +133,6 @@ impl DagBuilder {
             kind,
             hash,
             children,
-            None,
             1.0,
             NodeFlags::EMPTY,
         )
@@ -154,7 +150,6 @@ impl DagBuilder {
             kind,
             hash,
             children,
-            None,
             1.0,
             flags,
         )
@@ -171,7 +166,6 @@ impl DagBuilder {
             kind,
             hash,
             children,
-            None,
             1.0,
             NodeFlags::EMPTY,
         )
@@ -188,7 +182,6 @@ impl DagBuilder {
             kind,
             hash,
             children,
-            None,
             1.0,
             NodeFlags::EMPTY,
         )
@@ -208,7 +201,6 @@ impl DagBuilder {
             kind,
             hash,
             children,
-            None,
             1.0,
             NodeFlags::EMPTY,
         )
@@ -225,7 +217,6 @@ impl DagBuilder {
             kind,
             hash,
             children,
-            None,
             1.0,
             NodeFlags::EMPTY,
         )
@@ -265,7 +256,6 @@ impl DagBuilder {
             kind,
             hash,
             children_list,
-            None,
             1.0,
             flags,
         )

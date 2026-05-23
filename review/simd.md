@@ -1,20 +1,19 @@
-# Module Review: `simd` & `asm_presets` (Post-Upgrade)
+# Module Review: `simd` & `asm_presets` (Phase 3 Audit)
 
-## 1. Performance & Memory
+## 1. Performance
 
-### 1.1 Hoisted Feature Detection
-The transition to `HAS_AVX2` via `OnceLock` successfully removed the runtime CPUID checks from the innermost loops. The 2x unrolled loops in `batch_add` and `batch_mul` further improve throughput by amortizing loop overhead.
+### 1.1 The Missing FMA
+We have a high-performance `vfmadd231pd` kernel in `asm_presets`, but the engine never uses it.
+- **Sharp Question:** Is our assembly library just for show? Why doesn't the JIT or the Heuristic engine identify `a*b+c` patterns and map them to our `batch_fma` or a fused IR instruction?
 
-## 2. Dead Code & Functionality
+## 2. Design Consistency
 
-### 2.1 Unused `fma_f64x4_avx2`
-The `fma_f64x4_avx2` preset and its corresponding `batch_fma` wrapper are implemented but **not used** by the internal symbolic engine. The `HeuristicEngine` and `JitCompiler` do not currently recognize FMA opportunities (e.g. `a*b+c`). While useful as a utility, it is currently "dead code" from the perspective of the core symbolic computation engine.
+### 2.1 The Scalar Fallback Loop
+The batch wrappers (e.g., `batch_add`) implement a manual scalar loop for the tail and for cases where SIMD is missing.
+- **Sharp Question:** We have `OpKind` logic everywhere else. Why are we duplicating basic arithmetic logic (`a + b`) inside the `simd` module? Shouldn't the "scalar path" just be a dispatch to a central evaluation unit?
 
 ## 3. Extensibility
 
-### 3.1 Architecture Silo
-The SIMD kernels are very specific to x86_64/AVX2. Adding support for a new architecture (e.g. AVX-512 or AMX) requires manually writing assembly and boiler-plate for each new kernel. There is no high-level SIMD abstraction (like `std::simd` or `packed_simd`) that would make this process more "extensible".
-
-## 4. Suggestions
-- Implement an FMA detection pass in the `HeuristicEngine` or `JitCompiler` to utilize the existing `batch_fma` logic.
-- Consider using a SIMD library to provide a more portable and extensible base for vectorized operations.
+### 3.1 ASM vs Portability
+The kernels are hand-written for AVX2, NEON, and RVV.
+- **Sharp Question:** If a new architecture arrives (e.g., AVX-512 with masking), do we really want to hand-write 50 more files? Why are we not using a portable SIMD abstraction if our current kernels are performing such basic operations?

@@ -77,6 +77,17 @@ impl NodeFlags {
         }
     }
 
+    /// Returns the flags with the canonical bit cleared.
+    ///
+    /// Used by the deduplication map to compare structural identity without
+    /// regard to whether a node has been marked canonical at runtime.
+    #[must_use]
+    pub const fn without_canonical(self) -> Self {
+        Self {
+            bits: self.bits & !Self::CANONICAL,
+        }
+    }
+
     /// Returns the raw bit pattern — used when packing to the wire
     /// representation in [`crate::dag::packed`].
     #[must_use]

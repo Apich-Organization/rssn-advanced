@@ -168,7 +168,9 @@ impl HeuristicEngine {
                 // Skip already-simplified subtrees: if the child was marked
                 // canonical in a previous or current simplify call, recurse is
                 // unnecessary — push it directly onto the value stack.
-                if self.canonical_cache.contains(&child_id) {
+                let is_canonical = self.canonical_cache.contains(&child_id)
+                    || builder.arena().get(child_id).is_some_and(|n| n.meta.flags.is_canonical());
+                if is_canonical {
                     values.push(child_id);
                     continue;
                 }
@@ -188,9 +190,12 @@ impl HeuristicEngine {
                 // the immutable borrow ends before `truncate`.
                 let rebuilt = rebuild_or_match(&self.rule_registry, builder, frame.kind, &values[split_at..], frame.node_id);
                 values.truncate(split_at);
-                // Record the rebuilt node as canonical. Persists across calls
-                // in self.canonical_cache so re-processing is avoided globally.
                 self.canonical_cache.insert(rebuilt);
+                // Persist the canonical state in the arena node itself so other
+                // engine instances (and cross-call) skip re-simplification.
+                if let Some(node) = builder.arena_mut().get_mut(rebuilt) {
+                    node.meta.flags = node.meta.flags.with_canonical();
+                }
                 values.push(rebuilt);
             }
         }

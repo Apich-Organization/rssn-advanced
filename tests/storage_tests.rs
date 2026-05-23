@@ -108,6 +108,6 @@ mod storage_tests {
         // The output is a valid arena id and the arena did not
         // explode (dedup is preserved).
         let node = builder.arena().get(simplified).expect("simplified node");
-        assert!(node.children.len() > 0 || node.value.is_some());
+        assert!(node.children.len() > 0 || matches!(node.kind, rssn_advanced::dag::symbol::SymbolKind::Constant(_)));
     }
 }

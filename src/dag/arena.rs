@@ -93,7 +93,7 @@ mod tests {
         assert!(!arena.is_empty());
 
         let retrieved = arena.get(id).unwrap();
-        assert_eq!(retrieved.value, Some(1.0));
+        assert!(matches!(retrieved.kind, crate::dag::symbol::SymbolKind::Constant(v) if (v - 1.0).abs() < f64::EPSILON));
         assert_eq!(retrieved.meta.hash, NodeHash(42));
 
         let retrieved_mut = arena.get_mut(id).unwrap();

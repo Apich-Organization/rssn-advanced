@@ -119,7 +119,7 @@ fn parse_atom<'a>(
 
     // 2. Unary minus.
     if let Ok((rem, _)) = ws(parse_char('-'))(input) {
-        let (rem, atom) = parse_expr_climbing(rem, builder, 4, depth)?;
+        let (rem, atom) = parse_expr_climbing(rem, builder, 3, depth)?;
         let neg = builder.neg(atom);
         return Ok((rem, neg));
     }
@@ -262,7 +262,7 @@ fn parse_atom_with_table<'a>(
 
     // 2. Unary minus.
     if let Ok((rem, _)) = ws(parse_char('-'))(input) {
-        let (rem, atom) = parse_expr_climbing_with_table(rem, builder, 4, depth, table)?;
+        let (rem, atom) = parse_expr_climbing_with_table(rem, builder, 3, depth, table)?;
         let neg = builder.neg(atom);
         return Ok((rem, neg));
     }
@@ -589,6 +589,29 @@ mod tests {
             node.kind,
             crate::dag::symbol::SymbolKind::Operator(crate::dag::symbol::OpKind::Add)
         ));
+    }
+
+    #[test]
+    fn unary_minus_has_lower_precedence_than_power() {
+        // Standard math: `-x^y` = `-(x^y)`, not `(-x)^y`.
+        // With x=2, y=3: -(2^3) = -8, not (-2)^3 = -8 (same here but different for even exponents).
+        // Use y=2 to distinguish: -(2^2) = -4, but (-2)^2 = +4.
+        let mut b = DagBuilder::new();
+        let id = parse_expression("-x^y", &mut b).expect("ok");
+        // Root should be Neg, not Pow.
+        let node = b.arena().get(id).expect("root");
+        assert_eq!(
+            node.kind,
+            crate::dag::symbol::SymbolKind::Operator(crate::dag::symbol::OpKind::Neg),
+            "-x^y must parse as -(x^y), root should be Neg"
+        );
+        // The child of Neg must be Pow.
+        let child_id = node.children.as_slice()[0];
+        let child = b.arena().get(child_id).expect("child");
+        assert_eq!(
+            child.kind,
+            crate::dag::symbol::SymbolKind::Operator(crate::dag::symbol::OpKind::Pow)
+        );
     }
 
     #[test]

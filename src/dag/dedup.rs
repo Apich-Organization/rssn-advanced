@@ -43,8 +43,11 @@ impl DedupMap {
     }
 
     /// Computes structural hash for a constant node.
+    ///
+    /// Extracts the value from `SymbolKind::Constant(val)` and hashes the bits.
     #[must_use]
-    pub fn hash_constant(val: f64) -> NodeHash {
+    pub fn hash_constant(kind: &SymbolKind) -> NodeHash {
+        let val = if let SymbolKind::Constant(v) = kind { *v } else { 0.0 };
         let mut hasher = rapidhash::fast::RapidHasher::default();
         // Use bits to hash f64 cleanly
         let bits = val.to_bits();
@@ -95,20 +98,22 @@ impl DedupMap {
         kind: SymbolKind,
         hash: NodeHash,
         children: ChildList,
-        value: Option<f64>,
         coefficient: f64,
         flags: super::metadata::NodeFlags,
     ) -> DagNodeId {
         let bucket = self.map.entry(hash.0).or_default();
-        
-        // Linear scan in the hash bucket to handle collisions
+
+        // Linear scan in the hash bucket to handle collisions.
+        // The CANONICAL bit is a runtime annotation that may be set after
+        // insertion (by the heuristic engine). Strip it before comparing so
+        // that a canonically-marked node is still found as a duplicate of an
+        // equivalent node looked up with the original (non-canonical) flags.
         for &id in bucket.iter() {
             if let Some(existing) = arena.get(id) {
                 if existing.kind == kind
                     && existing.children == children
-                    && existing.value == value
                     && existing.meta.coefficient.to_bits() == coefficient.to_bits()
-                    && existing.meta.flags == flags
+                    && existing.meta.flags.without_canonical() == flags.without_canonical()
                 {
                     return id;
                 }
@@ -127,7 +132,6 @@ impl DedupMap {
             kind,
             meta,
             children,
-            value,
         };
 
         let new_id = arena.alloc(node);
@@ -153,23 +157,22 @@ mod tests {
         let mut dedup = DedupMap::new();
 
         let val = 3.14;
-        let hash = DedupMap::hash_constant(val);
+        let kind = SymbolKind::Constant(val);
+        let hash = DedupMap::hash_constant(&kind);
         let id1 = dedup.get_or_insert(
             &mut arena,
-            SymbolKind::Constant,
+            kind,
             hash,
             ChildList::Empty,
-            Some(val),
             1.0,
             NodeFlags::EMPTY,
         );
 
         let id2 = dedup.get_or_insert(
             &mut arena,
-            SymbolKind::Constant,
+            kind,
             hash,
             ChildList::Empty,
-            Some(val),
             1.0,
             NodeFlags::EMPTY,
         );
@@ -191,7 +194,6 @@ mod tests {
             kind,
             hash,
             ChildList::Empty,
-            None,
             1.0,
             NodeFlags::EMPTY,
         );
@@ -201,7 +203,6 @@ mod tests {
             kind,
             hash,
             ChildList::Empty,
-            None,
             1.0,
             NodeFlags::EMPTY,
         );

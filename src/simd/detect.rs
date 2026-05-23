@@ -29,3 +29,15 @@ pub fn has_sse42() -> bool {
         false
     }
 }
+
+/// Detects if NEON is available on the host CPU.
+///
+/// On aarch64, NEON is mandatory per ARMv8-A spec, so this always returns
+/// `true` on that target. On other architectures it returns `false`.
+#[must_use]
+pub fn has_neon() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    { std::arch::is_aarch64_feature_detected!("neon") }
+    #[cfg(not(target_arch = "aarch64"))]
+    { false }
+}

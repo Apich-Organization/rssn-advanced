@@ -31,9 +31,11 @@
 //! their data into 4-element windows; the tail is the caller's
 //! responsibility.
 
+pub mod add_f64x2_neon;
 pub mod add_f64x4_avx2;
 pub mod cmp_eq_f64x4;
 pub mod coef_merge_f64x4;
 pub mod fma_f64x4_avx2;
 pub mod hash_u64x2_aesni;
+pub mod mul_f64x2_neon;
 pub mod mul_f64x4_avx2;

@@ -135,15 +135,15 @@ impl AstProjection {
     }
 }
 
-/// Trait for visiting nodes of an [`AstProjection`] tree.
+/// Trait for visiting nodes of an [`AstProjection`] tree in post-order.
 ///
 /// Implement this trait to process AST nodes without modifying the library.
-/// Call [`AstProjection::visit`] to drive the traversal.
+/// Call [`AstProjection::visit_post`] to drive the traversal.
 ///
 /// The visitor is called in **post-order** (children before parent), which is
 /// the natural order for bottom-up transformations (e.g. constant folding,
 /// type inference).
-pub trait AstVisitor {
+pub trait PostOrderVisitor {
     /// Called once for each node in post-order traversal.
     ///
     /// `node` is the current node; `node_idx` is its index in the flat buffer.
@@ -153,12 +153,12 @@ pub trait AstVisitor {
 
 impl AstProjection {
     /// Drives a post-order traversal of this projection, calling
-    /// [`AstVisitor::visit`] for each node.
+    /// [`PostOrderVisitor::visit`] for each node.
     ///
     /// Traversal is iterative (stack-based), so arbitrarily deep trees do
     /// not overflow the OS stack. The visitor can halt early by returning
-    /// `false` from [`AstVisitor::visit`].
-    pub fn visit<V: AstVisitor>(&self, visitor: &mut V) {
+    /// `false` from [`PostOrderVisitor::visit`].
+    pub fn visit_post<V: PostOrderVisitor>(&self, visitor: &mut V) {
         if self.nodes.is_empty() {
             return;
         }

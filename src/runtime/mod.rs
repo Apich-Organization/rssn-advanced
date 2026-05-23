@@ -79,6 +79,62 @@ pub fn runtime_gate() -> Result<RuntimeGate, FfiError> {
 }
 
 // =========================================================================
+// Thread-local size-class pool for TaskEnvelope allocations
+// =========================================================================
+
+const POOL_CLASSES: [usize; 4] = [64, 128, 256, 512];
+const POOL_MAX_PER_CLASS: usize = 32;
+
+thread_local! {
+    static ENVELOPE_POOL: std::cell::RefCell<[Vec<*mut u8>; 4]> = std::cell::RefCell::new(
+        [Vec::new(), Vec::new(), Vec::new(), Vec::new()]
+    );
+}
+
+fn pool_class_idx(size: usize) -> Option<usize> {
+    POOL_CLASSES.iter().position(|&c| size <= c)
+}
+
+unsafe fn pool_alloc(size: usize, align: usize) -> *mut u8 {
+    use std::alloc::{alloc, Layout};
+    if let Some(idx) = pool_class_idx(size) {
+        let ptr = ENVELOPE_POOL.with(|p| p.borrow_mut()[idx].pop());
+        if let Some(ptr) = ptr {
+            return ptr;
+        }
+        let layout = Layout::from_size_align(POOL_CLASSES[idx], align.max(8))
+            .expect("valid layout");
+        unsafe { alloc(layout) }
+    } else {
+        let layout = Layout::from_size_align(size, align).expect("valid layout");
+        unsafe { alloc(layout) }
+    }
+}
+
+unsafe fn pool_dealloc(ptr: *mut u8, size: usize, align: usize) {
+    use std::alloc::{dealloc, Layout};
+    if let Some(idx) = pool_class_idx(size) {
+        let returned = ENVELOPE_POOL.with(|p| {
+            let mut pool = p.borrow_mut();
+            if pool[idx].len() < POOL_MAX_PER_CLASS {
+                pool[idx].push(ptr);
+                true
+            } else {
+                false
+            }
+        });
+        if !returned {
+            let layout = Layout::from_size_align(POOL_CLASSES[idx], align.max(8))
+                .expect("valid layout");
+            unsafe { dealloc(ptr, layout) };
+        }
+    } else {
+        let layout = Layout::from_size_align(size, align).expect("valid layout");
+        unsafe { dealloc(ptr, layout) };
+    }
+}
+
+// =========================================================================
 // Single fiber spawn
 // =========================================================================
 
@@ -88,7 +144,7 @@ pub fn runtime_gate() -> Result<RuntimeGate, FfiError> {
 /// `Box` is a fat pointer (16 bytes), so the outer box stored 16 bytes of
 /// vtable + data pointer plus a fresh allocation for the inner fat pointer.
 /// `TaskEnvelope<F>` stores the closure and the trampoline function pointer
-/// in a single monomorphised struct — one allocation.
+/// in a single monomorphised struct — one allocation, with pool reuse.
 ///
 /// `#[repr(C)]` ensures `invoke` is the first field, so the trampoline can
 /// read it from a type-erased pointer without knowing `F`.
@@ -101,20 +157,22 @@ struct TaskEnvelope<F: FnOnce() + Send + 'static> {
 }
 
 impl<F: FnOnce() + Send + 'static> TaskEnvelope<F> {
-    /// Extracts the closure from `raw`, drops the envelope, then calls `f`.
+    /// Extracts the closure from `raw`, returns memory to the pool, then calls `f`.
     ///
     /// # Safety
     ///
     /// `raw` must be a valid `*mut TaskEnvelope<F>` that was produced by
-    /// `Box::into_raw`. After this call the allocation is freed.
+    /// `pool_alloc`. After this call the allocation is returned to the pool
+    /// or freed.
     unsafe fn invoke_and_drop(raw: *mut ()) {
-        let mut env = unsafe { Box::from_raw(raw.cast::<Self>()) };
-        // Move the closure out before the Box is dropped.
-        // `ManuallyDrop` never runs `F`'s destructor automatically, so
-        // dropping `env` afterwards is safe even though the field was moved.
-        let f = unsafe { core::mem::ManuallyDrop::take(&mut env.closure) };
-        drop(env); // free the allocation (ManuallyDrop<F> drop is a no-op)
-        f();       // run the closure; its destructor fires here
+        let env = raw.cast::<Self>();
+        // Extract closure before the memory is returned to the pool.
+        let f = unsafe { core::mem::ManuallyDrop::take(&mut (*env).closure) };
+        // Return the allocation to the size-class pool (or free if too large).
+        let size = core::mem::size_of::<Self>();
+        let align = core::mem::align_of::<Self>();
+        unsafe { pool_dealloc(raw.cast::<u8>(), size, align) };
+        f(); // Run the closure; its destructor fires here.
     }
 }
 
@@ -153,7 +211,7 @@ impl TaskHandle {
     }
 }
 
-/// Spawns `f` onto the fiber pool with a single heap allocation.
+/// Spawns `f` onto the fiber pool with a pooled heap allocation.
 ///
 /// `dtact` then runs it on whichever worker is currently coldest.
 ///
@@ -161,15 +219,19 @@ impl TaskHandle {
 /// don't care about completion, drop the handle (the fiber will still
 /// run to completion — fibers are detached by default).
 pub fn spawn_task<F: FnOnce() + Send + 'static>(_gate: RuntimeGate, f: F) -> TaskHandle {
-    // Single allocation: `TaskEnvelope<F>` stores both the trampoline
-    // function pointer and the closure inline, replacing the old double-box.
-    let env = Box::new(TaskEnvelope::<F> {
-        invoke: TaskEnvelope::<F>::invoke_and_drop,
-        closure: core::mem::ManuallyDrop::new(f),
-    });
-    let arg: *mut TaskEnvelope<F> = Box::into_raw(env);
+    let size = core::mem::size_of::<TaskEnvelope<F>>();
+    let align = core::mem::align_of::<TaskEnvelope<F>>();
+    // SAFETY: `pool_alloc` returns a valid aligned allocation of at least `size` bytes.
+    let arg: *mut TaskEnvelope<F> = unsafe {
+        let ptr = pool_alloc(size, align).cast::<TaskEnvelope<F>>();
+        ptr.write(TaskEnvelope {
+            invoke: TaskEnvelope::<F>::invoke_and_drop,
+            closure: core::mem::ManuallyDrop::new(f),
+        });
+        ptr
+    };
     // SAFETY: `task_trampoline` reads `arg.invoke` and calls it; `invoke`
-    // reconstructs and drops the `TaskEnvelope` via `Box::from_raw`.
+    // takes back the allocation via `pool_dealloc`.
     let handle = unsafe { dtact_fiber_launch(task_trampoline, arg.cast::<c_void>()) };
     TaskHandle(handle)
 }

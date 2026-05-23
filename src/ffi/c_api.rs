@@ -8,6 +8,7 @@
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
+use std::time::Duration;
 use std::panic::catch_unwind;
 use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
@@ -436,4 +437,66 @@ pub extern "C" fn rssn_dag_compile_v2(
     _out_fn: *mut *mut *mut c_void,
 ) -> RssnStatus {
     RssnStatus::CompilationError
+}
+
+/// C-compatible simplification configuration.
+///
+/// Pass a pointer to this struct to [`rssn_dag_simplify_with_config`] to
+/// override the default heuristic parameters. Pass NULL to use defaults.
+#[repr(C)]
+pub struct RssnSimplifyConfig {
+    /// Maximum rewrite depth (default: 10).
+    pub max_depth: u32,
+    /// Wall-clock timeout in milliseconds (default: 500).
+    pub timeout_ms: u64,
+    /// Approximate-pruning aggressiveness in `[0.0, 1.0]` (default: 0.1).
+    pub aggressiveness: f64,
+}
+
+/// Simplifies an expression using a caller-supplied configuration.
+///
+/// If `config` is NULL, behaves identically to [`rssn_dag_simplify_v2`].
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer to a `DagBuilder`.
+/// - `out_id` must be a valid, non-null, writable `u32` pointer.
+/// - If `config` is non-null, it must point to a valid `RssnSimplifyConfig`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_simplify_with_config(
+    builder: *mut DagBuilder,
+    root: u32,
+    config: *const RssnSimplifyConfig,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let (max_depth, timeout_ms, aggressiveness) = if config.is_null() {
+        let def = HeuristicConfig::default();
+        (
+            def.max_depth,
+            def.timeout.as_millis() as u64,
+            def.simplification_aggressiveness,
+        )
+    } else {
+        let c = unsafe { &*config };
+        (c.max_depth as usize, c.timeout_ms, c.aggressiveness)
+    };
+    let result = catch_unwind(|| -> RssnStatus {
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+        let cfg = HeuristicConfig::default()
+            .max_depth(max_depth)
+            .timeout(Duration::from_millis(timeout_ms))
+            .simplification_aggressiveness(aggressiveness);
+        let mut engine = HeuristicEngine::new(cfg, SearchStrategy::Greedy);
+        let id = engine.simplify(builder_ref, root_id);
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
 }

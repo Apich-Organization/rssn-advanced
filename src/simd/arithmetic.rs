@@ -20,13 +20,35 @@
 use std::sync::OnceLock;
 
 use crate::asm_presets::{
-    add_f64x4_avx2, cmp_eq_f64x4, coef_merge_f64x4, fma_f64x4_avx2, mul_f64x4_avx2,
+    add_f64x2_neon, add_f64x4_avx2, cmp_eq_f64x4, coef_merge_f64x4, fma_f64x4_avx2,
+    mul_f64x2_neon, mul_f64x4_avx2,
 };
+
+// =========================================================================
+// Private scalar lane helpers (Change 7: deduplicate scalar fallback)
+// =========================================================================
+
+#[inline(always)]
+fn scalar_add_lanes(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
+    debug_assert_eq!(lhs.len(), out.len());
+    debug_assert_eq!(rhs.len(), out.len());
+    for i in 0..out.len() { out[i] = lhs[i] + rhs[i]; }
+}
+
+#[inline(always)]
+fn scalar_mul_lanes(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
+    debug_assert_eq!(lhs.len(), out.len());
+    debug_assert_eq!(rhs.len(), out.len());
+    for i in 0..out.len() { out[i] = lhs[i] * rhs[i]; }
+}
 
 /// Cached result of AVX2 detection. Populated on first use; subsequent
 /// reads are a single atomic load (Acquire). The `OnceLock` value is a
 /// `bool` so the hot path is a branch-predictor-friendly compare.
 static HAS_AVX2: OnceLock<bool> = OnceLock::new();
+
+/// Cached result of NEON detection.
+static HAS_NEON: OnceLock<bool> = OnceLock::new();
 
 /// Returns `true` if AVX2 is available on the current host CPU.
 ///
@@ -35,6 +57,12 @@ static HAS_AVX2: OnceLock<bool> = OnceLock::new();
 #[inline]
 fn avx2_available() -> bool {
     *HAS_AVX2.get_or_init(|| crate::simd::detect::has_avx2())
+}
+
+/// Returns `true` if NEON is available on the current host CPU.
+#[inline]
+fn neon_available() -> bool {
+    *HAS_NEON.get_or_init(|| crate::simd::detect::has_neon())
 }
 
 /// Reasons a batch arithmetic operation cannot proceed.
@@ -64,29 +92,38 @@ pub fn batch_add(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
     }
 
     // Detect once per batch call rather than once per chunk call.
-    let use_simd = avx2_available();
+    let use_avx2 = avx2_available();
+    let use_neon = neon_available();
     let mut chunk_idx = 0;
     // 2× unrolled path: two AVX2/scalar chunks per loop body.
     while chunk_idx + LANES * 2 <= n {
         let (o1, o2) = result[chunk_idx..chunk_idx + LANES * 2].split_at_mut(LANES);
-        if use_simd {
+        if use_avx2 {
             add_f64x4_avx2::apply(&lhs[chunk_idx..chunk_idx + LANES], &rhs[chunk_idx..chunk_idx + LANES], o1);
             add_f64x4_avx2::apply(&lhs[chunk_idx + LANES..chunk_idx + LANES * 2], &rhs[chunk_idx + LANES..chunk_idx + LANES * 2], o2);
         } else {
-            for i in 0..LANES { o1[i] = lhs[chunk_idx + i] + rhs[chunk_idx + i]; }
-            for i in 0..LANES { o2[i] = lhs[chunk_idx + LANES + i] + rhs[chunk_idx + LANES + i]; }
+            scalar_add_lanes(&lhs[chunk_idx..chunk_idx + LANES], &rhs[chunk_idx..chunk_idx + LANES], o1);
+            scalar_add_lanes(&lhs[chunk_idx + LANES..chunk_idx + LANES * 2], &rhs[chunk_idx + LANES..chunk_idx + LANES * 2], o2);
         }
         chunk_idx += LANES * 2;
     }
     // Handle any remaining full chunk.
     while chunk_idx + LANES <= n {
         let o = &mut result[chunk_idx..chunk_idx + LANES];
-        if use_simd {
+        if use_avx2 {
             add_f64x4_avx2::apply(&lhs[chunk_idx..chunk_idx + LANES], &rhs[chunk_idx..chunk_idx + LANES], o);
         } else {
-            for i in 0..LANES { o[i] = lhs[chunk_idx + i] + rhs[chunk_idx + i]; }
+            scalar_add_lanes(&lhs[chunk_idx..chunk_idx + LANES], &rhs[chunk_idx..chunk_idx + LANES], o);
         }
         chunk_idx += LANES;
+    }
+    // 2-lane NEON path for aarch64 when AVX2 is not available.
+    while chunk_idx + 2 <= n && !use_avx2 && use_neon {
+        let o2: &mut [f64; 2] = (&mut result[chunk_idx..chunk_idx + 2]).try_into().unwrap();
+        let l2: &[f64; 2] = (&lhs[chunk_idx..chunk_idx + 2]).try_into().unwrap();
+        let r2: &[f64; 2] = (&rhs[chunk_idx..chunk_idx + 2]).try_into().unwrap();
+        add_f64x2_neon::apply(l2, r2, o2);
+        chunk_idx += 2;
     }
     while chunk_idx < n {
         result[chunk_idx] = lhs[chunk_idx] + rhs[chunk_idx];
@@ -107,27 +144,36 @@ pub fn batch_mul(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
         return Err(BatchError::LengthMismatch);
     }
 
-    let use_simd = avx2_available();
+    let use_avx2 = avx2_available();
+    let use_neon = neon_available();
     let mut i = 0;
     while i + LANES * 2 <= n {
         let (o1, o2) = result[i..i + LANES * 2].split_at_mut(LANES);
-        if use_simd {
+        if use_avx2 {
             mul_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], o1);
             mul_f64x4_avx2::apply(&lhs[i + LANES..i + LANES * 2], &rhs[i + LANES..i + LANES * 2], o2);
         } else {
-            for j in 0..LANES { o1[j] = lhs[i + j] * rhs[i + j]; }
-            for j in 0..LANES { o2[j] = lhs[i + LANES + j] * rhs[i + LANES + j]; }
+            scalar_mul_lanes(&lhs[i..i + LANES], &rhs[i..i + LANES], o1);
+            scalar_mul_lanes(&lhs[i + LANES..i + LANES * 2], &rhs[i + LANES..i + LANES * 2], o2);
         }
         i += LANES * 2;
     }
     while i + LANES <= n {
         let o = &mut result[i..i + LANES];
-        if use_simd {
+        if use_avx2 {
             mul_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], o);
         } else {
-            for j in 0..LANES { o[j] = lhs[i + j] * rhs[i + j]; }
+            scalar_mul_lanes(&lhs[i..i + LANES], &rhs[i..i + LANES], o);
         }
         i += LANES;
+    }
+    // 2-lane NEON path for aarch64 when AVX2 is not available.
+    while i + 2 <= n && !use_avx2 && use_neon {
+        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
+        let l2: &[f64; 2] = (&lhs[i..i + 2]).try_into().unwrap();
+        let r2: &[f64; 2] = (&rhs[i..i + 2]).try_into().unwrap();
+        mul_f64x2_neon::apply(l2, r2, o2);
+        i += 2;
     }
     while i < n {
         result[i] = lhs[i] * rhs[i];
@@ -386,6 +432,85 @@ pub fn batch_eval(
     _var_sets: &[f64],
     _num_vars: usize,
     results: &mut [f64],
+) -> Result<(), BatchError> {
+    let _ = results;
+    Err(BatchError::LengthMismatch)
+}
+
+/// Parallel variant of [`batch_eval`] that splits rows into chunks and
+/// evaluates each chunk on a separate fiber from the `dtact` runtime pool.
+///
+/// `chunk_size` controls how many rows each fiber processes. A `chunk_size`
+/// of 0 or a total row count ≤ `chunk_size` falls back to serial [`batch_eval`].
+///
+/// # Errors
+///
+/// Returns [`BatchError::LengthMismatch`] when
+/// `var_sets.len() != results.len() * num_vars` or `chunk_size == 0` and
+/// the non-JIT stub is active.
+#[cfg(feature = "cranelift-jit")]
+pub fn batch_eval_parallel(
+    func: crate::jit::compiler::CompiledExprFn,
+    var_sets: &[f64],
+    num_vars: usize,
+    results: &mut [f64],
+    chunk_size: usize,
+) -> Result<(), BatchError> {
+    let n = results.len();
+    if var_sets.len() != n.saturating_mul(num_vars) {
+        return Err(BatchError::LengthMismatch);
+    }
+    if chunk_size == 0 || n <= chunk_size {
+        return batch_eval(func, var_sets, num_vars, results);
+    }
+
+    use std::cell::UnsafeCell;
+    use std::sync::Arc;
+
+    struct SendSync<T>(T);
+    unsafe impl<T: Send> Send for SendSync<T> {}
+    unsafe impl<T: Send> Sync for SendSync<T> {}
+
+    let gate = crate::runtime::ensure_runtime();
+    let results_ptr: Arc<SendSync<UnsafeCell<*mut f64>>> =
+        Arc::new(SendSync(UnsafeCell::new(results.as_mut_ptr())));
+    let var_ptr: *const f64 = var_sets.as_ptr();
+    let var_ptr_send: usize = var_ptr as usize;
+
+    let mut handles = Vec::new();
+    let mut offset = 0usize;
+    while offset < n {
+        let end = (offset + chunk_size).min(n);
+        let count = end - offset;
+        let out_offset = offset;
+        let results_arc = Arc::clone(&results_ptr);
+        handles.push(crate::runtime::spawn_task(gate, move || {
+            for i in 0..count {
+                let row = out_offset + i;
+                let vars = unsafe { std::slice::from_raw_parts((var_ptr_send as *const f64).add(row * num_vars), num_vars) };
+                let val = func(vars.as_ptr());
+                unsafe {
+                    let base = *results_arc.0.get();
+                    *base.add(row) = val;
+                }
+            }
+        }));
+        offset = end;
+    }
+    for h in handles {
+        crate::runtime::join(h);
+    }
+    Ok(())
+}
+
+/// Non-JIT stub for `batch_eval_parallel`.
+#[cfg(not(feature = "cranelift-jit"))]
+pub fn batch_eval_parallel(
+    _func: *const (),
+    _var_sets: &[f64],
+    _num_vars: usize,
+    results: &mut [f64],
+    _chunk_size: usize,
 ) -> Result<(), BatchError> {
     let _ = results;
     Err(BatchError::LengthMismatch)

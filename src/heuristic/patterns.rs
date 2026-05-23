@@ -24,12 +24,9 @@ pub type PatternResult = Option<DagNodeId>;
 /// Returns the `f64` constant a node represents, or `None` for
 /// non-constant nodes.
 fn constant_value(builder: &DagBuilder, id: DagNodeId) -> Option<f64> {
-    let node = builder.arena().get(id)?;
-    if matches!(node.kind, SymbolKind::Constant) {
-        node.value
-    } else {
-        None
-    }
+    builder.arena().get(id).and_then(|n| {
+        if let SymbolKind::Constant(v) = n.kind { Some(v) } else { None }
+    })
 }
 
 /// `x + 0 → x` and `0 + x → x`.
@@ -65,7 +62,14 @@ pub fn sub_identity(builder: &mut DagBuilder, children: &[DagNodeId]) -> Pattern
     None
 }
 
-/// `x * 0 → 0`, `x * 1 → x`, `1 * x → x`.
+/// `x * 0 → 0` (only when the other operand is a known finite constant),
+/// `x * 1 → x`, `1 * x → x`.
+///
+/// The `x * 0` rule is guarded: IEEE-754 defines `NaN * 0 = NaN` and
+/// `Inf * 0 = NaN`. Folding symbolically to `0` for an unknown `x` would
+/// produce wrong results when `x` evaluates to NaN or Infinity at runtime.
+/// The guard requires the non-zero operand to be a concrete finite constant,
+/// which is always safe. `constant_fold` handles the fully-constant case.
 pub fn mul_identity(builder: &mut DagBuilder, children: &[DagNodeId]) -> PatternResult {
     if children.len() != 2 {
         return None;
@@ -76,8 +80,17 @@ pub fn mul_identity(builder: &mut DagBuilder, children: &[DagNodeId]) -> Pattern
     let lhs_val = constant_value(builder, lhs);
     let rhs_val = constant_value(builder, rhs);
 
-    if matches!(lhs_val, Some(v) if v == 0.0) || matches!(rhs_val, Some(v) if v == 0.0) {
-        return Some(builder.constant(0.0));
+    // `0 * x → 0` only when x is a known finite value.
+    if matches!(lhs_val, Some(v) if v == 0.0) {
+        if matches!(rhs_val, Some(r) if r.is_finite()) {
+            return Some(builder.constant(0.0));
+        }
+    }
+    // `x * 0 → 0` only when x is a known finite value.
+    if matches!(rhs_val, Some(v) if v == 0.0) {
+        if matches!(lhs_val, Some(l) if l.is_finite()) {
+            return Some(builder.constant(0.0));
+        }
     }
     if matches!(lhs_val, Some(v) if v == 1.0) {
         return Some(rhs);
@@ -330,12 +343,19 @@ mod tests {
         let x = b.variable("x");
         let zero = b.constant(0.0);
         let one = b.constant(1.0);
-        // x * 0 → 0
-        assert_eq!(mul_identity(&mut b, &[x, zero]), Some(zero));
+        let finite = b.constant(3.0);
+        // finite * 0 → 0 (safe: 3.0 is a known finite constant)
+        assert_eq!(mul_identity(&mut b, &[finite, zero]), Some(zero));
+        // 0 * finite → 0 (safe)
+        assert_eq!(mul_identity(&mut b, &[zero, finite]), Some(zero));
         // 1 * x → x
         assert_eq!(mul_identity(&mut b, &[one, x]), Some(x));
         // x * 1 → x
         assert_eq!(mul_identity(&mut b, &[x, one]), Some(x));
+        // x * 0 → None (x is symbolic; NaN*0=NaN at runtime — don't fold)
+        assert_eq!(mul_identity(&mut b, &[x, zero]), None, "symbolic * 0 must not fold — IEEE-754 NaN*0=NaN");
+        // 0 * x → None
+        assert_eq!(mul_identity(&mut b, &[zero, x]), None, "0 * symbolic must not fold — IEEE-754 NaN*0=NaN");
     }
 
     #[test]

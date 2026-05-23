@@ -1,23 +1,19 @@
-# Module Review: `storage` (Post-Upgrade)
+# Module Review: `storage` (Phase 3 Audit)
 
-## 1. Performance & Memory
+## 1. Performance
 
-### 1.1 Zero-Copy Mmap Restoration
-The `DiskCache` now uses `MmapBuffer` and `decode_zerocopy_raw` correctly, avoiding the redundant whole-file heap allocation that plagued the previous version.
+### 1.1 The "Stop-the-World" Eviction
+`evict_cold_nodes` performs a full O(N) mark-and-sweep.
+- **Sharp Question:** In a streaming symbolic engine, why is our only memory reclamation strategy a global, blocking compaction pass? If we have 10GB of nodes, do we really want to wait 2 seconds for a "mark" phase before we can keep calculating?
 
-### 1.2 Lock-Free Hotspot Tracking
-The `DynamicHotspotTable` now uses a "Read Lock + Atomic Increment" fast-path, which drastically reduces contention in parallel workloads. The 128-byte alignment of shards effectively prevents false sharing.
+## 2. Design Consistency
 
-## 2. Dead Code & Functionality
-
-### 2.1 Manual "Mark-and-Sweep" vs `NodeFlags`
-The `evict_cold_nodes` function uses a local `Vec<bool>` for marking. While correct, this mirrors the functionality that `NodeFlags::CANONICAL` or a similar bit could provide if properly integrated into the arena.
+### 2.1 The Remap Table Allocation
+Eviction returns a `HashMap<DagNodeId, DagNodeId>`.
+- **Sharp Question:** We just cleared memory, and then we immediately allocate a giant `HashMap` that is nearly as large as the arena itself just to tell the user where their nodes went. Is there no more efficient way to communicate a range-based or offset-based remap?
 
 ## 3. Extensibility
 
-### 3.1 Closed Eviction Policy
-The `evict_cold_nodes` function implements a specific frequency-based policy. There is no way for a user to provide a custom eviction strategy (e.g. LRU, LFU, or priority-based) without modifying the `storage` module.
-
-## 4. Suggestions
-- Generalize the eviction logic to accept a `Policy` trait, allowing users to define their own hotness criteria.
-- Consider using the `MmapBuffer` directly as a backend for the `DagArena` to enable "out-of-core" computation without explicit `restore` calls.
+### 3.1 Hardcoded "Hotness"
+The eviction policy is "access frequency >= threshold".
+- **Sharp Question:** What if a user wants to protect nodes based on "Depth", "Recency (LRU)", or "Algebraic Complexity"? Why is our "DynamicHotspotTable" hardcoded to one specific policy?
