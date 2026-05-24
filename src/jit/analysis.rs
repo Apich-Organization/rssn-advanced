@@ -58,11 +58,11 @@ pub enum PowExpansion {
     None,
     /// Expand to `sqrt(lhs)`.
     Sqrt,
-    /// Expand to repeated fmul with binary exponentiation.
-    /// Inner value: the integer exponent (2..=8).
+    /// Expand to repeated fmul using an addition-chain schedule.
+    /// Inner value: the integer exponent (2..=16).
     IntPow(u32),
     /// Expand to `1 / x^n` using integer power then reciprocal.
-    /// Inner value: the positive integer n (1..=4), representing exponent = -n.
+    /// Inner value: the positive integer n (1..=8), representing exponent = -n.
     NegIntPow(u32),
 }
 
@@ -128,8 +128,8 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                 let lower = a.lower_bound.zip(b.lower_bound).map(|(al, bl)| al + bl);
                 let upper = a.upper_bound.zip(b.upper_bound).map(|(au, bu)| au + bu);
                 let is_nonneg = a.is_nonnegative && b.is_nonnegative;
-                let is_pos = (a.is_positive && b.is_nonnegative)
-                    || (a.is_nonnegative && b.is_positive);
+                let is_pos =
+                    (a.is_positive && b.is_nonnegative) || (a.is_nonnegative && b.is_positive);
                 NodeAnalysis {
                     lower_bound: lower,
                     upper_bound: upper,
@@ -165,30 +165,48 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
             SymbolKind::Operator(OpKind::Mul) => {
                 let a = child_analysis(&results, children, idx, 0);
                 let b = child_analysis(&results, children, idx, 1);
-                // Conservative: only handle the all-nonneg case for bounds
-                let lower = if a.lower_bound.map_or(false, |l| l >= 0.0)
-                    && b.lower_bound.map_or(false, |l| l >= 0.0)
-                {
-                    a.lower_bound.zip(b.lower_bound).map(|(al, bl)| al * bl)
-                } else {
-                    None
-                };
-                let upper = if a.upper_bound.map_or(false, |u| u >= 0.0)
-                    && b.upper_bound.map_or(false, |u| u >= 0.0)
-                    && a.is_nonnegative
-                    && b.is_nonnegative
-                {
-                    a.upper_bound.zip(b.upper_bound).map(|(au, bu)| au * bu)
-                } else {
-                    None
-                };
+
+                // 4-corner interval multiplication: when all four bounds are
+                // known we compute the exact product interval as the min/max
+                // over all combinations (al*bl, al*bu, au*bl, au*bu). This
+                // is correct for all sign combinations and tighter than the
+                // all-nonneg-only check we used previously.
+                let (lower, upper) =
+                    match (a.lower_bound, a.upper_bound, b.lower_bound, b.upper_bound) {
+                        (Some(al), Some(au), Some(bl), Some(bu)) => {
+                            let c0 = al * bl;
+                            let c1 = al * bu;
+                            let c2 = au * bl;
+                            let c3 = au * bu;
+                            // Gracefully handle NaN/Inf products by propagating None.
+                            if [c0, c1, c2, c3].iter().all(|v| v.is_finite()) {
+                                let lo = c0.min(c1).min(c2).min(c3);
+                                let hi = c0.max(c1).max(c2).max(c3);
+                                (Some(lo), Some(hi))
+                            } else {
+                                (None, None)
+                            }
+                        }
+                        // At least one bound pair unknown: fall back to sign-only tracking.
+                        _ => (None, None),
+                    };
+
                 let is_nonneg = a.is_nonnegative && b.is_nonnegative;
+                // Sign flip: both negative → positive.
+                let is_nonneg_both_neg = a.upper_bound.map_or(false, |u| u < 0.0)
+                    && b.upper_bound.map_or(false, |u| u < 0.0);
+                let is_nonneg_any =
+                    is_nonneg || is_nonneg_both_neg || lower.map_or(false, |l| l >= 0.0);
                 let is_pos = a.is_positive && b.is_positive;
+                let is_pos_both_neg = a.upper_bound.map_or(false, |u| u < 0.0)
+                    && b.upper_bound.map_or(false, |u| u < 0.0);
+                let is_pos_any = is_pos || is_pos_both_neg || lower.map_or(false, |l| l > 0.0);
+
                 NodeAnalysis {
                     lower_bound: lower,
                     upper_bound: upper,
-                    is_nonnegative: is_nonneg,
-                    is_positive: is_pos,
+                    is_nonnegative: is_nonneg_any,
+                    is_positive: is_pos_any,
                     no_nan: a.no_nan && b.no_nan,
                     pow_expansion: PowExpansion::None,
                 }
@@ -223,9 +241,7 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                 //  2. The exponent node's already-computed analysis has tight
                 //     bounds (lower == upper), e.g. for `Neg(Constant(1.0))`
                 //     the analysis produces lb = ub = -1.0.
-                let exp_child_idx = children
-                    .get(1)
-                    .and_then(|ptr| ptr.resolve(idx));
+                let exp_child_idx = children.get(1).and_then(|ptr| ptr.resolve(idx));
                 let exp_val: Option<f64> = exp_child_idx
                     .and_then(|ci| ast.nodes.get(ci))
                     .and_then(|exp_node| {
@@ -244,69 +260,69 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                         }
                     });
 
-                let pow_expansion = exp_val
-                    .map(classify_exponent)
-                    .unwrap_or(PowExpansion::None);
+                let pow_expansion = exp_val.map(classify_exponent).unwrap_or(PowExpansion::None);
 
                 // Compute sign/bound properties based on exponent
-                let (lower_bound, upper_bound, is_nonnegative, is_positive, no_nan) =
-                    match exp_val {
-                        Some(exp) => {
-                            let n = exp as i32;
-                            let is_even_int = n >= 2 && (n as f64 - exp).abs() < f64::EPSILON
-                                && n % 2 == 0;
-                            let is_odd_pos_int = n >= 1 && (n as f64 - exp).abs() < f64::EPSILON
-                                && n % 2 != 0;
-                            let is_sqrt = (exp - 0.5_f64).abs() < f64::EPSILON;
-                            let is_neg_exp = exp < 0.0;
+                let (lower_bound, upper_bound, is_nonnegative, is_positive, no_nan) = match exp_val
+                {
+                    Some(exp) => {
+                        let n = exp as i32;
+                        let is_even_int =
+                            n >= 2 && (n as f64 - exp).abs() < f64::EPSILON && n % 2 == 0;
+                        let is_odd_pos_int =
+                            n >= 1 && (n as f64 - exp).abs() < f64::EPSILON && n % 2 != 0;
+                        let is_sqrt = (exp - 0.5_f64).abs() < f64::EPSILON;
+                        let is_neg_exp = exp < 0.0;
 
-                            if is_even_int {
-                                // x^even ≥ 0 always; > 0 if base provably nonzero
-                                let is_pos = base.is_nonzero();
-                                (
-                                    Some(0.0),
-                                    None,
-                                    true,
-                                    is_pos,
-                                    base.no_nan,
-                                )
-                            } else if is_sqrt {
-                                // sqrt(x) ≥ 0; no_nan if base ≥ 0
-                                (
-                                    Some(0.0),
-                                    None,
-                                    true,
-                                    base.is_positive,
-                                    base.no_nan && base.is_nonnegative,
-                                )
-                            } else if is_odd_pos_int {
-                                // sign follows base
-                                (
-                                    None,
-                                    None,
-                                    base.is_nonnegative,
-                                    base.is_positive,
-                                    base.no_nan,
-                                )
-                            } else if is_neg_exp {
-                                // x^(-n): nonzero if base nonzero; sign follows base if n is even
-                                let neg_n = (-exp) as u32;
-                                let is_even_neg = neg_n % 2 == 0;
-                                let is_nonneg = if is_even_neg { true } else { base.is_nonnegative };
-                                let is_pos = if is_even_neg { base.is_nonzero() } else { base.is_positive };
-                                (
-                                    None,
-                                    None,
-                                    is_nonneg,
-                                    is_pos,
-                                    base.no_nan && base.is_nonzero(),
-                                )
+                        if is_even_int {
+                            // x^even ≥ 0 always; > 0 if base provably nonzero
+                            let is_pos = base.is_nonzero();
+                            (Some(0.0), None, true, is_pos, base.no_nan)
+                        } else if is_sqrt {
+                            // sqrt(x) ≥ 0; no_nan if base ≥ 0
+                            (
+                                Some(0.0),
+                                None,
+                                true,
+                                base.is_positive,
+                                base.no_nan && base.is_nonnegative,
+                            )
+                        } else if is_odd_pos_int {
+                            // sign follows base
+                            (
+                                None,
+                                None,
+                                base.is_nonnegative,
+                                base.is_positive,
+                                base.no_nan,
+                            )
+                        } else if is_neg_exp {
+                            // x^(-n): nonzero if base nonzero; sign follows base if n is even
+                            let neg_n = (-exp) as u32;
+                            let is_even_neg = neg_n % 2 == 0;
+                            let is_nonneg = if is_even_neg {
+                                true
                             } else {
-                                (None, None, false, false, false)
-                            }
+                                base.is_nonnegative
+                            };
+                            let is_pos = if is_even_neg {
+                                base.is_nonzero()
+                            } else {
+                                base.is_positive
+                            };
+                            (
+                                None,
+                                None,
+                                is_nonneg,
+                                is_pos,
+                                base.no_nan && base.is_nonzero(),
+                            )
+                        } else {
+                            (None, None, false, false, false)
                         }
-                        None => (None, None, false, false, false),
-                    };
+                    }
+                    None => (None, None, false, false, false),
+                };
 
                 NodeAnalysis {
                     lower_bound,
@@ -348,34 +364,169 @@ fn child_analysis<'a>(
 }
 
 /// Maps a constant exponent value to the appropriate expansion strategy.
+///
+/// Expansions covered:
+/// - `0.5` → [`PowExpansion::Sqrt`] (native `sqrtsd` / `fsqrt`)
+/// - `2..=16` → [`PowExpansion::IntPow`] (addition-chain of `fmul`s)
+/// - `-1..=-8` → [`PowExpansion::NegIntPow`] (`1/x^n` via `emit_int_pow`)
+/// - anything else → [`PowExpansion::None`] (runtime `powf` call)
+///
+/// Exponents `0.0` and `1.0` are excluded because they are handled by
+/// cheaper constant-fold peepholes in the IR emitter before this strategy
+/// is consulted.
 #[must_use]
 pub fn classify_exponent(exp: f64) -> PowExpansion {
-    // Handled by existing peepholes in the emitter (x^0 → 1, x^1 → x).
+    // x^0 → 1 and x^1 → x are handled by cheaper constant peepholes.
     if exp == 0.0 || exp == 1.0 {
         return PowExpansion::None;
     }
-    // sqrt
+    // sqrt: x^0.5 → sqrt(x)
     if (exp - 0.5_f64).abs() < f64::EPSILON {
         return PowExpansion::Sqrt;
     }
-    // Integer exponents 2..=8.
-    let n = exp as u32;
-    if n >= 2 && n <= 8 && (n as f64 - exp).abs() < f64::EPSILON {
-        return PowExpansion::IntPow(n);
+
+    // Positive integer exponents 2..=16 → addition-chain fmul sequence.
+    if exp > 0.0 {
+        let n = exp as u32;
+        // Confirm exact integer (no fractional part within epsilon).
+        if n >= 2 && n <= 16 && (n as f64 - exp).abs() < f64::EPSILON {
+            return PowExpansion::IntPow(n);
+        }
     }
-    // Negative integer exponents -1..=-4
-    if exp == -1.0 {
-        return PowExpansion::NegIntPow(1);
+
+    // Negative integer exponents -1..=-8 → 1/x^n.
+    if exp < 0.0 {
+        let n = (-exp) as u32;
+        // Confirm exact negative integer.
+        if n >= 1 && n <= 8 && (-(n as f64) - exp).abs() < f64::EPSILON {
+            return PowExpansion::NegIntPow(n);
+        }
     }
-    if exp == -2.0 {
-        return PowExpansion::NegIntPow(2);
-    }
-    if exp == -3.0 {
-        return PowExpansion::NegIntPow(3);
-    }
-    if exp == -4.0 {
-        return PowExpansion::NegIntPow(4);
-    }
+
     PowExpansion::None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_covers_positive_ints_2_to_16() {
+        for n in 2u32..=16 {
+            assert_eq!(
+                classify_exponent(n as f64),
+                PowExpansion::IntPow(n),
+                "classify_exponent({n})"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_covers_neg_ints_minus1_to_minus8() {
+        for n in 1u32..=8 {
+            assert_eq!(
+                classify_exponent(-(n as f64)),
+                PowExpansion::NegIntPow(n),
+                "classify_exponent(-{n})"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_sqrt() {
+        assert_eq!(classify_exponent(0.5), PowExpansion::Sqrt);
+    }
+
+    #[test]
+    fn classify_identity_and_zero_return_none() {
+        assert_eq!(classify_exponent(0.0), PowExpansion::None);
+        assert_eq!(classify_exponent(1.0), PowExpansion::None);
+    }
+
+    #[test]
+    fn classify_non_integer_fraction_returns_none() {
+        assert_eq!(classify_exponent(1.5), PowExpansion::None);
+        assert_eq!(classify_exponent(2.7), PowExpansion::None);
+        assert_eq!(classify_exponent(-1.5), PowExpansion::None);
+    }
+
+    #[test]
+    fn classify_large_or_unknown_exponent_returns_none() {
+        assert_eq!(classify_exponent(17.0), PowExpansion::None);
+        assert_eq!(classify_exponent(-9.0), PowExpansion::None);
+        assert_eq!(classify_exponent(100.0), PowExpansion::None);
+    }
+
+    #[test]
+    fn analysis_constant_node_exact_bounds() {
+        // A constant node should have lb == ub == value.
+        use crate::ast::convert::dag_to_ast;
+        use crate::dag::builder::DagBuilder;
+        let mut b = DagBuilder::new();
+        let _c = b.constant(3.5);
+        let root = b.constant(3.5);
+        let ast = dag_to_ast(b.arena(), root);
+        let analysis = analyze(&ast);
+        let an = &analysis[0];
+        assert_eq!(an.lower_bound, Some(3.5));
+        assert_eq!(an.upper_bound, Some(3.5));
+        assert!(an.is_nonnegative);
+        assert!(an.is_positive);
+        assert!(an.no_nan);
+    }
+
+    #[test]
+    fn analysis_neg_constant() {
+        use crate::ast::convert::dag_to_ast;
+        use crate::dag::builder::DagBuilder;
+        let mut b = DagBuilder::new();
+        let c = b.constant(-2.0);
+        let root = b.neg(c);
+        let ast = dag_to_ast(b.arena(), root);
+        let analysis = analyze(&ast);
+        // Root is Neg(-2.0) → 2.0; lb = ub = 2.0.
+        let root_an = &analysis[0];
+        assert!(
+            root_an
+                .lower_bound
+                .map_or(false, |l| (l - 2.0).abs() < 1e-12)
+        );
+        assert!(
+            root_an
+                .upper_bound
+                .map_or(false, |u| (u - 2.0).abs() < 1e-12)
+        );
+        assert!(root_an.is_nonnegative);
+        assert!(root_an.is_positive);
+    }
+
+    #[test]
+    fn analysis_pow_even_exponent_is_nonneg() {
+        use crate::ast::convert::dag_to_ast;
+        use crate::dag::builder::DagBuilder;
+        let mut b = DagBuilder::new();
+        let x = b.variable("x");
+        let two = b.constant(2.0);
+        let root = b.pow(x, two);
+        let ast = dag_to_ast(b.arena(), root);
+        let analysis = analyze(&ast);
+        let root_an = &analysis[0];
+        assert!(root_an.is_nonnegative, "x^2 must be non-negative");
+        assert_eq!(root_an.lower_bound, Some(0.0));
+        assert_eq!(root_an.pow_expansion, PowExpansion::IntPow(2));
+    }
+
+    #[test]
+    fn analysis_pow_sqrt_expansion() {
+        use crate::ast::convert::dag_to_ast;
+        use crate::dag::builder::DagBuilder;
+        let mut b = DagBuilder::new();
+        let x = b.variable("x");
+        let half = b.constant(0.5);
+        let root = b.pow(x, half);
+        let ast = dag_to_ast(b.arena(), root);
+        let analysis = analyze(&ast);
+        let root_an = &analysis[0];
+        assert_eq!(root_an.pow_expansion, PowExpansion::Sqrt);
+    }
+}

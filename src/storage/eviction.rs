@@ -72,7 +72,11 @@ impl CompactRemap {
             block_prefix.push(running);
             running = running.saturating_add(w.count_ones());
         }
-        Self { blocks, block_prefix, n_kept }
+        Self {
+            blocks,
+            block_prefix,
+            n_kept,
+        }
     }
 
     /// Translates an old (pre-eviction) `DagNodeId` to its new (post-eviction) id.
@@ -139,7 +143,11 @@ impl EvictionResult {
 /// dependency closure.
 pub trait EvictionPolicy {
     /// Returns `true` if `id` should be retained (protected from eviction).
-    fn is_hot(&self, hotspots: &super::hotspot::DynamicHotspotTable, id: crate::dag::node::DagNodeId) -> bool;
+    fn is_hot(
+        &self,
+        hotspots: &super::hotspot::DynamicHotspotTable,
+        id: crate::dag::node::DagNodeId,
+    ) -> bool;
 }
 
 /// Frequency-threshold eviction policy: protect any node whose access count
@@ -158,7 +166,11 @@ impl FrequencyPolicy {
 }
 
 impl EvictionPolicy for FrequencyPolicy {
-    fn is_hot(&self, hotspots: &super::hotspot::DynamicHotspotTable, id: crate::dag::node::DagNodeId) -> bool {
+    fn is_hot(
+        &self,
+        hotspots: &super::hotspot::DynamicHotspotTable,
+        id: crate::dag::node::DagNodeId,
+    ) -> bool {
         hotspots.is_hot(id, self.threshold)
     }
 }
@@ -177,16 +189,27 @@ impl RecencyWeightedPolicy {
     /// Creates a new `RecencyWeightedPolicy`.
     #[must_use]
     pub fn new(min_freq: u64, min_ratio: f64) -> Self {
-        Self { min_freq, min_ratio }
+        Self {
+            min_freq,
+            min_ratio,
+        }
     }
 }
 
 impl EvictionPolicy for RecencyWeightedPolicy {
-    fn is_hot(&self, hotspots: &super::hotspot::DynamicHotspotTable, id: crate::dag::node::DagNodeId) -> bool {
+    fn is_hot(
+        &self,
+        hotspots: &super::hotspot::DynamicHotspotTable,
+        id: crate::dag::node::DagNodeId,
+    ) -> bool {
         let freq = hotspots.get_frequency(id);
-        if freq < self.min_freq { return false; }
+        if freq < self.min_freq {
+            return false;
+        }
         let total = hotspots.total_accesses();
-        if total == 0 { return false; }
+        if total == 0 {
+            return false;
+        }
         (freq as f64 / total as f64) >= self.min_ratio
     }
 }
@@ -204,14 +227,30 @@ pub struct CompositePolicy<A: EvictionPolicy, B: EvictionPolicy> {
 impl<A: EvictionPolicy, B: EvictionPolicy> CompositePolicy<A, B> {
     /// Creates a policy that requires **both** `a` and `b` to consider a node hot.
     #[must_use]
-    pub fn and(a: A, b: B) -> Self { Self { primary: a, secondary: b, require_both: true } }
+    pub fn and(a: A, b: B) -> Self {
+        Self {
+            primary: a,
+            secondary: b,
+            require_both: true,
+        }
+    }
     /// Creates a policy that requires **either** `a` or `b` to consider a node hot.
     #[must_use]
-    pub fn or(a: A, b: B) -> Self { Self { primary: a, secondary: b, require_both: false } }
+    pub fn or(a: A, b: B) -> Self {
+        Self {
+            primary: a,
+            secondary: b,
+            require_both: false,
+        }
+    }
 }
 
 impl<A: EvictionPolicy, B: EvictionPolicy> EvictionPolicy for CompositePolicy<A, B> {
-    fn is_hot(&self, hotspots: &super::hotspot::DynamicHotspotTable, id: crate::dag::node::DagNodeId) -> bool {
+    fn is_hot(
+        &self,
+        hotspots: &super::hotspot::DynamicHotspotTable,
+        id: crate::dag::node::DagNodeId,
+    ) -> bool {
         if self.require_both {
             self.primary.is_hot(hotspots, id) && self.secondary.is_hot(hotspots, id)
         } else {
@@ -260,7 +299,12 @@ pub fn evict_cold_nodes_budgeted(
     keep_threshold: u64,
     budget: usize,
 ) -> EvictionResult {
-    evict_nodes_budgeted_with_policy(arena, hotspots, FrequencyPolicy::new(keep_threshold), budget)
+    evict_nodes_budgeted_with_policy(
+        arena,
+        hotspots,
+        FrequencyPolicy::new(keep_threshold),
+        budget,
+    )
 }
 
 /// Like [`evict_nodes_with_policy`] but limits the sweep to at most `budget` protected nodes.
@@ -326,7 +370,10 @@ pub fn evict_nodes_budgeted_with_policy<P: EvictionPolicy>(
             .children
             .iter()
             .filter_map(|c| {
-                let mapped = flat_remap.get(c.index()).copied().unwrap_or(DagNodeId::NONE);
+                let mapped = flat_remap
+                    .get(c.index())
+                    .copied()
+                    .unwrap_or(DagNodeId::NONE);
                 if mapped.is_none() { None } else { Some(mapped) }
             })
             .collect();
@@ -354,9 +401,10 @@ pub fn evict_nodes_budgeted_with_policy<P: EvictionPolicy>(
         let id = DagNodeId::new(i as u32);
         if let Some(node) = compacted.get(id) {
             if node.meta.flags.is_canonical() {
-                let children_valid = node.children.iter().all(|c| {
-                    !c.is_none() && c.index() < compacted_len
-                });
+                let children_valid = node
+                    .children
+                    .iter()
+                    .all(|c| !c.is_none() && c.index() < compacted_len);
                 if !children_valid {
                     to_clear.push(id);
                 }
@@ -503,8 +551,12 @@ mod tests {
 
         let hot = DynamicHotspotTable::new();
         // x+y gets 90 accesses, x gets 10 — ratio 0.9 vs 0.1 total 100.
-        for _ in 0..90 { hot.record_access(sum); }
-        for _ in 0..10 { hot.record_access(x); }
+        for _ in 0..90 {
+            hot.record_access(sum);
+        }
+        for _ in 0..10 {
+            hot.record_access(x);
+        }
 
         // min_freq=5, min_ratio=0.5 → only sum qualifies (ratio 0.9 >= 0.5).
         let policy = RecencyWeightedPolicy::new(5, 0.5);
@@ -522,13 +574,13 @@ mod tests {
         let sum = b.add(x, y);
 
         let hot = DynamicHotspotTable::new();
-        for _ in 0..10 { hot.record_access(sum); }
+        for _ in 0..10 {
+            hot.record_access(sum);
+        }
 
         // AND: freq >= 5 AND ratio >= 0.05. sum satisfies both; x/y have freq=0.
-        let policy = CompositePolicy::and(
-            FrequencyPolicy::new(5),
-            RecencyWeightedPolicy::new(1, 0.05),
-        );
+        let policy =
+            CompositePolicy::and(FrequencyPolicy::new(5), RecencyWeightedPolicy::new(1, 0.05));
         let result = evict_nodes_with_policy(b.arena(), &hot, policy);
         assert!(result.translate(sum).is_some());
         // x and y have 0 accesses so they're cold in the AND policy,
@@ -540,10 +592,14 @@ mod tests {
     fn budgeted_eviction_respects_limit() {
         let mut b = DagBuilder::new();
         // 6 constants — all will be hot.
-        for i in 0..6 { let _ = b.constant(f64::from(i)); }
+        for i in 0..6 {
+            let _ = b.constant(f64::from(i));
+        }
         let hot = DynamicHotspotTable::new();
         for i in 0..6_u32 {
-            for _ in 0..10 { hot.record_access(DagNodeId::new(i)); }
+            for _ in 0..10 {
+                hot.record_access(DagNodeId::new(i));
+            }
         }
         // Budget of 3: only 3 nodes should be swept.
         let result = evict_cold_nodes_budgeted(b.arena(), &hot, 5, 3);

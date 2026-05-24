@@ -217,7 +217,7 @@ impl SymbolRegistry {
         #[allow(clippy::cast_possible_truncation)]
         let id = SymbolId(self.names.len() as u32);
         let arc: Arc<str> = Arc::from(name); // one allocation
-        self.names.push(Arc::clone(&arc));    // ref-count bump — no alloc
+        self.names.push(Arc::clone(&arc)); // ref-count bump — no alloc
         self.lookup.insert(arc, id);
         id
     }
@@ -244,7 +244,9 @@ impl SymbolRegistry {
     /// variable reference (`ffi_review §2`).
     #[must_use]
     pub fn lookup_bytes(&self, bytes: &[u8]) -> Option<SymbolId> {
-        core::str::from_utf8(bytes).ok().and_then(|s| self.lookup(s))
+        core::str::from_utf8(bytes)
+            .ok()
+            .and_then(|s| self.lookup(s))
     }
 
     /// Interns a name from a raw byte slice. The hot path (already

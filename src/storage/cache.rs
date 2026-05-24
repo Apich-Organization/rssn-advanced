@@ -117,8 +117,9 @@ impl DiskCache {
     pub fn delete(&self, key: &str) -> Result<(), String> {
         let filepath = self.key_path(key);
         if filepath.exists() {
-            std::fs::remove_file(&filepath)
-                .map_err(|e| format!("Failed to delete cache file {}: {e:?}", filepath.display()))?;
+            std::fs::remove_file(&filepath).map_err(|e| {
+                format!("Failed to delete cache file {}: {e:?}", filepath.display())
+            })?;
         }
         Ok(())
     }
@@ -164,10 +165,7 @@ impl LazyDiskArena {
     /// # Errors
     ///
     /// Returns an error if the file cannot be opened or decoded.
-    pub fn with_view<R>(
-        &self,
-        f: impl FnOnce(BorrowedArenaView<'_>) -> R,
-    ) -> Result<R, String> {
+    pub fn with_view<R>(&self, f: impl FnOnce(BorrowedArenaView<'_>) -> R) -> Result<R, String> {
         let mm = MmapBuffer::open(&self.path)
             .map_err(|e| format!("LazyDiskArena: cannot open {}: {e:?}", self.path.display()))?;
         let out = mm.with_view(|bytes| -> Result<R, String> {
@@ -246,9 +244,7 @@ mod tests {
         let _ = b.add(x, y);
 
         cache.spill("k", b.arena()).expect("spill");
-        let len = cache
-            .load_borrowed("k", |view| view.len())
-            .expect("load");
+        let len = cache.load_borrowed("k", |view| view.len()).expect("load");
         assert_eq!(len, b.arena().len());
         let _ = std::fs::remove_dir_all(&dir);
     }

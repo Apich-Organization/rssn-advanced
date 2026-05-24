@@ -30,7 +30,11 @@ mod parser_tests {
 
         assert_eq!(parsed_node.kind, manual_node.kind);
         assert_eq!(parsed_node.children.len(), manual_node.children.len());
-        assert_eq!(builder.arena().len(), 8, "Expected exactly 8 nodes in the parsed DAG");
+        assert_eq!(
+            builder.arena().len(),
+            8,
+            "Expected exactly 8 nodes in the parsed DAG"
+        );
     }
 
     #[test]
@@ -41,21 +45,24 @@ mod parser_tests {
         let err1 = parse_expression("(x + y", &mut builder).unwrap_err();
         assert!(
             err1.message.contains("end of input") || err1.message.contains("')'"),
-            "missing ')' error should mention end-of-input or ')': {:?}", err1.message
+            "missing ')' error should mention end-of-input or ')': {:?}",
+            err1.message
         );
 
         // 2. Invalid character / syntax — trailing junk after valid expression
         let err2 = parse_expression("x @ y", &mut builder).unwrap_err();
         assert!(
             err2.message.contains("trailing") || err2.message.contains("Unexpected"),
-            "invalid char error should mention trailing or unexpected: {:?}", err2.message
+            "invalid char error should mention trailing or unexpected: {:?}",
+            err2.message
         );
 
         // 3. Consecutive operators — unexpected character where operand expected
         let err3 = parse_expression("x ++ y", &mut builder).unwrap_err();
         assert!(
             err3.message.contains("Unexpected") || err3.message.contains("Syntax"),
-            "consecutive ops error should mention unexpected or syntax: {:?}", err3.message
+            "consecutive ops error should mention unexpected or syntax: {:?}",
+            err3.message
         );
     }
 
@@ -70,7 +77,10 @@ mod parser_tests {
         let y = builder.variable("y");
         let expected_add = builder.add(x, y);
 
-        assert_eq!(parsed_id, expected_add, "Whitespace stripping failed to parse equivalence");
+        assert_eq!(
+            parsed_id, expected_add,
+            "Whitespace stripping failed to parse equivalence"
+        );
     }
 
     #[test]
@@ -89,6 +99,9 @@ mod parser_tests {
         let product = builder.mul(y, power);
         let expected = builder.add(x, product);
 
-        assert_eq!(parsed_id, expected, "Operator precedence climbing failed for power and product combinations");
+        assert_eq!(
+            parsed_id, expected,
+            "Operator precedence climbing failed for power and product combinations"
+        );
     }
 }

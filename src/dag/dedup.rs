@@ -21,7 +21,10 @@ enum Slot {
     Empty,
     /// Reserved for future delete support; not currently constructed.
     Tombstone,
-    Occupied { raw_hash: u64, id: DagNodeId },
+    Occupied {
+        raw_hash: u64,
+        id: DagNodeId,
+    },
 }
 
 /// Flat Robin Hood open-addressed deduplication map.
@@ -37,12 +40,17 @@ pub struct DedupMap {
 }
 
 impl Default for DedupMap {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl std::fmt::Debug for DedupMap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DedupMap").field("len", &self.len).field("cap", &self.cap).finish()
+        f.debug_struct("DedupMap")
+            .field("len", &self.len)
+            .field("cap", &self.cap)
+            .finish()
     }
 }
 
@@ -51,7 +59,11 @@ impl DedupMap {
     #[must_use]
     pub fn new() -> Self {
         let cap = INIT_CAP;
-        Self { slots: vec![Slot::Empty; cap], len: 0, cap }
+        Self {
+            slots: vec![Slot::Empty; cap],
+            len: 0,
+            cap,
+        }
     }
 
     /// Computes structural hash for a variable node.
@@ -69,7 +81,11 @@ impl DedupMap {
     /// and hashes the f64 bit pattern.
     #[must_use]
     pub fn hash_constant(kind: &SymbolKind) -> NodeHash {
-        let val = if let SymbolKind::Constant(v) = kind { *v } else { 0.0 };
+        let val = if let SymbolKind::Constant(v) = kind {
+            *v
+        } else {
+            0.0
+        };
         use std::hash::Hasher;
         let mut h = rapidhash::fast::RapidHasher::default();
         h.write_u64(val.to_bits());
@@ -98,7 +114,9 @@ impl DedupMap {
         use std::hash::{Hash, Hasher};
         let mut h = rapidhash::fast::RapidHasher::default();
         kind.hash(&mut h);
-        for &c in children.as_slice() { c.0.hash(&mut h); }
+        for &c in children.as_slice() {
+            c.0.hash(&mut h);
+        }
         h.write_u64(coefficient.to_bits());
         h.write_u8(flags.bits());
         NodeHash(h.finish())
@@ -139,9 +157,16 @@ impl DedupMap {
                         coefficient,
                         flags,
                     };
-                    let node = DagNode { kind, meta, children };
+                    let node = DagNode {
+                        kind,
+                        meta,
+                        children,
+                    };
                     let new_id = arena.alloc(node);
-                    self.slots[idx] = Slot::Occupied { raw_hash: raw, id: new_id };
+                    self.slots[idx] = Slot::Occupied {
+                        raw_hash: raw,
+                        id: new_id,
+                    };
                     self.len += 1;
                     return new_id;
                 }
@@ -152,7 +177,8 @@ impl DedupMap {
                             if existing.kind == kind
                                 && existing.children == children
                                 && existing.meta.coefficient.to_bits() == coefficient.to_bits()
-                                && existing.meta.flags.without_canonical() == flags.without_canonical()
+                                && existing.meta.flags.without_canonical()
+                                    == flags.without_canonical()
                             {
                                 return found_id;
                             }
@@ -176,7 +202,9 @@ impl DedupMap {
                             new_slots[idx] = Slot::Occupied { raw_hash, id };
                             break;
                         }
-                        _ => { idx = (idx + 1) & (new_cap - 1); }
+                        _ => {
+                            idx = (idx + 1) & (new_cap - 1);
+                        }
                     }
                 }
             }
@@ -226,8 +254,15 @@ mod tests {
             NodeFlags::EMPTY,
         );
 
-        assert_eq!(id1, id2, "Identical constants must resolve to the same node ID");
-        assert_eq!(arena.len(), 1, "Only one node should be allocated in the arena");
+        assert_eq!(
+            id1, id2,
+            "Identical constants must resolve to the same node ID"
+        );
+        assert_eq!(
+            arena.len(),
+            1,
+            "Only one node should be allocated in the arena"
+        );
     }
 
     #[test]
@@ -256,7 +291,10 @@ mod tests {
             NodeFlags::EMPTY,
         );
 
-        assert_eq!(id1, id2, "Identical variables must resolve to the same node ID");
+        assert_eq!(
+            id1, id2,
+            "Identical variables must resolve to the same node ID"
+        );
         assert_eq!(arena.len(), 1);
     }
 
@@ -271,21 +309,46 @@ mod tests {
         for i in 0..50u32 {
             let kind = SymbolKind::Variable(SymbolId(i));
             let hash = DedupMap::hash_variable(&kind);
-            let id = dedup.get_or_insert(&mut arena, kind, hash, ChildList::Empty, 1.0, NodeFlags::EMPTY);
+            let id = dedup.get_or_insert(
+                &mut arena,
+                kind,
+                hash,
+                ChildList::Empty,
+                1.0,
+                NodeFlags::EMPTY,
+            );
             ids.push(id);
         }
 
-        assert_eq!(arena.len(), 50, "50 distinct variables should produce 50 nodes");
+        assert_eq!(
+            arena.len(),
+            50,
+            "50 distinct variables should produce 50 nodes"
+        );
 
         // Re-lookup each one — must get the same ID back.
         for i in 0..50u32 {
             let kind = SymbolKind::Variable(SymbolId(i));
             let hash = DedupMap::hash_variable(&kind);
-            let id = dedup.get_or_insert(&mut arena, kind, hash, ChildList::Empty, 1.0, NodeFlags::EMPTY);
-            assert_eq!(id, ids[i as usize], "dedup failed after grow for variable {i}");
+            let id = dedup.get_or_insert(
+                &mut arena,
+                kind,
+                hash,
+                ChildList::Empty,
+                1.0,
+                NodeFlags::EMPTY,
+            );
+            assert_eq!(
+                id, ids[i as usize],
+                "dedup failed after grow for variable {i}"
+            );
         }
 
-        assert_eq!(arena.len(), 50, "No new nodes should be allocated on re-lookup");
+        assert_eq!(
+            arena.len(),
+            50,
+            "No new nodes should be allocated on re-lookup"
+        );
     }
 
     #[test]
@@ -295,7 +358,14 @@ mod tests {
 
         let kind = SymbolKind::Constant(1.0);
         let hash = DedupMap::hash_constant(&kind);
-        let _ = dedup.get_or_insert(&mut arena, kind, hash, ChildList::Empty, 1.0, NodeFlags::EMPTY);
+        let _ = dedup.get_or_insert(
+            &mut arena,
+            kind,
+            hash,
+            ChildList::Empty,
+            1.0,
+            NodeFlags::EMPTY,
+        );
         assert_eq!(dedup.len, 1);
 
         dedup.clear();
@@ -303,7 +373,14 @@ mod tests {
 
         // After clear, inserting the same node should produce a NEW arena slot
         // (the dedup map no longer knows about the old one).
-        let id2 = dedup.get_or_insert(&mut arena, kind, hash, ChildList::Empty, 1.0, NodeFlags::EMPTY);
+        let id2 = dedup.get_or_insert(
+            &mut arena,
+            kind,
+            hash,
+            ChildList::Empty,
+            1.0,
+            NodeFlags::EMPTY,
+        );
         // Arena now has 2 nodes (old + new), but dedup only knows about the new one.
         assert_eq!(arena.len(), 2);
         assert_eq!(dedup.len, 1);

@@ -123,7 +123,11 @@ fn push_dag_frame(
     };
     let ast_idx = projection.nodes.len();
     let arity = node.children.len();
-    let const_val = if let SymbolKind::Constant(v) = node.kind { v } else { 0.0 };
+    let const_val = if let SymbolKind::Constant(v) = node.kind {
+        v
+    } else {
+        0.0
+    };
     projection.nodes.push(AstNode {
         kind: node.kind,
         value: const_val, // extract from SymbolKind::Constant(v); 0.0 for non-constants
@@ -283,9 +287,11 @@ fn build_dag_node(
             OpKind::Neg if child_ids.len() == 1 => builder.neg(child_ids[0]),
             _ => DagNodeId::NONE,
         },
-        SymbolKind::Function(_) => {
-            builder.operator(ast_node.kind, child_ids, crate::dag::metadata::NodeFlags::EMPTY)
-        }
+        SymbolKind::Function(_) => builder.operator(
+            ast_node.kind,
+            child_ids,
+            crate::dag::metadata::NodeFlags::EMPTY,
+        ),
     }
 }
 

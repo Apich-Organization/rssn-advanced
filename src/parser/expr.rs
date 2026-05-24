@@ -9,7 +9,9 @@
 
 use nom::IResult;
 
-use super::error::{ParseError, Span, cold_parse_error_unexpected_eof, cold_parse_error_unexpected_token};
+use super::error::{
+    ParseError, Span, cold_parse_error_unexpected_eof, cold_parse_error_unexpected_token,
+};
 use super::lexer::{parse_char, parse_constant, parse_identifier, ws};
 use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
@@ -83,7 +85,8 @@ impl PrecedenceTable {
     /// - `precedence`: binding strength; higher binds tighter.
     /// - `right_associative`: `true` for right-to-left evaluation (like `^`).
     pub fn register_op(&mut self, op: impl Into<String>, precedence: u8, right_associative: bool) {
-        self.entries.insert(op.into(), (precedence, right_associative));
+        self.entries
+            .insert(op.into(), (precedence, right_associative));
     }
 
     /// Registers a single-character infix operator.
@@ -124,7 +127,8 @@ impl PrecedenceTable {
     /// falling back to single-character operators.
     #[must_use]
     pub fn named_ops(&self) -> impl Iterator<Item = &str> {
-        self.entries.keys()
+        self.entries
+            .keys()
             .filter(|k| k.len() > 1)
             .map(String::as_str)
     }
@@ -170,7 +174,10 @@ const fn op_right_associative(op: char) -> bool {
 #[track_caller]
 #[inline(never)]
 fn too_deep(input: &str) -> nom::Err<nom::error::Error<&str>> {
-    nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::TooLarge))
+    nom::Err::Failure(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::TooLarge,
+    ))
 }
 
 fn parse_atom<'a>(
@@ -349,9 +356,15 @@ fn parse_atom_with_table<'a>(
                 let after = &trimmed[prefix.len()..];
                 // For single-char prefixes accept any position; for
                 // multi-char word prefixes ensure a word boundary.
-                let ok = prefix.chars().next().is_some_and(|c| !c.is_alphanumeric() && c != '_')
+                let ok = prefix
+                    .chars()
+                    .next()
+                    .is_some_and(|c| !c.is_alphanumeric() && c != '_')
                     || after.is_empty()
-                    || !after.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_');
+                    || !after
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphanumeric() || c == '_');
                 if ok {
                     let (rem, atom) =
                         parse_expr_climbing_with_table(after, builder, 3, depth, table)?;
@@ -438,7 +451,10 @@ fn parse_expr_climbing_with_table<'a>(
                     // Ensure the match is a complete identifier token (not a prefix of a longer word).
                     let after = &trimmed[named_op.len()..];
                     let is_word_boundary = after.is_empty()
-                        || !after.chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_');
+                        || !after
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_');
                     if is_word_boundary {
                         if let Some(prec) = table.precedence_str(named_op) {
                             let ra = table.is_right_associative_str(named_op);
@@ -704,7 +720,10 @@ mod tests {
         let mut b = DagBuilder::new();
         let id = parse_expression("sin(x)", &mut b).expect("ok");
         let node = b.arena().get(id).expect("root");
-        assert!(matches!(node.kind, crate::dag::symbol::SymbolKind::Function(_)));
+        assert!(matches!(
+            node.kind,
+            crate::dag::symbol::SymbolKind::Function(_)
+        ));
         assert_eq!(node.children.len(), 1);
     }
 
@@ -713,7 +732,10 @@ mod tests {
         let mut b = DagBuilder::new();
         let id = parse_expression("pow(x, y)", &mut b).expect("ok");
         let node = b.arena().get(id).expect("root");
-        assert!(matches!(node.kind, crate::dag::symbol::SymbolKind::Function(_)));
+        assert!(matches!(
+            node.kind,
+            crate::dag::symbol::SymbolKind::Function(_)
+        ));
         assert_eq!(node.children.len(), 2);
     }
 

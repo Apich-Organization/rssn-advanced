@@ -25,7 +25,11 @@ pub type PatternResult = Option<DagNodeId>;
 /// non-constant nodes.
 fn constant_value(builder: &DagBuilder, id: DagNodeId) -> Option<f64> {
     builder.arena().get(id).and_then(|n| {
-        if let SymbolKind::Constant(v) = n.kind { Some(v) } else { None }
+        if let SymbolKind::Constant(v) = n.kind {
+            Some(v)
+        } else {
+            None
+        }
     })
 }
 
@@ -215,9 +219,7 @@ pub fn mul_coef_merge(builder: &mut DagBuilder, children: &[DagNodeId]) -> Patte
     // Case: `(c1 * x) * c2`
     if let Some(c2) = constant_value(builder, rhs) {
         if let Some(lhs_node) = builder.arena().get(lhs) {
-            if lhs_node.kind == SymbolKind::Operator(OpKind::Mul)
-                && lhs_node.children.len() == 2
-            {
+            if lhs_node.kind == SymbolKind::Operator(OpKind::Mul) && lhs_node.children.len() == 2 {
                 let inner = lhs_node.children.as_slice().to_owned();
                 if let Some(c1) = constant_value(builder, inner[0]) {
                     let merged = builder.constant(c1 * c2);
@@ -234,9 +236,7 @@ pub fn mul_coef_merge(builder: &mut DagBuilder, children: &[DagNodeId]) -> Patte
     // Case: `c1 * (x * c2)`
     if let Some(c1) = constant_value(builder, lhs) {
         if let Some(rhs_node) = builder.arena().get(rhs) {
-            if rhs_node.kind == SymbolKind::Operator(OpKind::Mul)
-                && rhs_node.children.len() == 2
-            {
+            if rhs_node.kind == SymbolKind::Operator(OpKind::Mul) && rhs_node.children.len() == 2 {
                 let inner = rhs_node.children.as_slice().to_owned();
                 if let Some(c2) = constant_value(builder, inner[0]) {
                     let merged = builder.constant(c1 * c2);
@@ -263,9 +263,7 @@ pub fn add_coef_merge(builder: &mut DagBuilder, children: &[DagNodeId]) -> Patte
     // `(c1 + x) + c2`
     if let Some(c2) = constant_value(builder, rhs) {
         if let Some(lhs_node) = builder.arena().get(lhs) {
-            if lhs_node.kind == SymbolKind::Operator(OpKind::Add)
-                && lhs_node.children.len() == 2
-            {
+            if lhs_node.kind == SymbolKind::Operator(OpKind::Add) && lhs_node.children.len() == 2 {
                 let inner = lhs_node.children.as_slice().to_owned();
                 if let Some(c1) = constant_value(builder, inner[0]) {
                     let merged = builder.constant(c1 + c2);
@@ -353,9 +351,17 @@ mod tests {
         // x * 1 → x
         assert_eq!(mul_identity(&mut b, &[x, one]), Some(x));
         // x * 0 → None (x is symbolic; NaN*0=NaN at runtime — don't fold)
-        assert_eq!(mul_identity(&mut b, &[x, zero]), None, "symbolic * 0 must not fold — IEEE-754 NaN*0=NaN");
+        assert_eq!(
+            mul_identity(&mut b, &[x, zero]),
+            None,
+            "symbolic * 0 must not fold — IEEE-754 NaN*0=NaN"
+        );
         // 0 * x → None
-        assert_eq!(mul_identity(&mut b, &[zero, x]), None, "0 * symbolic must not fold — IEEE-754 NaN*0=NaN");
+        assert_eq!(
+            mul_identity(&mut b, &[zero, x]),
+            None,
+            "0 * symbolic must not fold — IEEE-754 NaN*0=NaN"
+        );
     }
 
     #[test]
@@ -425,9 +431,16 @@ mod tests {
         let result = mul_coef_merge(&mut b, &[inner, c4]);
         let id = result.expect("(3*x)*4 should merge to 12*x");
         let node = b.arena().get(id).expect("result node exists");
-        assert_eq!(node.kind, SymbolKind::Operator(OpKind::Mul), "result is Mul");
+        assert_eq!(
+            node.kind,
+            SymbolKind::Operator(OpKind::Mul),
+            "result is Mul"
+        );
         // One child should be the constant 12.0.
-        let child_vals: Vec<_> = node.children.as_slice().iter()
+        let child_vals: Vec<_> = node
+            .children
+            .as_slice()
+            .iter()
             .filter_map(|c| constant_value(&b, *c))
             .collect();
         assert!(child_vals.iter().any(|&v| (v - 12.0).abs() < f64::EPSILON));
@@ -444,8 +457,15 @@ mod tests {
         let result = add_coef_merge(&mut b, &[inner, c5]);
         let id = result.expect("(10+x)+5 should merge to x+15");
         let node = b.arena().get(id).expect("result node exists");
-        assert_eq!(node.kind, SymbolKind::Operator(OpKind::Add), "result is Add");
-        let child_vals: Vec<_> = node.children.as_slice().iter()
+        assert_eq!(
+            node.kind,
+            SymbolKind::Operator(OpKind::Add),
+            "result is Add"
+        );
+        let child_vals: Vec<_> = node
+            .children
+            .as_slice()
+            .iter()
             .filter_map(|c| constant_value(&b, *c))
             .collect();
         assert!(child_vals.iter().any(|&v| (v - 15.0).abs() < f64::EPSILON));

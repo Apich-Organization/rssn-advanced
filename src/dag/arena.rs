@@ -3,8 +3,8 @@
 //! `DagArena` provides bump-allocated storage for `DagNode` values.
 //! Nodes are stored in a contiguous vector and referenced via `DagNodeId`.
 
-use bincode_next::{Decode, Encode};
 use super::node::{DagNode, DagNodeId};
+use bincode_next::{Decode, Encode};
 
 /// A memory arena for `DagNode` allocation.
 ///
@@ -93,7 +93,9 @@ mod tests {
         assert!(!arena.is_empty());
 
         let retrieved = arena.get(id).unwrap();
-        assert!(matches!(retrieved.kind, crate::dag::symbol::SymbolKind::Constant(v) if (v - 1.0).abs() < f64::EPSILON));
+        assert!(
+            matches!(retrieved.kind, crate::dag::symbol::SymbolKind::Constant(v) if (v - 1.0).abs() < f64::EPSILON)
+        );
         assert_eq!(retrieved.meta.hash, NodeHash(42));
 
         let retrieved_mut = arena.get_mut(id).unwrap();

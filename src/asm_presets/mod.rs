@@ -11,7 +11,9 @@
 //!
 //! | Preset | x86_64 | AArch64 | riscv64 |
 //! |---|---|---|---|
-//! | add / mul / fma | AVX2 (`vaddpd` / `vmulpd` / `vfmadd231pd`) | NEON (`fadd` / `fmul` / `fmla`) | RVV 1.0 (`vfadd.vv` / `vfmul.vv` / `vfmacc.vv`) |
+//! | add / sub / mul / div | AVX2 (`vaddpd` / `vsubpd` / `vmulpd` / `vdivpd`) | NEON (`fadd` / `fsub` / `fmul` / `fdiv`) | RVV 1.0 (`vfadd.vv` / `vfsub.vv` / `vfmul.vv` / `vfdiv.vv`) |
+//! | sqrt / neg / abs | AVX2 (`vsqrtpd` / `vxorpd` / `vandpd`) | NEON (`fsqrt` / `fneg` / `fabs`) | RVV 1.0 (`vfsqrt.v` / `vfsgnjn.vv` / `vfsgnjx.vv`) |
+//! | fma | AVX2 (`vfmadd231pd`) | NEON (`fmla`) | RVV 1.0 (`vfmacc.vv`) |
 //! | coef_merge | AVX2 (`vmulpd` ×3) | NEON (`fmul` ×3) | RVV 1.0 (`vfmul.vv` ×3) |
 //! | cmp_eq | AVX2 (`vcmpeqpd` + `vmovmskpd`) | NEON (`fcmeq` + `umov`) | scalar |
 //! | hash | AES-NI (`aesenc`) | AES crypto ext (`aese` + `aesmc`) | scalar |
@@ -31,11 +33,21 @@
 //! their data into 4-element windows; the tail is the caller's
 //! responsibility.
 
+pub mod abs_f64x2_neon;
+pub mod abs_f64x4;
 pub mod add_f64x2_neon;
 pub mod add_f64x4_avx2;
 pub mod cmp_eq_f64x4;
 pub mod coef_merge_f64x4;
+pub mod div_f64x2_neon;
+pub mod div_f64x4_avx2;
 pub mod fma_f64x4_avx2;
 pub mod hash_u64x2_aesni;
 pub mod mul_f64x2_neon;
 pub mod mul_f64x4_avx2;
+pub mod neg_f64x2_neon;
+pub mod neg_f64x4;
+pub mod sqrt_f64x2_neon;
+pub mod sqrt_f64x4;
+pub mod sub_f64x2_neon;
+pub mod sub_f64x4_avx2;

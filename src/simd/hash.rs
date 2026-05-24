@@ -35,7 +35,7 @@ pub fn batch_hash(keys: &[u64], hashes: &mut [u64]) -> Result<(), BatchError> {
     // Process pairs: one AES-NI call yields two independent hashes.
     while i + 2 <= n {
         let (lo, hi) = hash_u64x2_aesni::apply(keys[i], keys[i + 1]);
-        hashes[i]     = lo;
+        hashes[i] = lo;
         hashes[i + 1] = hi;
         i += 2;
     }

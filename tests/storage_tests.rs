@@ -2,12 +2,12 @@
 
 #[cfg(test)]
 mod storage_tests {
-    use std::fs::remove_dir_all;
-    use std::path::PathBuf;
     use rssn_advanced::dag::builder::DagBuilder;
     use rssn_advanced::dag::node::DagNodeId;
+    use rssn_advanced::heuristic::{HeuristicConfig, HeuristicEngine, SearchStrategy};
     use rssn_advanced::storage::{DiskCache, DynamicHotspotTable, evict_cold_nodes};
-    use rssn_advanced::heuristic::{HeuristicEngine, HeuristicConfig, SearchStrategy};
+    use std::fs::remove_dir_all;
+    use std::path::PathBuf;
 
     #[test]
     fn test_disk_cache_spill_and_restore() {
@@ -108,6 +108,12 @@ mod storage_tests {
         // The output is a valid arena id and the arena did not
         // explode (dedup is preserved).
         let node = builder.arena().get(simplified).expect("simplified node");
-        assert!(node.children.len() > 0 || matches!(node.kind, rssn_advanced::dag::symbol::SymbolKind::Constant(_)));
+        assert!(
+            node.children.len() > 0
+                || matches!(
+                    node.kind,
+                    rssn_advanced::dag::symbol::SymbolKind::Constant(_)
+                )
+        );
     }
 }

@@ -37,7 +37,11 @@ pub fn has_sse42() -> bool {
 #[must_use]
 pub fn has_neon() -> bool {
     #[cfg(target_arch = "aarch64")]
-    { std::arch::is_aarch64_feature_detected!("neon") }
+    {
+        std::arch::is_aarch64_feature_detected!("neon")
+    }
     #[cfg(not(target_arch = "aarch64"))]
-    { false }
+    {
+        false
+    }
 }

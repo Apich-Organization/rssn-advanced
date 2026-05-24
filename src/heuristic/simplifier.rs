@@ -51,11 +51,7 @@ fn coefficient_threshold(aggressiveness: f64) -> f64 {
 /// Walks a (potentially nested) additive chain rooted at `root` and
 /// rebuilds it without any operand whose effective coefficient is
 /// below `threshold`. Non-additive subtrees are passed through.
-fn prune_additive_chain(
-    builder: &mut DagBuilder,
-    root: DagNodeId,
-    threshold: f64,
-) -> DagNodeId {
+fn prune_additive_chain(builder: &mut DagBuilder, root: DagNodeId, threshold: f64) -> DagNodeId {
     let Some(node) = builder.arena().get(root) else {
         return root;
     };
@@ -170,7 +166,11 @@ mod tests {
         let sum = b.add(tiny1, tiny2);
         let result = approximate_simplify(&mut b, sum, 1.0);
         let node = b.arena().get(result).expect("constant 0 expected");
-        let v: f64 = if let crate::dag::symbol::SymbolKind::Constant(v) = node.kind { v } else { panic!("expected Constant kind") };
+        let v: f64 = if let crate::dag::symbol::SymbolKind::Constant(v) = node.kind {
+            v
+        } else {
+            panic!("expected Constant kind")
+        };
         assert!(v.abs() < f64::EPSILON);
     }
 

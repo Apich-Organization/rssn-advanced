@@ -20,8 +20,9 @@
 use std::sync::OnceLock;
 
 use crate::asm_presets::{
-    add_f64x2_neon, add_f64x4_avx2, cmp_eq_f64x4, coef_merge_f64x4, fma_f64x4_avx2,
-    mul_f64x2_neon, mul_f64x4_avx2,
+    abs_f64x2_neon, abs_f64x4, add_f64x2_neon, add_f64x4_avx2, cmp_eq_f64x4, coef_merge_f64x4,
+    div_f64x2_neon, div_f64x4_avx2, fma_f64x4_avx2, mul_f64x2_neon, mul_f64x4_avx2, neg_f64x2_neon,
+    neg_f64x4, sqrt_f64x2_neon, sqrt_f64x4, sub_f64x2_neon, sub_f64x4_avx2,
 };
 use crate::rssn_error;
 
@@ -33,14 +34,60 @@ use crate::rssn_error;
 fn scalar_add_lanes(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
     debug_assert_eq!(lhs.len(), out.len());
     debug_assert_eq!(rhs.len(), out.len());
-    for i in 0..out.len() { out[i] = lhs[i] + rhs[i]; }
+    for i in 0..out.len() {
+        out[i] = lhs[i] + rhs[i];
+    }
 }
 
 #[inline(always)]
 fn scalar_mul_lanes(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
     debug_assert_eq!(lhs.len(), out.len());
     debug_assert_eq!(rhs.len(), out.len());
-    for i in 0..out.len() { out[i] = lhs[i] * rhs[i]; }
+    for i in 0..out.len() {
+        out[i] = lhs[i] * rhs[i];
+    }
+}
+
+#[inline(always)]
+fn scalar_sub_lanes(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
+    debug_assert_eq!(lhs.len(), out.len());
+    debug_assert_eq!(rhs.len(), out.len());
+    for i in 0..out.len() {
+        out[i] = lhs[i] - rhs[i];
+    }
+}
+
+#[inline(always)]
+fn scalar_div_lanes(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
+    debug_assert_eq!(lhs.len(), out.len());
+    debug_assert_eq!(rhs.len(), out.len());
+    for i in 0..out.len() {
+        out[i] = lhs[i] / rhs[i];
+    }
+}
+
+#[inline(always)]
+fn scalar_sqrt_lanes(inp: &[f64], out: &mut [f64]) {
+    debug_assert_eq!(inp.len(), out.len());
+    for i in 0..out.len() {
+        out[i] = inp[i].sqrt();
+    }
+}
+
+#[inline(always)]
+fn scalar_neg_lanes(inp: &[f64], out: &mut [f64]) {
+    debug_assert_eq!(inp.len(), out.len());
+    for i in 0..out.len() {
+        out[i] = -inp[i];
+    }
+}
+
+#[inline(always)]
+fn scalar_abs_lanes(inp: &[f64], out: &mut [f64]) {
+    debug_assert_eq!(inp.len(), out.len());
+    for i in 0..out.len() {
+        out[i] = inp[i].abs();
+    }
 }
 
 /// Cached result of AVX2 detection. Populated on first use; subsequent
@@ -102,11 +149,27 @@ pub fn batch_add(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
     while chunk_idx + LANES * 2 <= n {
         let (o1, o2) = result[chunk_idx..chunk_idx + LANES * 2].split_at_mut(LANES);
         if use_avx2 {
-            add_f64x4_avx2::apply(&lhs[chunk_idx..chunk_idx + LANES], &rhs[chunk_idx..chunk_idx + LANES], o1);
-            add_f64x4_avx2::apply(&lhs[chunk_idx + LANES..chunk_idx + LANES * 2], &rhs[chunk_idx + LANES..chunk_idx + LANES * 2], o2);
+            add_f64x4_avx2::apply(
+                &lhs[chunk_idx..chunk_idx + LANES],
+                &rhs[chunk_idx..chunk_idx + LANES],
+                o1,
+            );
+            add_f64x4_avx2::apply(
+                &lhs[chunk_idx + LANES..chunk_idx + LANES * 2],
+                &rhs[chunk_idx + LANES..chunk_idx + LANES * 2],
+                o2,
+            );
         } else {
-            scalar_add_lanes(&lhs[chunk_idx..chunk_idx + LANES], &rhs[chunk_idx..chunk_idx + LANES], o1);
-            scalar_add_lanes(&lhs[chunk_idx + LANES..chunk_idx + LANES * 2], &rhs[chunk_idx + LANES..chunk_idx + LANES * 2], o2);
+            scalar_add_lanes(
+                &lhs[chunk_idx..chunk_idx + LANES],
+                &rhs[chunk_idx..chunk_idx + LANES],
+                o1,
+            );
+            scalar_add_lanes(
+                &lhs[chunk_idx + LANES..chunk_idx + LANES * 2],
+                &rhs[chunk_idx + LANES..chunk_idx + LANES * 2],
+                o2,
+            );
         }
         chunk_idx += LANES * 2;
     }
@@ -114,9 +177,17 @@ pub fn batch_add(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
     while chunk_idx + LANES <= n {
         let o = &mut result[chunk_idx..chunk_idx + LANES];
         if use_avx2 {
-            add_f64x4_avx2::apply(&lhs[chunk_idx..chunk_idx + LANES], &rhs[chunk_idx..chunk_idx + LANES], o);
+            add_f64x4_avx2::apply(
+                &lhs[chunk_idx..chunk_idx + LANES],
+                &rhs[chunk_idx..chunk_idx + LANES],
+                o,
+            );
         } else {
-            scalar_add_lanes(&lhs[chunk_idx..chunk_idx + LANES], &rhs[chunk_idx..chunk_idx + LANES], o);
+            scalar_add_lanes(
+                &lhs[chunk_idx..chunk_idx + LANES],
+                &rhs[chunk_idx..chunk_idx + LANES],
+                o,
+            );
         }
         chunk_idx += LANES;
     }
@@ -154,10 +225,18 @@ pub fn batch_mul(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
         let (o1, o2) = result[i..i + LANES * 2].split_at_mut(LANES);
         if use_avx2 {
             mul_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], o1);
-            mul_f64x4_avx2::apply(&lhs[i + LANES..i + LANES * 2], &rhs[i + LANES..i + LANES * 2], o2);
+            mul_f64x4_avx2::apply(
+                &lhs[i + LANES..i + LANES * 2],
+                &rhs[i + LANES..i + LANES * 2],
+                o2,
+            );
         } else {
             scalar_mul_lanes(&lhs[i..i + LANES], &rhs[i..i + LANES], o1);
-            scalar_mul_lanes(&lhs[i + LANES..i + LANES * 2], &rhs[i + LANES..i + LANES * 2], o2);
+            scalar_mul_lanes(
+                &lhs[i + LANES..i + LANES * 2],
+                &rhs[i + LANES..i + LANES * 2],
+                o2,
+            );
         }
         i += LANES * 2;
     }
@@ -206,8 +285,12 @@ pub fn batch_add_scalar(lhs: &[f64], scalar: f64, result: &mut [f64]) -> Result<
             add_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs_splat, o1);
             add_f64x4_avx2::apply(&lhs[i + LANES..i + LANES * 2], &rhs_splat, o2);
         } else {
-            for j in 0..LANES { o1[j] = lhs[i + j] + scalar; }
-            for j in 0..LANES { o2[j] = lhs[i + LANES + j] + scalar; }
+            for j in 0..LANES {
+                o1[j] = lhs[i + j] + scalar;
+            }
+            for j in 0..LANES {
+                o2[j] = lhs[i + LANES + j] + scalar;
+            }
         }
         i += LANES * 2;
     }
@@ -216,12 +299,284 @@ pub fn batch_add_scalar(lhs: &[f64], scalar: f64, result: &mut [f64]) -> Result<
         if use_simd {
             add_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs_splat, o);
         } else {
-            for j in 0..LANES { o[j] = lhs[i + j] + scalar; }
+            for j in 0..LANES {
+                o[j] = lhs[i + j] + scalar;
+            }
         }
         i += LANES;
     }
     while i < n {
         result[i] = lhs[i] + scalar;
+        i += 1;
+    }
+    Ok(())
+}
+
+// =========================================================================
+// Remaining element-wise binary primitives
+// =========================================================================
+
+/// Batch element-wise subtraction: `result[i] = lhs[i] - rhs[i]`.
+///
+/// # Errors
+///
+/// Returns [`BatchError::LengthMismatch`] when any of the three slices
+/// has a different length.
+pub fn batch_sub(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
+    let n = lhs.len();
+    if n != rhs.len() || n != result.len() {
+        return cold_batch_error_length_mismatch();
+    }
+
+    let use_avx2 = avx2_available();
+    let use_neon = neon_available();
+    let mut i = 0;
+    while i + LANES * 2 <= n {
+        let (o1, o2) = result[i..i + LANES * 2].split_at_mut(LANES);
+        if use_avx2 {
+            sub_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], o1);
+            sub_f64x4_avx2::apply(
+                &lhs[i + LANES..i + LANES * 2],
+                &rhs[i + LANES..i + LANES * 2],
+                o2,
+            );
+        } else {
+            scalar_sub_lanes(&lhs[i..i + LANES], &rhs[i..i + LANES], o1);
+            scalar_sub_lanes(
+                &lhs[i + LANES..i + LANES * 2],
+                &rhs[i + LANES..i + LANES * 2],
+                o2,
+            );
+        }
+        i += LANES * 2;
+    }
+    while i + LANES <= n {
+        let o = &mut result[i..i + LANES];
+        if use_avx2 {
+            sub_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], o);
+        } else {
+            scalar_sub_lanes(&lhs[i..i + LANES], &rhs[i..i + LANES], o);
+        }
+        i += LANES;
+    }
+    while i + 2 <= n && !use_avx2 && use_neon {
+        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
+        let l2: &[f64; 2] = (&lhs[i..i + 2]).try_into().unwrap();
+        let r2: &[f64; 2] = (&rhs[i..i + 2]).try_into().unwrap();
+        sub_f64x2_neon::apply(l2, r2, o2);
+        i += 2;
+    }
+    while i < n {
+        result[i] = lhs[i] - rhs[i];
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Batch element-wise division: `result[i] = lhs[i] / rhs[i]`.
+///
+/// Division-by-zero follows IEEE-754: `x / 0 → ±Inf`, `0 / 0 → NaN`.
+///
+/// # Errors
+///
+/// Returns [`BatchError::LengthMismatch`] when any of the three slices
+/// has a different length.
+pub fn batch_div(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
+    let n = lhs.len();
+    if n != rhs.len() || n != result.len() {
+        return cold_batch_error_length_mismatch();
+    }
+
+    let use_avx2 = avx2_available();
+    let use_neon = neon_available();
+    let mut i = 0;
+    while i + LANES * 2 <= n {
+        let (o1, o2) = result[i..i + LANES * 2].split_at_mut(LANES);
+        if use_avx2 {
+            div_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], o1);
+            div_f64x4_avx2::apply(
+                &lhs[i + LANES..i + LANES * 2],
+                &rhs[i + LANES..i + LANES * 2],
+                o2,
+            );
+        } else {
+            scalar_div_lanes(&lhs[i..i + LANES], &rhs[i..i + LANES], o1);
+            scalar_div_lanes(
+                &lhs[i + LANES..i + LANES * 2],
+                &rhs[i + LANES..i + LANES * 2],
+                o2,
+            );
+        }
+        i += LANES * 2;
+    }
+    while i + LANES <= n {
+        let o = &mut result[i..i + LANES];
+        if use_avx2 {
+            div_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], o);
+        } else {
+            scalar_div_lanes(&lhs[i..i + LANES], &rhs[i..i + LANES], o);
+        }
+        i += LANES;
+    }
+    while i + 2 <= n && !use_avx2 && use_neon {
+        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
+        let l2: &[f64; 2] = (&lhs[i..i + 2]).try_into().unwrap();
+        let r2: &[f64; 2] = (&rhs[i..i + 2]).try_into().unwrap();
+        div_f64x2_neon::apply(l2, r2, o2);
+        i += 2;
+    }
+    while i < n {
+        result[i] = lhs[i] / rhs[i];
+        i += 1;
+    }
+    Ok(())
+}
+
+// =========================================================================
+// Unary element-wise primitives
+// =========================================================================
+
+/// Batch element-wise square root: `result[i] = sqrt(inp[i])`.
+///
+/// `sqrt` of a negative value produces `NaN` per IEEE-754.
+///
+/// # Errors
+///
+/// Returns [`BatchError::LengthMismatch`] when `inp` and `result` differ
+/// in length.
+pub fn batch_sqrt(inp: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
+    let n = inp.len();
+    if n != result.len() {
+        return cold_batch_error_length_mismatch();
+    }
+
+    let use_avx2 = avx2_available();
+    let use_neon = neon_available();
+    let mut i = 0;
+    while i + LANES * 2 <= n {
+        let (o1, o2) = result[i..i + LANES * 2].split_at_mut(LANES);
+        if use_avx2 {
+            sqrt_f64x4::apply(&inp[i..i + LANES], o1);
+            sqrt_f64x4::apply(&inp[i + LANES..i + LANES * 2], o2);
+        } else {
+            scalar_sqrt_lanes(&inp[i..i + LANES], o1);
+            scalar_sqrt_lanes(&inp[i + LANES..i + LANES * 2], o2);
+        }
+        i += LANES * 2;
+    }
+    while i + LANES <= n {
+        let o = &mut result[i..i + LANES];
+        if use_avx2 {
+            sqrt_f64x4::apply(&inp[i..i + LANES], o);
+        } else {
+            scalar_sqrt_lanes(&inp[i..i + LANES], o);
+        }
+        i += LANES;
+    }
+    while i + 2 <= n && !use_avx2 && use_neon {
+        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
+        let l2: &[f64; 2] = (&inp[i..i + 2]).try_into().unwrap();
+        sqrt_f64x2_neon::apply(l2, o2);
+        i += 2;
+    }
+    while i < n {
+        result[i] = inp[i].sqrt();
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Batch element-wise negation: `result[i] = -inp[i]`.
+///
+/// # Errors
+///
+/// Returns [`BatchError::LengthMismatch`] when `inp` and `result` differ
+/// in length.
+pub fn batch_neg(inp: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
+    let n = inp.len();
+    if n != result.len() {
+        return cold_batch_error_length_mismatch();
+    }
+
+    let use_avx2 = avx2_available();
+    let use_neon = neon_available();
+    let mut i = 0;
+    while i + LANES * 2 <= n {
+        let (o1, o2) = result[i..i + LANES * 2].split_at_mut(LANES);
+        if use_avx2 {
+            neg_f64x4::apply(&inp[i..i + LANES], o1);
+            neg_f64x4::apply(&inp[i + LANES..i + LANES * 2], o2);
+        } else {
+            scalar_neg_lanes(&inp[i..i + LANES], o1);
+            scalar_neg_lanes(&inp[i + LANES..i + LANES * 2], o2);
+        }
+        i += LANES * 2;
+    }
+    while i + LANES <= n {
+        let o = &mut result[i..i + LANES];
+        if use_avx2 {
+            neg_f64x4::apply(&inp[i..i + LANES], o);
+        } else {
+            scalar_neg_lanes(&inp[i..i + LANES], o);
+        }
+        i += LANES;
+    }
+    while i + 2 <= n && !use_avx2 && use_neon {
+        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
+        let l2: &[f64; 2] = (&inp[i..i + 2]).try_into().unwrap();
+        neg_f64x2_neon::apply(l2, o2);
+        i += 2;
+    }
+    while i < n {
+        result[i] = -inp[i];
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Batch element-wise absolute value: `result[i] = |inp[i]|`.
+///
+/// # Errors
+///
+/// Returns [`BatchError::LengthMismatch`] when `inp` and `result` differ
+/// in length.
+pub fn batch_abs(inp: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
+    let n = inp.len();
+    if n != result.len() {
+        return cold_batch_error_length_mismatch();
+    }
+
+    let use_avx2 = avx2_available();
+    let use_neon = neon_available();
+    let mut i = 0;
+    while i + LANES * 2 <= n {
+        let (o1, o2) = result[i..i + LANES * 2].split_at_mut(LANES);
+        if use_avx2 {
+            abs_f64x4::apply(&inp[i..i + LANES], o1);
+            abs_f64x4::apply(&inp[i + LANES..i + LANES * 2], o2);
+        } else {
+            scalar_abs_lanes(&inp[i..i + LANES], o1);
+            scalar_abs_lanes(&inp[i + LANES..i + LANES * 2], o2);
+        }
+        i += LANES * 2;
+    }
+    while i + LANES <= n {
+        let o = &mut result[i..i + LANES];
+        if use_avx2 {
+            abs_f64x4::apply(&inp[i..i + LANES], o);
+        } else {
+            scalar_abs_lanes(&inp[i..i + LANES], o);
+        }
+        i += LANES;
+    }
+    while i + 2 <= n && !use_avx2 && use_neon {
+        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
+        let l2: &[f64; 2] = (&inp[i..i + 2]).try_into().unwrap();
+        abs_f64x2_neon::apply(l2, o2);
+        i += 2;
+    }
+    while i < n {
+        result[i] = inp[i].abs();
         i += 1;
     }
     Ok(())
@@ -270,8 +625,16 @@ pub fn batch_cmp_eq(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) -> Result<(), Bat
     let mut i = 0;
     while i + LANES * 2 <= n {
         if use_simd {
-            cmp_eq_f64x4::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &mut mask[i..i + LANES]);
-            cmp_eq_f64x4::apply(&lhs[i + LANES..i + LANES * 2], &rhs[i + LANES..i + LANES * 2], &mut mask[i + LANES..i + LANES * 2]);
+            cmp_eq_f64x4::apply(
+                &lhs[i..i + LANES],
+                &rhs[i..i + LANES],
+                &mut mask[i..i + LANES],
+            );
+            cmp_eq_f64x4::apply(
+                &lhs[i + LANES..i + LANES * 2],
+                &rhs[i + LANES..i + LANES * 2],
+                &mut mask[i + LANES..i + LANES * 2],
+            );
         } else {
             #[allow(clippy::float_cmp)]
             for j in 0..LANES * 2 {
@@ -282,7 +645,11 @@ pub fn batch_cmp_eq(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) -> Result<(), Bat
     }
     while i + LANES <= n {
         if use_simd {
-            cmp_eq_f64x4::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &mut mask[i..i + LANES]);
+            cmp_eq_f64x4::apply(
+                &lhs[i..i + LANES],
+                &rhs[i..i + LANES],
+                &mut mask[i..i + LANES],
+            );
         } else {
             #[allow(clippy::float_cmp)]
             for j in 0..LANES {
@@ -369,20 +736,41 @@ pub fn batch_fma(
     while i + LANES * 2 <= n {
         let (o1, o2) = out[i..i + LANES * 2].split_at_mut(LANES);
         if use_simd {
-            fma_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &addend[i..i + LANES], o1);
-            fma_f64x4_avx2::apply(&lhs[i + LANES..i + LANES * 2], &rhs[i + LANES..i + LANES * 2], &addend[i + LANES..i + LANES * 2], o2);
+            fma_f64x4_avx2::apply(
+                &lhs[i..i + LANES],
+                &rhs[i..i + LANES],
+                &addend[i..i + LANES],
+                o1,
+            );
+            fma_f64x4_avx2::apply(
+                &lhs[i + LANES..i + LANES * 2],
+                &rhs[i + LANES..i + LANES * 2],
+                &addend[i + LANES..i + LANES * 2],
+                o2,
+            );
         } else {
-            for j in 0..LANES { o1[j] = lhs[i + j].mul_add(rhs[i + j], addend[i + j]); }
-            for j in 0..LANES { o2[j] = lhs[i + LANES + j].mul_add(rhs[i + LANES + j], addend[i + LANES + j]); }
+            for j in 0..LANES {
+                o1[j] = lhs[i + j].mul_add(rhs[i + j], addend[i + j]);
+            }
+            for j in 0..LANES {
+                o2[j] = lhs[i + LANES + j].mul_add(rhs[i + LANES + j], addend[i + LANES + j]);
+            }
         }
         i += LANES * 2;
     }
     while i + LANES <= n {
         let o = &mut out[i..i + LANES];
         if use_simd {
-            fma_f64x4_avx2::apply(&lhs[i..i + LANES], &rhs[i..i + LANES], &addend[i..i + LANES], o);
+            fma_f64x4_avx2::apply(
+                &lhs[i..i + LANES],
+                &rhs[i..i + LANES],
+                &addend[i..i + LANES],
+                o,
+            );
         } else {
-            for j in 0..LANES { o[j] = lhs[i + j].mul_add(rhs[i + j], addend[i + j]); }
+            for j in 0..LANES {
+                o[j] = lhs[i + j].mul_add(rhs[i + j], addend[i + j]);
+            }
         }
         i += LANES;
     }
@@ -471,8 +859,10 @@ pub fn batch_eval_parallel(
     use std::sync::Arc;
 
     struct SendSync<T>(T);
-    unsafe impl<T: Send> Send for SendSync<T> {}
-    unsafe impl<T: Send> Sync for SendSync<T> {}
+    // SAFETY: The raw pointer is partitioned into disjoint per-row ranges
+    // before distribution to fibers, so concurrent writes never alias.
+    unsafe impl<T> Send for SendSync<T> {}
+    unsafe impl<T> Sync for SendSync<T> {}
 
     let gate = crate::runtime::ensure_runtime();
     let results_ptr: Arc<SendSync<UnsafeCell<*mut f64>>> =
@@ -490,7 +880,12 @@ pub fn batch_eval_parallel(
         handles.push(crate::runtime::spawn_task(gate, move || {
             for i in 0..count {
                 let row = out_offset + i;
-                let vars = unsafe { std::slice::from_raw_parts((var_ptr_send as *const f64).add(row * num_vars), num_vars) };
+                let vars = unsafe {
+                    std::slice::from_raw_parts(
+                        (var_ptr_send as *const f64).add(row * num_vars),
+                        num_vars,
+                    )
+                };
                 let val = func(vars.as_ptr());
                 unsafe {
                     let base = *results_arc.0.get();
@@ -609,6 +1004,63 @@ mod tests {
         let lhs = [1.0_f64, 2.0];
         let rhs = [1.0_f64; 3];
         let mut out = [0.0_f64; 2];
-        assert_eq!(batch_add(&lhs, &rhs, &mut out), Err(BatchError::LengthMismatch));
+        assert_eq!(
+            batch_add(&lhs, &rhs, &mut out),
+            Err(BatchError::LengthMismatch)
+        );
+    }
+
+    #[test]
+    fn batch_sub_matches_scalar() {
+        let lhs: Vec<f64> = (0..27).map(|i| f64::from(i) * 2.0).collect();
+        let rhs: Vec<f64> = (0..27).map(f64::from).collect();
+        let mut result = vec![0.0_f64; 27];
+        batch_sub(&lhs, &rhs, &mut result).expect("ok");
+        for i in 0..27 {
+            assert!((result[i] - f64::from(i as i32)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn batch_div_matches_scalar() {
+        let lhs: Vec<f64> = (1..=27).map(|i| f64::from(i) * 2.0).collect();
+        let rhs = vec![2.0_f64; 27];
+        let mut result = vec![0.0_f64; 27];
+        batch_div(&lhs, &rhs, &mut result).expect("ok");
+        for i in 0..27 {
+            let expected = f64::from((i + 1) as i32);
+            assert!((result[i] - expected).abs() < 1e-12, "i={i}");
+        }
+    }
+
+    #[test]
+    fn batch_sqrt_known_values() {
+        let inp: Vec<f64> = [0.0, 1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0, 64.0].to_vec();
+        let expected: Vec<f64> = (0..9).map(f64::from).collect();
+        let mut result = vec![0.0_f64; inp.len()];
+        batch_sqrt(&inp, &mut result).expect("ok");
+        for i in 0..inp.len() {
+            assert!((result[i] - expected[i]).abs() < 1e-12, "i={i}");
+        }
+    }
+
+    #[test]
+    fn batch_neg_flips_signs() {
+        let inp: Vec<f64> = (0..19).map(|i| f64::from(i) - 9.0).collect();
+        let mut result = vec![0.0_f64; 19];
+        batch_neg(&inp, &mut result).expect("ok");
+        for i in 0..19 {
+            assert!((result[i] + inp[i]).abs() < 1e-12, "i={i}");
+        }
+    }
+
+    #[test]
+    fn batch_abs_removes_sign() {
+        let inp: Vec<f64> = (0..19).map(|i| f64::from(i) - 9.0).collect();
+        let mut result = vec![0.0_f64; 19];
+        batch_abs(&inp, &mut result).expect("ok");
+        for i in 0..19 {
+            assert!((result[i] - inp[i].abs()).abs() < 1e-12, "i={i}");
+        }
     }
 }

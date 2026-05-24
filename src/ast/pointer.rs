@@ -23,8 +23,6 @@
 use core::fmt;
 use core::marker::PhantomData;
 
-
-
 /// A relative pointer representing an offset in a contiguous buffer.
 ///
 /// The offset type `O` is generic; in practice `i32` (the default) is used.
@@ -64,13 +62,18 @@ impl<T, O: std::hash::Hash> std::hash::Hash for RelPtr<T, O> {
 }
 
 impl<T, O: bincode_next::enc::Encode> bincode_next::enc::Encode for RelPtr<T, O> {
-    fn encode<E: bincode_next::enc::Encoder>(&self, encoder: &mut E) -> Result<(), bincode_next::error::EncodeError> {
+    fn encode<E: bincode_next::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> Result<(), bincode_next::error::EncodeError> {
         self.offset.encode(encoder)
     }
 }
 
 impl<T, O: bincode_next::de::Decode<C>, C> bincode_next::de::Decode<C> for RelPtr<T, O> {
-    fn decode<D: bincode_next::de::Decoder<Context = C>>(decoder: &mut D) -> Result<Self, bincode_next::error::DecodeError> {
+    fn decode<D: bincode_next::de::Decoder<Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode_next::error::DecodeError> {
         let offset = O::decode(decoder)?;
         Ok(Self {
             offset,
@@ -79,8 +82,12 @@ impl<T, O: bincode_next::de::Decode<C>, C> bincode_next::de::Decode<C> for RelPt
     }
 }
 
-impl<'de, T, O: bincode_next::de::BorrowDecode<'de, C>, C> bincode_next::de::BorrowDecode<'de, C> for RelPtr<T, O> {
-    fn borrow_decode<D: bincode_next::de::BorrowDecoder<'de, Context = C>>(decoder: &mut D) -> Result<Self, bincode_next::error::DecodeError> {
+impl<'de, T, O: bincode_next::de::BorrowDecode<'de, C>, C> bincode_next::de::BorrowDecode<'de, C>
+    for RelPtr<T, O>
+{
+    fn borrow_decode<D: bincode_next::de::BorrowDecoder<'de, Context = C>>(
+        decoder: &mut D,
+    ) -> Result<Self, bincode_next::error::DecodeError> {
         let offset = O::borrow_decode(decoder)?;
         Ok(Self {
             offset,
@@ -238,7 +245,6 @@ impl<T> RelPtr<T, i32> {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

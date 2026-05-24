@@ -6,7 +6,6 @@
 #![doc(
     html_favicon_url = "https://raw.githubusercontent.com/Apich-Organization/rssn/refs/heads/dev/doc/favicon.ico"
 )]
-
 // -------------------------------------------------------------------------
 // Rust Lint Configuration: rssn-advanced
 // -------------------------------------------------------------------------
@@ -42,16 +41,12 @@
 // -------------------------------------------------------------------------
 // LEVEL 2: STYLE WARNINGS (Warn)
 // -------------------------------------------------------------------------
-#![warn(
-    unsafe_code,
-    clippy::dbg_macro,
-    clippy::todo,
-    clippy::unnecessary_safety_comment
-)]
+#![warn(clippy::dbg_macro, clippy::todo, clippy::unnecessary_safety_comment)]
 // -------------------------------------------------------------------------
 // LEVEL 3: ALLOW/IGNORABLE (Allow)
 // -------------------------------------------------------------------------
 #![allow(
+    unsafe_code,
     clippy::restriction,
     unused_doc_comments,
     clippy::empty_line_after_outer_attr,
@@ -141,6 +136,14 @@ pub mod storage;
 /// simplification when exact methods hit symbol explosion.
 pub mod heuristic;
 
+/// Lightweight E-graph for equality saturation.
+///
+/// Implements equality saturation over the hash-consed DAG without importing
+/// the heavy `egg` crate. Uses a path-compressed union-find directly over
+/// [`dag::node::DagNodeId`] values, and extracts the minimum-cost
+/// representative after each saturation run.
+pub mod egraph;
+
 /// SIMD-optimized preset function library.
 ///
 /// Hardware-accelerated batch operations (arithmetic, hashing) with
@@ -153,3 +156,8 @@ pub mod simd;
 /// types and opaque handles. Includes an async bridge for multi-language
 /// integration.
 pub mod ffi;
+
+#[cfg_attr(miri, ignore)]
+mod readme {
+    #![doc = include_str!("../README.md")]
+}

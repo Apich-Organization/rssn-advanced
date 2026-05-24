@@ -54,7 +54,7 @@ pub struct RssnAsyncHandle {
 /// The returned [`RssnAsyncHandle`] must be freed with [`rssn_async_join`].
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn rssn_dag_simplify_async_v2(
+pub extern "C" fn rssn_dag_simplify_async(
     builder: *mut DagBuilder,
     root: u32,
 ) -> *mut RssnAsyncHandle {
@@ -119,10 +119,7 @@ pub extern "C" fn rssn_dag_simplify_async_v2(
 /// must not be used after this call.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
-pub extern "C" fn rssn_async_join(
-    handle: *mut RssnAsyncHandle,
-    out_root: *mut u32,
-) -> RssnStatus {
+pub extern "C" fn rssn_async_join(handle: *mut RssnAsyncHandle, out_root: *mut u32) -> RssnStatus {
     if handle.is_null() {
         return RssnStatus::NullPointer;
     }

@@ -176,12 +176,8 @@ mod tests {
 
         // Compile with the persistent context.
         let mut fn_ptr: *mut c_void = std::ptr::null_mut();
-        let status = rssn_dag_compile_with_ctx(
-            ctx,
-            builder_ptr,
-            b.arena().len() as u32 - 1,
-            &mut fn_ptr,
-        );
+        let status =
+            rssn_dag_compile_with_ctx(ctx, builder_ptr, b.arena().len() as u32 - 1, &mut fn_ptr);
         assert_eq!(status, RssnStatus::Success);
         assert!(!fn_ptr.is_null());
 
@@ -193,12 +189,7 @@ mod tests {
         let mut b = DagBuilder::new();
         let _ = b.variable("x");
         let mut fn_ptr: *mut c_void = std::ptr::null_mut();
-        let status = rssn_dag_compile_with_ctx(
-            std::ptr::null_mut(),
-            &mut b,
-            0,
-            &mut fn_ptr,
-        );
+        let status = rssn_dag_compile_with_ctx(std::ptr::null_mut(), &mut b, 0, &mut fn_ptr);
         assert_eq!(status, RssnStatus::NullPointer);
     }
 }

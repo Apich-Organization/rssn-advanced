@@ -6,14 +6,14 @@
 //!
 //! Run with: `cargo run --example 03_simd_batch_and_parallel`
 
-use rssn_advanced::simd::{batch_add, batch_mul, has_avx2};
-use rssn_advanced::parallel::permission::SymbolPermissions;
-use rssn_advanced::parallel::splitter::split_commutative_tree;
-use rssn_advanced::parallel::solver::parallel_evaluate;
-use rssn_advanced::parallel::simplify::ThreadLocalState;
 use rssn_advanced::dag::builder::DagBuilder;
 use rssn_advanced::dag::symbol::SymbolId;
+use rssn_advanced::parallel::permission::SymbolPermissions;
+use rssn_advanced::parallel::simplify::ThreadLocalState;
+use rssn_advanced::parallel::solver::parallel_evaluate;
+use rssn_advanced::parallel::splitter::split_commutative_tree;
 use rssn_advanced::parser::parse_expression;
+use rssn_advanced::simd::{batch_add, batch_mul, has_avx2};
 
 fn main() {
     println!("=== RSSN-Advanced Example 03: SIMD & Parallelism ===\n");
@@ -32,20 +32,26 @@ fn main() {
     let mut results_mul = vec![0.0f64; size];
 
     let start_simd = std::time::Instant::now();
-    
+
     // Bounds-checks are fully eliminated, enabling compiler loop auto-vectorization
-    batch_add(&lhs, &rhs, &mut results_add);
-    batch_mul(&lhs, &rhs, &mut results_mul);
-    
+    let _ = batch_add(&lhs, &rhs, &mut results_add);
+    let _ = batch_mul(&lhs, &rhs, &mut results_mul);
+
     let duration_simd = start_simd.elapsed();
     println!("Batch arithmetic completed in {:?}!", duration_simd);
-    println!("  Verification: Add Result[0] = {:.2} (Expected: 6.50)", results_add[0]);
-    println!("  Verification: Mul Result[0] = {:.2} (Expected: 10.00)\n", results_mul[0]);
+    println!(
+        "  Verification: Add Result[0] = {:.2} (Expected: 6.50)",
+        results_add[0]
+    );
+    println!(
+        "  Verification: Mul Result[0] = {:.2} (Expected: 10.00)\n",
+        results_mul[0]
+    );
 
     // 3. Parallel Tree Splitting & Commutativity Permissions
     println!("Initializing commutativity permissions for symbolic variables...");
     let mut builder = DagBuilder::new();
-    
+
     // Build addition tree: x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7
     let root = parse_expression("x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7", &mut builder)
         .expect("Failed to parse expression");
@@ -64,7 +70,7 @@ fn main() {
     // Define inputs: x0 = 1.0, x1 = 2.0, x2 = 3.0, ..., x7 = 8.0
     let variables = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     println!("Evaluating partitions in parallel...");
-    
+
     let start_parallel = std::time::Instant::now();
     let total_sum = parallel_evaluate(builder.arena(), chunks, &variables);
     let duration_parallel = start_parallel.elapsed();

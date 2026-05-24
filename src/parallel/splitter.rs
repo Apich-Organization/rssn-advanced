@@ -3,10 +3,10 @@
 //! Walks the DAG to collect commutative chains of additions,
 //! then partitions them into N independent chunks for parallel evaluation.
 
+use super::permission::SymbolPermissions;
 use crate::dag::arena::DagArena;
 use crate::dag::node::DagNodeId;
 use crate::dag::symbol::{OpKind, SymbolKind};
-use super::permission::SymbolPermissions;
 
 /// Collects all leaves of a commutative addition chain.
 ///

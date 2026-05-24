@@ -2,14 +2,14 @@
 
 #[cfg(test)]
 mod simd_ffi_tests {
+    use rssn_advanced::ffi::{
+        RssnStatus, rssn_async_join, rssn_dag_add, rssn_dag_compile, rssn_dag_constant,
+        rssn_dag_execute, rssn_dag_free, rssn_dag_new, rssn_dag_simplify, rssn_dag_simplify_async,
+        rssn_dag_variable,
+    };
+    use rssn_advanced::simd::{batch_add, batch_add_scalar, batch_hash, batch_mul, has_avx2};
     use std::ffi::CString;
     use std::os::raw::c_void;
-    use rssn_advanced::simd::{batch_add, batch_add_scalar, batch_hash, batch_mul, has_avx2};
-    use rssn_advanced::ffi::{
-        rssn_async_join, rssn_dag_add, rssn_dag_compile, rssn_dag_constant, rssn_dag_execute,
-        rssn_dag_free, rssn_dag_new, rssn_dag_simplify, rssn_dag_simplify_async_v2,
-        rssn_dag_variable, RssnStatus,
-    };
 
     #[test]
     fn test_simd_arithmetic_and_hashing() {
@@ -85,12 +85,12 @@ mod simd_ffi_tests {
         let y = rssn_dag_constant(builder, 4.0);
         let expr = rssn_dag_add(builder, x, y);
 
-        // Use v2 joinable handle — no callback, no use-after-free hazard.
-        let handle = unsafe { rssn_dag_simplify_async_v2(builder, expr) };
+        // Use joinable handle — no callback, no use-after-free hazard.
+        let handle = rssn_dag_simplify_async(builder, expr);
         assert!(!handle.is_null());
 
         let mut out_root: u32 = u32::MAX;
-        let status = unsafe { rssn_async_join(handle, &mut out_root) };
+        let status = rssn_async_join(handle, &mut out_root);
 
         assert_eq!(status, RssnStatus::Success);
         assert_ne!(out_root, u32::MAX);

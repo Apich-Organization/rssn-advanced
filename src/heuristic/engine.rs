@@ -22,6 +22,7 @@ use super::strategy::SearchStrategy;
 use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
 use crate::dag::symbol::SymbolKind;
+use crate::egraph::EGraph;
 
 /// Each frame remembers a cursor over its source children. Once `cursor
 /// == arity` the rewritten children are popped off the value stack and
@@ -89,7 +90,21 @@ impl HeuristicEngine {
         };
 
         // 2. Iterative pattern-matched rewrite.
-        self.rewrite_iterative(builder, pre, start_time)
+        let after_heuristic = self.rewrite_iterative(builder, pre, start_time);
+
+        // 3. Optional E-graph equality-saturation post-pass.
+        if self.config.use_egraph {
+            self.run_egraph_pass(builder, after_heuristic)
+        } else {
+            after_heuristic
+        }
+    }
+
+    /// Runs the E-graph equality saturation + extraction pass.
+    fn run_egraph_pass(&self, builder: &mut DagBuilder, root: DagNodeId) -> DagNodeId {
+        let mut eg = EGraph::new(builder, self.config.egraph_config);
+        eg.saturate(root);
+        eg.extract(root)
     }
 
     fn rewrite_iterative(
@@ -169,7 +184,10 @@ impl HeuristicEngine {
                 // canonical in a previous or current simplify call, recurse is
                 // unnecessary — push it directly onto the value stack.
                 let is_canonical = self.canonical_cache.contains(&child_id)
-                    || builder.arena().get(child_id).is_some_and(|n| n.meta.flags.is_canonical());
+                    || builder
+                        .arena()
+                        .get(child_id)
+                        .is_some_and(|n| n.meta.flags.is_canonical());
                 if is_canonical {
                     values.push(child_id);
                     continue;
@@ -188,7 +206,13 @@ impl HeuristicEngine {
                 // Borrow the children as a slice instead of collecting into
                 // a Vec — avoids a heap allocation per node. NLL guarantees
                 // the immutable borrow ends before `truncate`.
-                let rebuilt = rebuild_or_match(&self.rule_registry, builder, frame.kind, &values[split_at..], frame.node_id);
+                let rebuilt = rebuild_or_match(
+                    &self.rule_registry,
+                    builder,
+                    frame.kind,
+                    &values[split_at..],
+                    frame.node_id,
+                );
                 values.truncate(split_at);
                 self.canonical_cache.insert(rebuilt);
                 // Persist the canonical state in the arena node itself so other
@@ -283,8 +307,7 @@ mod tests {
         }
         let pre_size = b.arena().len();
 
-        let mut engine =
-            HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
+        let mut engine = HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
         let out = engine.simplify(&mut b, acc);
 
         let post_size = b.arena().len();
@@ -315,8 +338,7 @@ mod tests {
         let zero = b.constant(0.0);
         let expr = b.add(x, zero);
 
-        let mut engine =
-            HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
+        let mut engine = HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
         let result = engine.simplify(&mut b, expr);
 
         // After folding `x + 0 → x`, the result must be `x` itself.
@@ -333,8 +355,7 @@ mod tests {
         let inner = b.add(x, zero);
         let outer = b.mul(inner, one);
 
-        let mut engine =
-            HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
+        let mut engine = HeuristicEngine::new(HeuristicConfig::default(), SearchStrategy::Greedy);
         let result = engine.simplify(&mut b, outer);
         assert_eq!(
             result, x,

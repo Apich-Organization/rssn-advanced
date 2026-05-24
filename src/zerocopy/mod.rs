@@ -338,8 +338,7 @@ pub fn decode_zerocopy_raw<'a, T>(bytes: &'a [u8]) -> Result<T, DecodeError>
 where
     T: BorrowDecode<'a, ()>,
 {
-    let (value, _read) =
-        bincode_next::borrow_decode_from_slice(bytes, zerocopy_config())?;
+    let (value, _read) = bincode_next::borrow_decode_from_slice(bytes, zerocopy_config())?;
     Ok(value)
 }
 
@@ -399,9 +398,11 @@ impl<T: Pod> Encode for BorrowedSlice<'_, T> {
             .inner
             .len()
             .checked_mul(core::mem::size_of::<T>())
-            .ok_or_else(|| EncodeError::OtherString(alloc::string::String::from(
-                "BorrowedSlice: byte length overflowed usize",
-            )))?;
+            .ok_or_else(|| {
+                EncodeError::OtherString(alloc::string::String::from(
+                    "BorrowedSlice: byte length overflowed usize",
+                ))
+            })?;
         // SAFETY: `T: Pod` guarantees every bit pattern is valid and there
         // are no padding bytes; the resulting byte slice fully describes
         // the original elements.
@@ -541,8 +542,10 @@ mod tests {
         let buf_direct = encode_zerocopy_direct(view).expect("direct encode");
 
         // Both should decode to the same data.
-        let decoded_indirect: BorrowedSlice<'_, u32> = decode_zerocopy(&buf_indirect).expect("decode indirect");
-        let decoded_direct: BorrowedSlice<'_, u32> = decode_zerocopy(&buf_direct).expect("decode direct");
+        let decoded_indirect: BorrowedSlice<'_, u32> =
+            decode_zerocopy(&buf_indirect).expect("decode indirect");
+        let decoded_direct: BorrowedSlice<'_, u32> =
+            decode_zerocopy(&buf_direct).expect("decode direct");
         assert_eq!(decoded_indirect.as_slice(), decoded_direct.as_slice());
         assert_eq!(decoded_direct.as_slice(), data.as_slice());
         // Direct encoding must be 8-byte aligned.

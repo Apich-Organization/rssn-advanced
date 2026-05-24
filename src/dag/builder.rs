@@ -112,14 +112,8 @@ impl DagBuilder {
         let hash = DedupMap::hash_operator(&kind, &children);
         let flags = NodeFlags::commutative_associative();
 
-        self.dedup.get_or_insert(
-            &mut self.arena,
-            kind,
-            hash,
-            children,
-            1.0,
-            flags,
-        )
+        self.dedup
+            .get_or_insert(&mut self.arena, kind, hash, children, 1.0, flags)
     }
 
     /// Constructs a subtraction node: `left - right`.
@@ -128,14 +122,8 @@ impl DagBuilder {
         let children = ChildList::from_slice(&[left, right]);
         let hash = DedupMap::hash_operator(&kind, &children);
 
-        self.dedup.get_or_insert(
-            &mut self.arena,
-            kind,
-            hash,
-            children,
-            1.0,
-            NodeFlags::EMPTY,
-        )
+        self.dedup
+            .get_or_insert(&mut self.arena, kind, hash, children, 1.0, NodeFlags::EMPTY)
     }
 
     /// Constructs a multiplication node: `left * right`.
@@ -145,14 +133,8 @@ impl DagBuilder {
         let hash = DedupMap::hash_operator(&kind, &children);
         let flags = NodeFlags::commutative_associative();
 
-        self.dedup.get_or_insert(
-            &mut self.arena,
-            kind,
-            hash,
-            children,
-            1.0,
-            flags,
-        )
+        self.dedup
+            .get_or_insert(&mut self.arena, kind, hash, children, 1.0, flags)
     }
 
     /// Constructs a division node: `left / right`.
@@ -161,14 +143,8 @@ impl DagBuilder {
         let children = ChildList::from_slice(&[left, right]);
         let hash = DedupMap::hash_operator(&kind, &children);
 
-        self.dedup.get_or_insert(
-            &mut self.arena,
-            kind,
-            hash,
-            children,
-            1.0,
-            NodeFlags::EMPTY,
-        )
+        self.dedup
+            .get_or_insert(&mut self.arena, kind, hash, children, 1.0, NodeFlags::EMPTY)
     }
 
     /// Constructs an exponentiation node: `left ^ right`.
@@ -177,14 +153,8 @@ impl DagBuilder {
         let children = ChildList::from_slice(&[left, right]);
         let hash = DedupMap::hash_operator(&kind, &children);
 
-        self.dedup.get_or_insert(
-            &mut self.arena,
-            kind,
-            hash,
-            children,
-            1.0,
-            NodeFlags::EMPTY,
-        )
+        self.dedup
+            .get_or_insert(&mut self.arena, kind, hash, children, 1.0, NodeFlags::EMPTY)
     }
 
     /// Constructs a floating-point remainder node: `left % right`.
@@ -196,14 +166,8 @@ impl DagBuilder {
         let children = ChildList::from_slice(&[left, right]);
         let hash = DedupMap::hash_operator(&kind, &children);
 
-        self.dedup.get_or_insert(
-            &mut self.arena,
-            kind,
-            hash,
-            children,
-            1.0,
-            NodeFlags::EMPTY,
-        )
+        self.dedup
+            .get_or_insert(&mut self.arena, kind, hash, children, 1.0, NodeFlags::EMPTY)
     }
 
     /// Constructs a unary negation node: `-operand`.
@@ -212,14 +176,8 @@ impl DagBuilder {
         let children = ChildList::from_slice(&[operand]);
         let hash = DedupMap::hash_operator(&kind, &children);
 
-        self.dedup.get_or_insert(
-            &mut self.arena,
-            kind,
-            hash,
-            children,
-            1.0,
-            NodeFlags::EMPTY,
-        )
+        self.dedup
+            .get_or_insert(&mut self.arena, kind, hash, children, 1.0, NodeFlags::EMPTY)
     }
 
     /// Interns a function name and returns its [`FnId`].
@@ -247,18 +205,17 @@ impl DagBuilder {
     }
 
     /// Constructs an arbitrary custom operator or function node.
-    pub fn operator(&mut self, kind: SymbolKind, children: &[DagNodeId], flags: NodeFlags) -> DagNodeId {
+    pub fn operator(
+        &mut self,
+        kind: SymbolKind,
+        children: &[DagNodeId],
+        flags: NodeFlags,
+    ) -> DagNodeId {
         let children_list = ChildList::from_slice(children);
         let hash = DedupMap::hash_operator(&kind, &children_list);
 
-        self.dedup.get_or_insert(
-            &mut self.arena,
-            kind,
-            hash,
-            children_list,
-            1.0,
-            flags,
-        )
+        self.dedup
+            .get_or_insert(&mut self.arena, kind, hash, children_list, 1.0, flags)
     }
 
     /// Resets the builder to a completely fresh state.
@@ -267,6 +224,126 @@ impl DagBuilder {
         self.dedup.clear();
         self.registry = SymbolRegistry::new();
         self.fn_registry = SymbolRegistry::new();
+    }
+
+    /// Returns the number of nodes currently in the arena.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.arena.len()
+    }
+
+    /// Returns `true` if the arena contains no nodes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.arena.is_empty()
+    }
+
+    /// Returns a snapshot of the arena in the 32-byte packed format.
+    ///
+    /// This is the primary bridge to the packed wire representation:
+    /// the returned [`super::packed::PackedArenaImage`] can be encoded
+    /// for disk storage, shipped across an FFI boundary as a contiguous
+    /// byte buffer, or iterated cache-efficiently for batch operations.
+    ///
+    /// The snapshot is a *copy* — subsequent mutations to the builder do
+    /// not affect it. For a live zero-copy view, encode then decode via
+    /// `BorrowedArenaView`.
+    #[must_use]
+    pub fn packed_snapshot(&self) -> super::packed::PackedArenaImage {
+        super::packed::PackedArenaImage::from_arena(&self.arena)
+    }
+
+    /// Iterates all nodes in ID order, calling `f(id, &node)` for each.
+    ///
+    /// Uses the arena's contiguous storage for cache-friendly sequential
+    /// access. Equivalent to iterating `0..node_count()` and calling
+    /// `arena().get(DagNodeId(i))`, but avoids repeated bounds checks.
+    pub fn for_each_node<F>(&self, mut f: F)
+    where
+        F: FnMut(DagNodeId, &super::node::DagNode),
+    {
+        for i in 0..self.arena.len() {
+            let id = DagNodeId(i as u32);
+            if let Some(node) = self.arena.get(id) {
+                f(id, node);
+            }
+        }
+    }
+
+    /// Parses a textual expression and inserts it into this builder's DAG.
+    ///
+    /// This is a convenience wrapper around [`crate::parser::parse_expression`].
+    /// It avoids the need to import the parser separately for simple use cases.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`crate::parser::error::ParseError`] if the expression is
+    /// syntactically invalid or if the paren depth is exceeded.
+    pub fn parse(
+        &mut self,
+        expr: &str,
+    ) -> Result<super::node::DagNodeId, crate::parser::error::ParseError> {
+        crate::parser::expr::parse_expression(expr, self)
+    }
+
+    /// Constructs the sum of all nodes in `terms`.
+    ///
+    /// Returns the single node if `terms` has exactly one element, or
+    /// constructs a left-associative addition tree otherwise.
+    ///
+    /// Returns `None` if `terms` is empty.
+    #[must_use]
+    pub fn add_many(&mut self, terms: &[super::node::DagNodeId]) -> Option<super::node::DagNodeId> {
+        let mut iter = terms.iter().copied();
+        let first = iter.next()?;
+        Some(iter.fold(first, |acc, t| self.add(acc, t)))
+    }
+
+    /// Constructs the product of all nodes in `factors`.
+    ///
+    /// Returns the single node if `factors` has exactly one element, or
+    /// constructs a left-associative multiplication tree otherwise.
+    ///
+    /// Returns `None` if `factors` is empty.
+    #[must_use]
+    pub fn mul_many(
+        &mut self,
+        factors: &[super::node::DagNodeId],
+    ) -> Option<super::node::DagNodeId> {
+        let mut iter = factors.iter().copied();
+        let first = iter.next()?;
+        Some(iter.fold(first, |acc, f| self.mul(acc, f)))
+    }
+
+    /// Constructs `base^2` (one multiplication, no `powf` call).
+    ///
+    /// Equivalent to `self.mul(base, base)` but communicates intent more
+    /// clearly at the call site.
+    pub fn square(&mut self, base: super::node::DagNodeId) -> super::node::DagNodeId {
+        self.mul(base, base)
+    }
+
+    /// Constructs `-(lhs - rhs)` = `rhs - lhs` without an extra negation node.
+    pub fn sub_rev(
+        &mut self,
+        lhs: super::node::DagNodeId,
+        rhs: super::node::DagNodeId,
+    ) -> super::node::DagNodeId {
+        self.sub(rhs, lhs)
+    }
+
+    /// Returns the `SymbolId` of a variable, if it has already been interned.
+    ///
+    /// Unlike [`Self::variable`] this does NOT create a new node or intern the name.
+    #[must_use]
+    pub fn lookup_variable(&self, name: &str) -> Option<super::symbol::SymbolId> {
+        self.registry.lookup(name)
+    }
+
+    /// Returns the `FnId` of a function, if it has already been interned.
+    #[must_use]
+    pub fn lookup_function(&self, name: &str) -> Option<super::symbol::FnId> {
+        self.fn_registry.lookup(name).map(|sid| FnId(sid.0))
     }
 }
 
@@ -286,7 +363,10 @@ mod tests {
         // Build: x + y again
         let expr2 = builder.add(x, y);
 
-        assert_eq!(expr1, expr2, "Structural deduplication failed for operators");
+        assert_eq!(
+            expr1, expr2,
+            "Structural deduplication failed for operators"
+        );
 
         // Build: x * 2.0
         let c = builder.constant(2.0);

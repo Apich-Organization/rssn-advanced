@@ -39,4 +39,8 @@ pub enum RssnStatus {
     SimdLengthMismatch = 12,
     /// A node was constructed with the wrong number of children for its operator.
     InvalidArity = 13,
+    /// A node descriptor referenced an invalid kind or out-of-range child index.
+    InvalidNode = 14,
+    /// A caller-provided output buffer was too small to hold the result.
+    BufferTooSmall = 15,
 }

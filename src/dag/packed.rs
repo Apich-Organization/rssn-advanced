@@ -53,8 +53,8 @@ use crate::dag::arena::DagArena;
 use crate::dag::metadata::{NodeFlags, NodeHash, NodeMetadata};
 use crate::dag::node::{ChildList, DagNode, DagNodeId};
 use crate::dag::symbol::{FnId, OpKind, SymbolId, SymbolKind};
-use bincode_next::enc::write::Writer as BincodeWriter;
 use crate::zerocopy::{AlignedBytes, BorrowedSlice, Pod, decode_zerocopy, encode_zerocopy};
+use bincode_next::enc::write::Writer as BincodeWriter;
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -322,7 +322,11 @@ impl PackedArenaImage {
                     .map_err(|e| EncodeError::OtherString(alloc::format!("I/O error: {e}")))
             }
         }
-        bincode_next::encode_into_writer(view, &mut IoWriter(writer), crate::zerocopy::zerocopy_config())
+        bincode_next::encode_into_writer(
+            view,
+            &mut IoWriter(writer),
+            crate::zerocopy::zerocopy_config(),
+        )
     }
 }
 
@@ -561,9 +565,7 @@ impl<'a> BorrowedArenaView<'a> {
             let kids: Vec<DagNodeId> = self.children(packed).iter().collect();
             let children = ChildList::from_slice(&kids);
             let node = match kind {
-                SymbolKind::Constant(val) => {
-                    DagNode::constant(val, meta)
-                }
+                SymbolKind::Constant(val) => DagNode::constant(val, meta),
                 SymbolKind::Variable(_) => DagNode::variable(kind, meta),
                 SymbolKind::Operator(_) | SymbolKind::Function(_) => {
                     DagNode::operator(kind, meta, children)
@@ -728,7 +730,11 @@ mod tests {
             let packed = view.get(id).expect("packed node");
             assert_eq!(packed.kind(), Some(original.kind), "kind mismatch at {i}");
             // For constant nodes, value is encoded in the kind itself.
-            let orig_value = if let SymbolKind::Constant(v) = original.kind { Some(v) } else { None };
+            let orig_value = if let SymbolKind::Constant(v) = original.kind {
+                Some(v)
+            } else {
+                None
+            };
             assert_eq!(packed.value(), orig_value, "value mismatch at {i}");
             assert_eq!(packed.meta().hash, original.meta.hash);
             assert_eq!(packed.arity as usize, original.children.len());

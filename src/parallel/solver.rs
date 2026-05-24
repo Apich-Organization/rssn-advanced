@@ -41,7 +41,9 @@ impl FnEvalRegistry {
     /// Creates an empty registry.
     #[must_use]
     pub fn new() -> Self {
-        Self { fns: std::collections::HashMap::new() }
+        Self {
+            fns: std::collections::HashMap::new(),
+        }
     }
 
     /// Registers a function callback for `fn_id`.
@@ -68,7 +70,11 @@ pub struct OpEvalRegistry {
 impl OpEvalRegistry {
     /// Creates an empty registry.
     #[must_use]
-    pub fn new() -> Self { Self { overrides: std::collections::HashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            overrides: std::collections::HashMap::new(),
+        }
+    }
 
     /// Registers a custom evaluation function for `op`.
     pub fn register(&mut self, op: crate::dag::symbol::OpKind, f: fn(&[f64]) -> f64) {
@@ -103,7 +109,11 @@ pub fn evaluate_node_with_overrides(
     let mut values: Vec<f64> = Vec::with_capacity(64);
 
     let root_arity = arena.get(id).map_or(0, |n| n.children.len());
-    stack.push(Frame { id, arity: root_arity, cursor: 0 });
+    stack.push(Frame {
+        id,
+        arity: root_arity,
+        cursor: 0,
+    });
 
     while let Some(top) = stack.last_mut() {
         let next_child: Option<DagNodeId> = arena.get(top.id).and_then(|node| {
@@ -114,10 +124,22 @@ pub fn evaluate_node_with_overrides(
         if let Some(child_id) = next_child {
             top.cursor += 1;
             let child_arity = arena.get(child_id).map_or(0, |c| c.children.len());
-            stack.push(Frame { id: child_id, arity: child_arity, cursor: 0 });
+            stack.push(Frame {
+                id: child_id,
+                arity: child_arity,
+                cursor: 0,
+            });
         } else {
             let Some(frame) = stack.pop() else { break };
-            let v = reduce_frame_with_overrides(arena, frame.id, frame.arity, &mut values, vars, fn_registry, op_registry);
+            let v = reduce_frame_with_overrides(
+                arena,
+                frame.id,
+                frame.arity,
+                &mut values,
+                vars,
+                fn_registry,
+                op_registry,
+            );
             values.push(v);
         }
     }
@@ -166,11 +188,7 @@ fn reduce_frame_with_overrides(
 /// `arena.clone()` here. For callers that only have a borrow, this
 /// wraps once and dispatches.
 #[must_use]
-pub fn parallel_evaluate(
-    arena: &DagArena,
-    chunks: Vec<Vec<DagNodeId>>,
-    variables: &[f64],
-) -> f64 {
+pub fn parallel_evaluate(arena: &DagArena, chunks: Vec<Vec<DagNodeId>>, variables: &[f64]) -> f64 {
     let arc = Arc::new(arena.clone());
     parallel_evaluate_shared(&arc, chunks, variables)
 }
@@ -331,7 +349,11 @@ pub fn evaluate_node_with_fns(
     let mut values: Vec<f64> = Vec::with_capacity(64);
 
     let root_arity = arena.get(id).map_or(0, |n| n.children.len());
-    stack.push(Frame { id, arity: root_arity, cursor: 0 });
+    stack.push(Frame {
+        id,
+        arity: root_arity,
+        cursor: 0,
+    });
 
     while let Some(top) = stack.last_mut() {
         let next_child: Option<DagNodeId> = arena.get(top.id).and_then(|node| {
@@ -342,10 +364,15 @@ pub fn evaluate_node_with_fns(
         if let Some(child_id) = next_child {
             top.cursor += 1;
             let child_arity = arena.get(child_id).map_or(0, |c| c.children.len());
-            stack.push(Frame { id: child_id, arity: child_arity, cursor: 0 });
+            stack.push(Frame {
+                id: child_id,
+                arity: child_arity,
+                cursor: 0,
+            });
         } else {
             let Some(frame) = stack.pop() else { break };
-            let v = reduce_frame_with_fns(arena, frame.id, frame.arity, &mut values, vars, registry);
+            let v =
+                reduce_frame_with_fns(arena, frame.id, frame.arity, &mut values, vars, registry);
             values.push(v);
         }
     }

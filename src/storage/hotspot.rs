@@ -77,9 +77,7 @@ impl DynamicHotspotTable {
         let array: Box<[Shard; NUM_SHARDS]> = shards
             .into_boxed_slice()
             .try_into()
-            .unwrap_or_else(|_| {
-                unreachable!("Vec length is exactly NUM_SHARDS by construction")
-            });
+            .unwrap_or_else(|_| unreachable!("Vec length is exactly NUM_SHARDS by construction"));
         Self { shards: array }
     }
 

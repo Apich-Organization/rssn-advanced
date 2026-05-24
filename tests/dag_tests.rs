@@ -16,19 +16,26 @@ mod dag_tests {
         // - 1 node for operator "+" (x + y)
         // - 1 node for operator "*" ((x + y) * (x + y))
         // Total nodes: 4!
-        
+
         let x = builder.variable("x");
         let y = builder.variable("y");
-        
+
         let add1 = builder.add(x, y);
         let add2 = builder.add(x, y);
-        
-        assert_eq!(add1, add2, "Identical additions must be deduplicated to the exact same DagNodeId");
+
+        assert_eq!(
+            add1, add2,
+            "Identical additions must be deduplicated to the exact same DagNodeId"
+        );
 
         let expr = builder.mul(add1, add2);
 
         // Verify total node count in the arena is exactly 4
-        assert_eq!(builder.arena().len(), 4, "DAG did not achieve perfect structural sharing!");
+        assert_eq!(
+            builder.arena().len(),
+            4,
+            "DAG did not achieve perfect structural sharing!"
+        );
 
         // Retrieve nodes and verify structure
         let mul_node = builder.arena().get(expr).unwrap();
@@ -64,7 +71,11 @@ mod dag_tests {
         let negation = builder.neg(power);
         let division = builder.div(negation, c);
 
-        assert_eq!(builder.arena().len(), 8, "Expected exactly 8 nodes in the arena");
+        assert_eq!(
+            builder.arena().len(),
+            8,
+            "Expected exactly 8 nodes in the arena"
+        );
 
         // Verify root node properties
         let root = builder.arena().get(division).unwrap();

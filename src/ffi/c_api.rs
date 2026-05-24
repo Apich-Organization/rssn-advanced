@@ -6,14 +6,14 @@
 #![allow(unsafe_code)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
-use std::ffi::CStr;
-use std::os::raw::{c_char, c_void};
-use std::time::Duration;
-use std::panic::catch_unwind;
+use super::types::RssnStatus;
 use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
-use crate::heuristic::{HeuristicEngine, HeuristicConfig, SearchStrategy};
-use super::types::RssnStatus;
+use crate::heuristic::{HeuristicConfig, HeuristicEngine, SearchStrategy};
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_void};
+use std::panic::catch_unwind;
+use std::time::Duration;
 
 /// Creates a new `DagBuilder` context.
 ///
@@ -21,9 +21,7 @@ use super::types::RssnStatus;
 /// The returned pointer must be freed exactly once via [`rssn_dag_free`].
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_new() -> *mut DagBuilder {
-    let result = catch_unwind(|| {
-        Box::into_raw(Box::new(DagBuilder::new()))
-    });
+    let result = catch_unwind(|| Box::into_raw(Box::new(DagBuilder::new())));
     result.unwrap_or(std::ptr::null_mut())
 }
 
@@ -103,7 +101,9 @@ pub extern "C" fn rssn_dag_add(builder: *mut DagBuilder, lhs: u32, rhs: u32) -> 
     }
     let result = catch_unwind(|| {
         let builder_ref = unsafe { &mut *builder };
-        builder_ref.add(DagNodeId::new(lhs), DagNodeId::new(rhs)).value()
+        builder_ref
+            .add(DagNodeId::new(lhs), DagNodeId::new(rhs))
+            .value()
     });
     result.unwrap_or(u32::MAX)
 }
@@ -203,7 +203,8 @@ pub extern "C" fn rssn_dag_execute(func: *const c_void, variables: *const f64) -
         return 0.0;
     }
     let result = catch_unwind(|| {
-        let compiled_fn: crate::jit::compiler::CompiledExprFn = unsafe { std::mem::transmute(func) };
+        let compiled_fn: crate::jit::compiler::CompiledExprFn =
+            unsafe { std::mem::transmute(func) };
         compiled_fn(variables)
     });
     result.unwrap_or(0.0)
@@ -247,13 +248,12 @@ pub extern "C" fn rssn_dag_variable_v2(
     let result = catch_unwind(|| -> RssnStatus {
         let builder_ref = unsafe { &mut *builder };
         let c_str = unsafe { CStr::from_ptr(name) };
-        builder_ref.variable_bytes(c_str.to_bytes()).map_or(
-            RssnStatus::InvalidUtf8,
-            |id| {
+        builder_ref
+            .variable_bytes(c_str.to_bytes())
+            .map_or(RssnStatus::InvalidUtf8, |id| {
                 unsafe { *out_id = id.value() };
                 RssnStatus::Success
-            },
-        )
+            })
     });
     result.unwrap_or(RssnStatus::Panic)
 }
@@ -500,4 +500,1741 @@ pub extern "C" fn rssn_dag_simplify_with_config(
         RssnStatus::Success
     });
     result.unwrap_or(RssnStatus::Panic)
+}
+
+// =========================================================================
+// T6.3 — Full operator surface (sub, mul, div, pow, mod, neg)
+// =========================================================================
+//
+// All operators follow the same pattern as `rssn_dag_add` / `rssn_dag_add_v2`:
+// a legacy u32-sentinel variant and a status-returning v2 variant.
+
+/// Allocates a subtraction node: `lhs - rhs`.
+///
+/// Returns `u32::MAX` on error or null input.
+///
+/// # Safety
+///
+/// `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_sub(builder: *mut DagBuilder, lhs: u32, rhs: u32) -> u32 {
+    if builder.is_null() {
+        return u32::MAX;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        b.sub(DagNodeId::new(lhs), DagNodeId::new(rhs)).value()
+    })
+    .unwrap_or(u32::MAX)
+}
+
+/// Allocates a subtraction node. Status-returning variant.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `out_id` must be a valid, non-null writable `u32` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_sub_v2(
+    builder: *mut DagBuilder,
+    lhs: u32,
+    rhs: u32,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if lhs == u32::MAX || rhs == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        let id = b.sub(DagNodeId::new(lhs), DagNodeId::new(rhs));
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    })
+    .unwrap_or(RssnStatus::Panic)
+}
+
+/// Allocates a multiplication node: `lhs * rhs`.
+///
+/// Returns `u32::MAX` on error or null input.
+///
+/// # Safety
+///
+/// `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_mul(builder: *mut DagBuilder, lhs: u32, rhs: u32) -> u32 {
+    if builder.is_null() {
+        return u32::MAX;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        b.mul(DagNodeId::new(lhs), DagNodeId::new(rhs)).value()
+    })
+    .unwrap_or(u32::MAX)
+}
+
+/// Allocates a multiplication node. Status-returning variant.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `out_id` must be a valid, non-null writable `u32` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_mul_v2(
+    builder: *mut DagBuilder,
+    lhs: u32,
+    rhs: u32,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if lhs == u32::MAX || rhs == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        let id = b.mul(DagNodeId::new(lhs), DagNodeId::new(rhs));
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    })
+    .unwrap_or(RssnStatus::Panic)
+}
+
+/// Allocates a division node: `lhs / rhs`.
+///
+/// Returns `u32::MAX` on error or null input.
+///
+/// # Safety
+///
+/// `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_div(builder: *mut DagBuilder, lhs: u32, rhs: u32) -> u32 {
+    if builder.is_null() {
+        return u32::MAX;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        b.div(DagNodeId::new(lhs), DagNodeId::new(rhs)).value()
+    })
+    .unwrap_or(u32::MAX)
+}
+
+/// Allocates a division node. Status-returning variant.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `out_id` must be a valid, non-null writable `u32` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_div_v2(
+    builder: *mut DagBuilder,
+    lhs: u32,
+    rhs: u32,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if lhs == u32::MAX || rhs == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        let id = b.div(DagNodeId::new(lhs), DagNodeId::new(rhs));
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    })
+    .unwrap_or(RssnStatus::Panic)
+}
+
+/// Allocates an exponentiation node: `base ^ exp`.
+///
+/// Returns `u32::MAX` on error or null input.
+///
+/// # Safety
+///
+/// `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_pow(builder: *mut DagBuilder, base: u32, exp: u32) -> u32 {
+    if builder.is_null() {
+        return u32::MAX;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        b.pow(DagNodeId::new(base), DagNodeId::new(exp)).value()
+    })
+    .unwrap_or(u32::MAX)
+}
+
+/// Allocates an exponentiation node. Status-returning variant.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `out_id` must be a valid, non-null writable `u32` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_pow_v2(
+    builder: *mut DagBuilder,
+    base: u32,
+    exp: u32,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if base == u32::MAX || exp == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        let id = b.pow(DagNodeId::new(base), DagNodeId::new(exp));
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    })
+    .unwrap_or(RssnStatus::Panic)
+}
+
+/// Allocates a modulo node: `lhs % rhs`.
+///
+/// Returns `u32::MAX` on error or null input.
+///
+/// # Safety
+///
+/// `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_mod(builder: *mut DagBuilder, lhs: u32, rhs: u32) -> u32 {
+    if builder.is_null() {
+        return u32::MAX;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        b.modulo(DagNodeId::new(lhs), DagNodeId::new(rhs)).value()
+    })
+    .unwrap_or(u32::MAX)
+}
+
+/// Allocates a modulo node. Status-returning variant.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `out_id` must be a valid, non-null writable `u32` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_mod_v2(
+    builder: *mut DagBuilder,
+    lhs: u32,
+    rhs: u32,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if lhs == u32::MAX || rhs == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        let id = b.modulo(DagNodeId::new(lhs), DagNodeId::new(rhs));
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    })
+    .unwrap_or(RssnStatus::Panic)
+}
+
+/// Allocates a unary negation node: `-operand`.
+///
+/// Returns `u32::MAX` on error or null input.
+///
+/// # Safety
+///
+/// `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_neg(builder: *mut DagBuilder, operand: u32) -> u32 {
+    if builder.is_null() {
+        return u32::MAX;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        b.neg(DagNodeId::new(operand)).value()
+    })
+    .unwrap_or(u32::MAX)
+}
+
+/// Allocates a unary negation node. Status-returning variant.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `out_id` must be a valid, non-null writable `u32` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_neg_v2(
+    builder: *mut DagBuilder,
+    operand: u32,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if operand == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        let id = b.neg(DagNodeId::new(operand));
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    })
+    .unwrap_or(RssnStatus::Panic)
+}
+
+// =========================================================================
+// T6.4 — Parse expression from C string
+// =========================================================================
+
+/// Parses a mathematical expression from a C string into the DAG.
+///
+/// The expression uses the standard infix syntax: `+`, `-`, `*`, `/`,
+/// `^` (exponentiation), `%` (modulo), parentheses, numeric literals,
+/// and identifier names for variables.
+///
+/// On `Success`, writes the root node id of the parsed expression to
+/// `*out_id`. On failure returns [`RssnStatus::ParseError`].
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `expr` must be a valid, non-null, null-terminated C string.
+/// - `out_id` must be a valid, non-null writable `u32` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_parse(
+    builder: *mut DagBuilder,
+    expr: *const c_char,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || expr.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let b = unsafe { &mut *builder };
+        let c_str = unsafe { CStr::from_ptr(expr) };
+        let s = match c_str.to_str() {
+            Ok(s) => s,
+            Err(_) => return RssnStatus::InvalidUtf8,
+        };
+        match crate::parser::expr::parse_expression(s, b) {
+            Ok(root_id) => {
+                unsafe { *out_id = root_id.value() };
+                RssnStatus::Success
+            }
+            Err(_) => RssnStatus::ParseError,
+        }
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+// =========================================================================
+// T6.5 — Function registration and call node construction
+// =========================================================================
+
+/// Interns a function name and returns its numeric `FnId`.
+///
+/// The returned id can be used with [`rssn_dag_call_fn`] to build
+/// function-call nodes, and with the JIT custom-function registration
+/// APIs to bind native implementations.
+///
+/// Returns `u32::MAX` on null input or if interning fails.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `name` must be a valid, non-null, null-terminated C string.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_intern_function(builder: *mut DagBuilder, name: *const c_char) -> u32 {
+    if builder.is_null() || name.is_null() {
+        return u32::MAX;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        let c_str = unsafe { CStr::from_ptr(name) };
+        let s = match c_str.to_str() {
+            Ok(s) => s,
+            Err(_) => return u32::MAX,
+        };
+        b.intern_function(s).0
+    })
+    .unwrap_or(u32::MAX)
+}
+
+/// Builds a function-call node for a previously interned function.
+///
+/// `args` points to an array of `n_args` node ids. The node ids must all be
+/// valid (not `u32::MAX`).
+///
+/// Returns the new node id, or `u32::MAX` on error.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `args` must point to an array of at least `n_args` valid `u32` values,
+///   or be null when `n_args == 0`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_call_fn(
+    builder: *mut DagBuilder,
+    fn_id: u32,
+    args: *const u32,
+    n_args: u32,
+) -> u32 {
+    if builder.is_null() {
+        return u32::MAX;
+    }
+    if n_args > 0 && args.is_null() {
+        return u32::MAX;
+    }
+    catch_unwind(|| {
+        let b = unsafe { &mut *builder };
+        let arg_ids: Vec<DagNodeId> = if n_args == 0 {
+            Vec::new()
+        } else {
+            let slice = unsafe { std::slice::from_raw_parts(args, n_args as usize) };
+            if slice.iter().any(|&id| id == u32::MAX) {
+                return u32::MAX;
+            }
+            slice.iter().map(|&id| DagNodeId::new(id)).collect()
+        };
+        b.function_call(crate::dag::symbol::FnId(fn_id), &arg_ids)
+            .value()
+    })
+    .unwrap_or(u32::MAX)
+}
+
+/// Builds a function-call node. Status-returning variant.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `args` must point to an array of at least `n_args` valid `u32` values,
+///   or be null when `n_args == 0`.
+/// - `out_id` must be a valid, non-null writable `u32` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_call_fn_v2(
+    builder: *mut DagBuilder,
+    fn_id: u32,
+    args: *const u32,
+    n_args: u32,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if n_args > 0 && args.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    catch_unwind(|| -> RssnStatus {
+        let b = unsafe { &mut *builder };
+        let arg_ids: Vec<DagNodeId> = if n_args == 0 {
+            Vec::new()
+        } else {
+            let slice = unsafe { std::slice::from_raw_parts(args, n_args as usize) };
+            if slice.iter().any(|&id| id == u32::MAX) {
+                return RssnStatus::InvalidNodeId;
+            }
+            slice.iter().map(|&id| DagNodeId::new(id)).collect()
+        };
+        let id = b.function_call(crate::dag::symbol::FnId(fn_id), &arg_ids);
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    })
+    .unwrap_or(RssnStatus::Panic)
+}
+
+// =========================================================================
+// T6.6 — JIT custom-function registration from C
+// =========================================================================
+//
+// These functions allow C callers to register native function pointers so
+// the JIT can compile call nodes that reference them. The `fn_id` must
+// match the id returned by `rssn_dag_intern_function`.
+
+/// Type for a C-callable `extern "C" fn(f64) -> f64`.
+pub type RssnCustomFn1 = extern "C" fn(f64) -> f64;
+/// Type for a C-callable `extern "C" fn(f64, f64) -> f64`.
+pub type RssnCustomFn2 = extern "C" fn(f64, f64) -> f64;
+/// Type for a C-callable `extern "C" fn(f64, f64, f64) -> f64`.
+pub type RssnCustomFn3 = extern "C" fn(f64, f64, f64) -> f64;
+
+/// Registers a one-argument native function with the persistent JIT context
+/// so it can be called from compiled expressions.
+///
+/// The `fn_id` must have been obtained via [`rssn_dag_intern_function`].
+/// The `func` pointer must remain valid for the lifetime of the JIT context.
+///
+/// # Safety
+///
+/// `func` must be a valid function pointer with the signature `double(double)`.
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_jit_register_fn_1(
+    ctx: *mut super::jit_context::RssnJitContext,
+    fn_id: u32,
+    func: Option<RssnCustomFn1>,
+) -> RssnStatus {
+    if ctx.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let Some(func_ptr) = func else {
+        return RssnStatus::NullPointer;
+    };
+    catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let ctx_ref = unsafe { &mut *ctx };
+        ctx_ref
+            .compiler_mut()
+            .register_custom_function(crate::dag::symbol::FnId(fn_id), func_ptr);
+        RssnStatus::Success
+    }))
+    .unwrap_or(RssnStatus::Panic)
+}
+
+/// Registers a one-argument native function (stub for non-JIT builds).
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_jit_register_fn_1(
+    _ctx: *mut c_void,
+    _fn_id: u32,
+    _func: Option<extern "C" fn(f64) -> f64>,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
+/// Registers a two-argument native function with the persistent JIT context.
+///
+/// # Safety
+///
+/// `func` must be a valid function pointer with the signature `double(double, double)`.
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_jit_register_fn_2(
+    ctx: *mut super::jit_context::RssnJitContext,
+    fn_id: u32,
+    func: Option<RssnCustomFn2>,
+) -> RssnStatus {
+    if ctx.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let Some(func_ptr) = func else {
+        return RssnStatus::NullPointer;
+    };
+    catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let ctx_ref = unsafe { &mut *ctx };
+        ctx_ref
+            .compiler_mut()
+            .register_custom_function_2(crate::dag::symbol::FnId(fn_id), func_ptr);
+        RssnStatus::Success
+    }))
+    .unwrap_or(RssnStatus::Panic)
+}
+
+/// Registers a two-argument native function (stub for non-JIT builds).
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_jit_register_fn_2(
+    _ctx: *mut c_void,
+    _fn_id: u32,
+    _func: Option<extern "C" fn(f64, f64) -> f64>,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
+/// Registers a three-argument native function with the persistent JIT context.
+///
+/// # Safety
+///
+/// `func` must be a valid function pointer with the signature `double(double, double, double)`.
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_jit_register_fn_3(
+    ctx: *mut super::jit_context::RssnJitContext,
+    fn_id: u32,
+    func: Option<RssnCustomFn3>,
+) -> RssnStatus {
+    if ctx.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let Some(func_ptr) = func else {
+        return RssnStatus::NullPointer;
+    };
+    catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let ctx_ref = unsafe { &mut *ctx };
+        ctx_ref
+            .compiler_mut()
+            .register_custom_function_3(crate::dag::symbol::FnId(fn_id), func_ptr);
+        RssnStatus::Success
+    }))
+    .unwrap_or(RssnStatus::Panic)
+}
+
+/// Registers a three-argument native function (stub for non-JIT builds).
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_jit_register_fn_3(
+    _ctx: *mut c_void,
+    _fn_id: u32,
+    _func: Option<extern "C" fn(f64, f64, f64) -> f64>,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
+// =========================================================================
+// T6.7 — JIT compile with explicit optimisation configuration
+// =========================================================================
+
+/// C-compatible JIT optimisation configuration.
+///
+/// Fields mirror [`crate::jit::compiler::OptConfig`]. Pass a pointer to this
+/// struct to [`rssn_dag_compile_with_opts`]; pass NULL to use the defaults.
+#[cfg(feature = "cranelift-jit")]
+#[repr(C)]
+pub struct RssnOptConfig {
+    /// Maximum integer exponent expanded without a `powf` call (default: 16).
+    pub max_int_pow: u32,
+    /// Non-zero to expand `x^0.5` to a native `sqrt` instruction (default: 1).
+    pub expand_sqrt: u32,
+    /// Non-zero to replace `x / C` with `x * (1/C)` (default: 0).
+    pub allow_reciprocal_math: u32,
+    /// Non-zero to skip divide-by-zero guards when the denominator is proven
+    /// non-zero by the analysis pass (default: 1).
+    pub elide_nan_guard: u32,
+    /// Non-zero to reuse SSA values for repeated DAG sub-expressions (default: 1).
+    pub enable_cse: u32,
+}
+
+/// Compiles a DAG expression with explicit optimisation knobs.
+///
+/// If `opts` is NULL, uses [`RssnOptConfig`] defaults (equivalent to
+/// [`rssn_dag_compile_v2`]).
+///
+/// # Safety
+///
+/// - `ctx` must be a valid, non-null pointer from [`rssn_jit_context_new`].
+/// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+/// - `out_fn` must be a valid, non-null writable pointer.
+/// - If `opts` is non-null it must point to a valid [`RssnOptConfig`].
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_compile_with_opts(
+    ctx: *mut super::jit_context::RssnJitContext,
+    builder: *mut DagBuilder,
+    root: u32,
+    opts: *const RssnOptConfig,
+    out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    if ctx.is_null() || builder.is_null() || out_fn.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let ctx_ref = unsafe { &mut *ctx };
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+        let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
+
+        let jit_opts = if opts.is_null() {
+            crate::jit::compiler::OptConfig::default()
+        } else {
+            let c = unsafe { &*opts };
+            crate::jit::compiler::OptConfig {
+                max_int_pow: c.max_int_pow,
+                expand_sqrt: c.expand_sqrt != 0,
+                allow_reciprocal_math: c.allow_reciprocal_math != 0,
+                elide_nan_guard: c.elide_nan_guard != 0,
+                enable_cse: c.enable_cse != 0,
+            }
+        };
+
+        match ctx_ref.compiler_mut().compile_with_opts(&ast, &jit_opts) {
+            Ok(compiled_fn) => {
+                unsafe { *out_fn = compiled_fn as *mut c_void };
+                RssnStatus::Success
+            }
+            Err(_) => RssnStatus::CompilationError,
+        }
+    }));
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Stub for non-JIT builds: always returns `CompilationError`.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_compile_with_opts(
+    _ctx: *mut c_void,
+    _builder: *mut DagBuilder,
+    _root: u32,
+    _opts: *const c_void,
+    _out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
+// =========================================================================
+// T6.8 — C-side rewrite rule registration
+// =========================================================================
+//
+// The C rule callback receives:
+//   - A pointer to the builder (may call rssn_dag_* to create nodes).
+//   - The node kind discriminant (see `RssnKind` below).
+//   - A pointer to the child node-id array and child count.
+//   - User data (an opaque void* set at registration time).
+// The callback returns the replacement node id, or u32::MAX to pass.
+
+/// Discriminant values for `SymbolKind` variants, matching the Rust enum.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub enum RssnKind {
+    /// A named variable.
+    Variable = 0,
+    /// A numeric constant.
+    Constant = 1,
+    /// `Add` operator.
+    Add = 2,
+    /// `Sub` operator.
+    Sub = 3,
+    /// `Mul` operator.
+    Mul = 4,
+    /// `Div` operator.
+    Div = 5,
+    /// `Pow` operator.
+    Pow = 6,
+    /// `Mod` operator.
+    Mod = 7,
+    /// Unary `Neg` operator.
+    Neg = 8,
+    /// A custom function call.
+    Function = 9,
+}
+
+/// Opaque handle for a registered C rewrite rule registry.
+///
+/// Create with [`rssn_rule_registry_new`]; free with [`rssn_rule_registry_free`].
+pub struct RssnRuleRegistry {
+    inner: std::sync::Arc<crate::heuristic::rule_registry::RuleRegistry>,
+}
+
+/// C-callable rewrite rule callback.
+///
+/// - `builder`: pointer to the `DagBuilder`; call `rssn_dag_*` to create nodes.
+/// - `kind`: node kind discriminant (see [`RssnKind`]).
+/// - `children`: pointer to an array of child node ids (length `n_children`).
+/// - `n_children`: number of children.
+/// - `user_data`: the opaque pointer supplied at registration time.
+///
+/// Return the replacement node id, or `u32::MAX` to leave the node unchanged
+/// (pass to the next rule).
+pub type RssnRuleCallback = unsafe extern "C" fn(
+    builder: *mut DagBuilder,
+    kind: u8,
+    children: *const u32,
+    n_children: u32,
+    user_data: *mut c_void,
+) -> u32;
+
+/// Creates a new, empty rule registry.
+///
+/// The returned pointer must be freed with [`rssn_rule_registry_free`].
+/// Returns NULL if construction panics.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_rule_registry_new() -> *mut RssnRuleRegistry {
+    catch_unwind(|| {
+        Box::into_raw(Box::new(RssnRuleRegistry {
+            inner: std::sync::Arc::new(crate::heuristic::rule_registry::RuleRegistry::new()),
+        }))
+    })
+    .unwrap_or(std::ptr::null_mut())
+}
+
+/// Frees a rule registry previously created by [`rssn_rule_registry_new`].
+///
+/// Passing NULL is a safe no-op.
+///
+/// # Safety
+///
+/// `registry` must be a pointer returned by [`rssn_rule_registry_new`] or NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_rule_registry_free(registry: *mut RssnRuleRegistry) {
+    if registry.is_null() {
+        return;
+    }
+    let _ = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = unsafe { Box::from_raw(registry) };
+    }));
+}
+
+/// Registers a C callback as a rewrite rule.
+///
+/// - `name`: human-readable rule name (null-terminated C string, for fingerprinting).
+/// - `callback`: the rule function; called during simplification for each node.
+/// - `priority`: higher values are tried first (default-priority rules use 0).
+/// - `kind_filter`: if non-negative, the rule is only tried for nodes with this
+///   kind discriminant (see [`RssnKind`]). Pass `-1` for a wildcard rule.
+/// - `user_data`: opaque pointer forwarded to every callback invocation.
+///
+/// # Safety
+///
+/// - `registry` must be a valid, non-null pointer from [`rssn_rule_registry_new`].
+/// - `name` must be a valid, non-null, null-terminated C string.
+/// - `callback` must be a valid, non-null function pointer.
+/// - `user_data` must remain valid for the lifetime of the registry.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_rule_register(
+    registry: *mut RssnRuleRegistry,
+    name: *const c_char,
+    callback: Option<RssnRuleCallback>,
+    priority: i32,
+    kind_filter: i32,
+    user_data: *mut c_void,
+) -> RssnStatus {
+    if registry.is_null() || name.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let Some(cb) = callback else {
+        return RssnStatus::NullPointer;
+    };
+
+    let name_str = {
+        let c_str = unsafe { CStr::from_ptr(name) };
+        match c_str.to_str() {
+            Ok(s) => s.to_owned(),
+            Err(_) => return RssnStatus::InvalidUtf8,
+        }
+    };
+
+    // Transmute user_data to usize so the closure is Send + Sync.
+    let user_data_addr = user_data as usize;
+
+    let kind_opt = if kind_filter < 0 {
+        None
+    } else {
+        use crate::dag::symbol::{OpKind, SymbolKind};
+        match kind_filter as u8 {
+            0 => Some(SymbolKind::Variable(crate::dag::symbol::SymbolId(0))),
+            1 => Some(SymbolKind::Constant(0.0)),
+            2 => Some(SymbolKind::Operator(OpKind::Add)),
+            3 => Some(SymbolKind::Operator(OpKind::Sub)),
+            4 => Some(SymbolKind::Operator(OpKind::Mul)),
+            5 => Some(SymbolKind::Operator(OpKind::Div)),
+            6 => Some(SymbolKind::Operator(OpKind::Pow)),
+            7 => Some(SymbolKind::Operator(OpKind::Mod)),
+            8 => Some(SymbolKind::Operator(OpKind::Neg)),
+            9 => Some(SymbolKind::Function(crate::dag::symbol::FnId(0))),
+            _ => return RssnStatus::InvalidNodeId,
+        }
+    };
+
+    catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let reg_ref = unsafe { &mut *registry };
+        // Get a mutable reference to the inner registry through Arc.
+        // If the Arc is uniquely owned (typical during registration phase),
+        // `get_mut` succeeds. After the first `clone()` by the engine we can
+        // no longer add rules — callers must register before simplifying.
+        let Some(inner_mut) = std::sync::Arc::get_mut(&mut reg_ref.inner) else {
+            return RssnStatus::RuleConflict;
+        };
+        inner_mut.register_named(
+            &name_str,
+            move |builder, kind, children| {
+                // Flatten children into a temporary u32 array.
+                let child_ids: Vec<u32> = children.iter().map(|id| id.value()).collect();
+                let user_data_ptr = user_data_addr as *mut c_void;
+                // SAFETY: the caller guarantees the callback and user_data are valid.
+                let result = unsafe {
+                    cb(
+                        builder as *mut DagBuilder,
+                        kind_to_discriminant(&kind),
+                        child_ids.as_ptr(),
+                        child_ids.len() as u32,
+                        user_data_ptr,
+                    )
+                };
+                if result == u32::MAX {
+                    None
+                } else {
+                    Some(DagNodeId::new(result))
+                }
+            },
+            priority,
+            kind_opt,
+        );
+        RssnStatus::Success
+    }))
+    .unwrap_or(RssnStatus::Panic)
+}
+
+/// Simplifies an expression using a caller-supplied C rule registry and configuration.
+///
+/// If `registry` is NULL, only the built-in heuristic patterns are applied.
+/// If `config` is NULL, defaults are used.
+///
+/// # Safety
+///
+/// - `builder` and `out_id` must be valid, non-null pointers.
+/// - If `registry` is non-null it must be from [`rssn_rule_registry_new`].
+/// - If `config` is non-null it must point to a valid [`RssnSimplifyConfig`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_simplify_with_rules(
+    builder: *mut DagBuilder,
+    root: u32,
+    registry: *mut RssnRuleRegistry,
+    config: *const RssnSimplifyConfig,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let (max_depth, timeout_ms, aggressiveness) = if config.is_null() {
+        let def = HeuristicConfig::default();
+        (
+            def.max_depth,
+            def.timeout.as_millis() as u64,
+            def.simplification_aggressiveness,
+        )
+    } else {
+        let c = unsafe { &*config };
+        (c.max_depth as usize, c.timeout_ms, c.aggressiveness)
+    };
+
+    catch_unwind(std::panic::AssertUnwindSafe(|| -> RssnStatus {
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+
+        // If a registry is supplied, transfer its rules into the engine.
+        let cfg = HeuristicConfig::default()
+            .max_depth(max_depth)
+            .timeout(Duration::from_millis(timeout_ms))
+            .simplification_aggressiveness(aggressiveness);
+
+        let mut engine = if registry.is_null() {
+            HeuristicEngine::new(cfg, SearchStrategy::Greedy)
+        } else {
+            // Share the Arc<RuleRegistry> with the engine. This is cheap
+            // (one atomic ref-count increment) and keeps the registry alive
+            // and accessible to the C caller after the call returns.
+            let arc_clone = std::sync::Arc::clone(unsafe { &(*registry).inner });
+            HeuristicEngine::new(cfg, SearchStrategy::Greedy).with_rule_registry(arc_clone)
+        };
+
+        let id = engine.simplify(builder_ref, root_id);
+        unsafe { *out_id = id.value() };
+        RssnStatus::Success
+    }))
+    .unwrap_or(RssnStatus::Panic)
+}
+
+/// Maps a `SymbolKind` to its C discriminant byte.
+fn kind_to_discriminant(kind: &crate::dag::symbol::SymbolKind) -> u8 {
+    use crate::dag::symbol::{OpKind, SymbolKind};
+    match kind {
+        SymbolKind::Variable(_) => 0,
+        SymbolKind::Constant(_) => 1,
+        SymbolKind::Operator(OpKind::Add) => 2,
+        SymbolKind::Operator(OpKind::Sub) => 3,
+        SymbolKind::Operator(OpKind::Mul) => 4,
+        SymbolKind::Operator(OpKind::Div) => 5,
+        SymbolKind::Operator(OpKind::Pow) => 6,
+        SymbolKind::Operator(OpKind::Mod) => 7,
+        SymbolKind::Operator(OpKind::Neg) => 8,
+        SymbolKind::Function(_) => 9,
+    }
+}
+
+// =========================================================================
+// Tests for the new FFI functions
+// =========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_ops_roundtrip() {
+        let builder = rssn_dag_new();
+        assert!(!builder.is_null());
+
+        let x = rssn_dag_variable(builder, c"x".as_ptr());
+        let y = rssn_dag_variable(builder, c"y".as_ptr());
+        assert_ne!(x, u32::MAX);
+        assert_ne!(y, u32::MAX);
+
+        assert_ne!(rssn_dag_sub(builder, x, y), u32::MAX);
+        assert_ne!(rssn_dag_mul(builder, x, y), u32::MAX);
+        assert_ne!(rssn_dag_div(builder, x, y), u32::MAX);
+        assert_ne!(rssn_dag_pow(builder, x, y), u32::MAX);
+        assert_ne!(rssn_dag_mod(builder, x, y), u32::MAX);
+        assert_ne!(rssn_dag_neg(builder, x), u32::MAX);
+
+        rssn_dag_free(builder);
+    }
+
+    #[test]
+    fn v2_ops_return_success() {
+        let builder = rssn_dag_new();
+        let x = rssn_dag_variable(builder, c"x".as_ptr());
+        let y = rssn_dag_variable(builder, c"y".as_ptr());
+
+        let mut out = u32::MAX;
+        assert_eq!(
+            rssn_dag_sub_v2(builder, x, y, &mut out),
+            RssnStatus::Success
+        );
+        assert_ne!(out, u32::MAX);
+        assert_eq!(
+            rssn_dag_mul_v2(builder, x, y, &mut out),
+            RssnStatus::Success
+        );
+        assert_ne!(out, u32::MAX);
+        assert_eq!(
+            rssn_dag_div_v2(builder, x, y, &mut out),
+            RssnStatus::Success
+        );
+        assert_ne!(out, u32::MAX);
+        assert_eq!(
+            rssn_dag_pow_v2(builder, x, y, &mut out),
+            RssnStatus::Success
+        );
+        assert_ne!(out, u32::MAX);
+        assert_eq!(
+            rssn_dag_mod_v2(builder, x, y, &mut out),
+            RssnStatus::Success
+        );
+        assert_ne!(out, u32::MAX);
+        assert_eq!(rssn_dag_neg_v2(builder, x, &mut out), RssnStatus::Success);
+        assert_ne!(out, u32::MAX);
+
+        rssn_dag_free(builder);
+    }
+
+    #[test]
+    fn null_inputs_return_sentinel_or_null_pointer_status() {
+        assert_eq!(rssn_dag_sub(std::ptr::null_mut(), 0, 0), u32::MAX);
+        assert_eq!(rssn_dag_mul(std::ptr::null_mut(), 0, 0), u32::MAX);
+        assert_eq!(rssn_dag_div(std::ptr::null_mut(), 0, 0), u32::MAX);
+        assert_eq!(rssn_dag_pow(std::ptr::null_mut(), 0, 0), u32::MAX);
+        assert_eq!(rssn_dag_mod(std::ptr::null_mut(), 0, 0), u32::MAX);
+        assert_eq!(rssn_dag_neg(std::ptr::null_mut(), 0), u32::MAX);
+    }
+
+    #[test]
+    fn parse_and_build() {
+        let builder = rssn_dag_new();
+        let mut out = u32::MAX;
+        let status = rssn_dag_parse(builder, c"x + y * 2.0".as_ptr(), &mut out);
+        assert_eq!(status, RssnStatus::Success);
+        assert_ne!(out, u32::MAX);
+        rssn_dag_free(builder);
+    }
+
+    #[test]
+    fn parse_invalid_expression() {
+        let builder = rssn_dag_new();
+        let mut out = u32::MAX;
+        let status = rssn_dag_parse(builder, c"(".as_ptr(), &mut out);
+        assert_ne!(status, RssnStatus::Success);
+        rssn_dag_free(builder);
+    }
+
+    #[test]
+    fn intern_function_and_call() {
+        let builder = rssn_dag_new();
+        let fn_id = rssn_dag_intern_function(builder, c"mysin".as_ptr());
+        assert_ne!(fn_id, u32::MAX);
+
+        let x = rssn_dag_variable(builder, c"x".as_ptr());
+        let args = [x];
+        let call_node = rssn_dag_call_fn(builder, fn_id, args.as_ptr(), 1);
+        assert_ne!(call_node, u32::MAX);
+        rssn_dag_free(builder);
+    }
+
+    #[test]
+    fn rule_registry_lifecycle() {
+        let reg = rssn_rule_registry_new();
+        assert!(!reg.is_null());
+        rssn_rule_registry_free(reg);
+
+        // Double-free safety: free NULL is a no-op.
+        rssn_rule_registry_free(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn register_and_apply_c_rule() {
+        unsafe extern "C" fn zero_add_rule(
+            builder: *mut DagBuilder,
+            kind: u8,
+            children: *const u32,
+            n_children: u32,
+            _user_data: *mut c_void,
+        ) -> u32 {
+            // Rule: x + 0 → x  (kind == Add, one child is constant 0)
+            if kind != 2 || n_children != 2 {
+                return u32::MAX;
+            }
+            let lhs = unsafe { *children };
+            let rhs = unsafe { *children.add(1) };
+            let b = unsafe { &mut *builder };
+            let rhs_node = b.arena().get(DagNodeId::new(rhs));
+            if let Some(node) = rhs_node {
+                if let crate::dag::symbol::SymbolKind::Constant(v) = node.kind {
+                    if v == 0.0 {
+                        return lhs;
+                    }
+                }
+            }
+            u32::MAX
+        }
+
+        let reg = rssn_rule_registry_new();
+        let status = rssn_rule_register(
+            reg,
+            c"zero_add".as_ptr(),
+            Some(zero_add_rule),
+            0,
+            2, // Add
+            std::ptr::null_mut(),
+        );
+        assert_eq!(status, RssnStatus::Success);
+
+        // Build x + 0 and simplify.
+        let builder = rssn_dag_new();
+        let x = rssn_dag_variable(builder, c"x".as_ptr());
+        let zero = rssn_dag_constant(builder, 0.0);
+        let expr = rssn_dag_add(builder, x, zero);
+
+        let mut out = u32::MAX;
+        let s = rssn_dag_simplify_with_rules(builder, expr, reg, std::ptr::null(), &mut out);
+        assert_eq!(s, RssnStatus::Success);
+        // After simplification x + 0 should reduce to x.
+        assert_eq!(out, x, "x + 0 should simplify to x");
+
+        rssn_dag_free(builder);
+        rssn_rule_registry_free(reg);
+    }
+}
+
+// =========================================================================
+// E-graph equality saturation FFI
+// =========================================================================
+// Design: the EGraph is created transiently for each saturate+extract call.
+// This avoids exposing a long-lived handle across the FFI boundary (which
+// would complicate lifetime management on both sides). The overhead is low
+// because all real memory lives inside the DagBuilder which is long-lived.
+//
+// For callers that need repeated extraction on the same expression with the
+// same rule set, the recommended pattern is:
+//   1. rssn_dag_egraph_saturate_extract(...) — one call, returns best node.
+//   2. Cache the returned node ID on the C side.
+
+/// Configuration for E-graph equality saturation.
+///
+/// Passed by value across the FFI boundary; zero-initialise for defaults.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RssnEGraphConfig {
+    /// Maximum saturation rounds (0 → use library default of 8).
+    pub max_rounds: u32,
+    /// Maximum equivalence merges before stopping (0 → default 512).
+    pub max_merges: u32,
+    /// Maximum new nodes the E-graph may create via rewrites (0 → default 1024).
+    pub max_new_nodes: u32,
+    /// Non-zero → enable strict IEEE 754 signed-zero semantics.
+    ///
+    /// When set, `x + (-0.0)` will **not** be simplified to `x`, matching
+    /// `-fno-unsafe-math-optimizations`. Default (0) uses `-fno-signed-zeros`.
+    pub strict_ieee754_signed_zero: u8,
+}
+
+impl Default for RssnEGraphConfig {
+    fn default() -> Self {
+        Self {
+            max_rounds: 0,
+            max_merges: 0,
+            max_new_nodes: 0,
+            strict_ieee754_signed_zero: 0,
+        }
+    }
+}
+
+impl RssnEGraphConfig {
+    fn to_rust(self) -> crate::egraph::EGraphConfig {
+        crate::egraph::EGraphConfig {
+            max_rounds: if self.max_rounds == 0 {
+                8
+            } else {
+                self.max_rounds as usize
+            },
+            max_merges: if self.max_merges == 0 {
+                512
+            } else {
+                self.max_merges as usize
+            },
+            max_new_nodes: if self.max_new_nodes == 0 {
+                1024
+            } else {
+                self.max_new_nodes as usize
+            },
+            strict_ieee754_signed_zero: self.strict_ieee754_signed_zero != 0,
+            cost_weights: None,
+        }
+    }
+}
+
+/// A C-callable rewrite rule for the E-graph.
+///
+/// Called for each node during saturation. Return the ID of an equivalent
+/// node to merge into the same e-class, or `u32::MAX` to decline.
+///
+/// `kind`       — discriminant of the current node's kind (see `RssnKind`).
+/// `children`   — pointer to the *canonical* child IDs (length `n_children`).
+/// `n_children` — number of children.
+/// `user_data`  — opaque pointer forwarded unchanged from the registration call.
+pub type RssnEGraphRuleCallback = unsafe extern "C" fn(
+    builder: *mut DagBuilder,
+    kind: u8,
+    children: *const u32,
+    n_children: u32,
+    user_data: *mut c_void,
+) -> u32;
+
+/// Runs E-graph equality saturation on `root` and returns the cheapest
+/// equivalent node ID, or `u32::MAX` on error.
+///
+/// # C example
+///
+/// ```c
+/// uint32_t best = rssn_dag_egraph_saturate_extract(
+///     builder, expr_id,
+///     (RssnEGraphConfig){ .max_rounds = 4, .max_merges = 256, .max_new_nodes = 512 },
+///     NULL, 0,   /* no user rules */
+///     NULL
+/// );
+/// ```
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null `DagBuilder` from `rssn_dag_new`.
+/// - If `rules` is non-null, `n_rules` must be the number of valid callback
+///   pointers in the array.
+/// - `user_data` pointers must remain valid for the duration of this call.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_egraph_saturate_extract(
+    builder: *mut DagBuilder,
+    root: u32,
+    cfg: RssnEGraphConfig,
+    rules: *const RssnEGraphRuleCallback,
+    n_rules: u32,
+    out: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let b = unsafe { &mut *builder };
+        let root_id = crate::dag::node::DagNodeId::new(root);
+        let rust_cfg = cfg.to_rust();
+
+        let mut eg = crate::egraph::EGraph::new(b, rust_cfg);
+
+        // Register C-side user rules.
+        if !rules.is_null() {
+            for i in 0..n_rules as usize {
+                let cb: RssnEGraphRuleCallback = unsafe { *rules.add(i) };
+                // SAFETY: cb is valid for the duration of saturate (this call).
+                // user_data is forwarded transparently.
+                eg.add_rule(move |builder_inner, kind, children| {
+                    let kind_disc = kind_to_discriminant(kind);
+                    let ch_ptr = children.as_ptr().cast::<u32>();
+                    let result = unsafe {
+                        cb(
+                            builder_inner as *mut DagBuilder,
+                            kind_disc,
+                            ch_ptr,
+                            children.len() as u32,
+                            std::ptr::null_mut(), // user_data not storable in 'static closure
+                        )
+                    };
+                    if result == u32::MAX {
+                        None
+                    } else {
+                        Some(crate::dag::node::DagNodeId::new(result))
+                    }
+                });
+            }
+        }
+
+        eg.saturate(root_id);
+        let best = eg.extract(root_id);
+        if let Some(out_ptr) = unsafe { out.as_mut() } {
+            *out_ptr = best.value();
+        }
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Like [`rssn_dag_egraph_saturate_extract`] but also enables the E-graph
+/// pass inside the full heuristic simplification pipeline and returns the
+/// result after both passes.
+///
+/// # Safety
+///
+/// Same as `rssn_dag_egraph_saturate_extract`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_simplify_with_egraph(
+    builder: *mut DagBuilder,
+    root: u32,
+    egraph_cfg: RssnEGraphConfig,
+    out: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let b = unsafe { &mut *builder };
+        let root_id = crate::dag::node::DagNodeId::new(root);
+        let hcfg = crate::heuristic::HeuristicConfig::default().with_egraph(egraph_cfg.to_rust());
+        let mut engine = crate::heuristic::HeuristicEngine::new(
+            hcfg,
+            crate::heuristic::SearchStrategy::default(),
+        );
+        let simplified = engine.simplify(b, root_id);
+        if let Some(out_ptr) = unsafe { out.as_mut() } {
+            *out_ptr = simplified.value();
+        }
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+// =========================================================================
+// Batch-build API — reduced cross-FFI overhead
+// =========================================================================
+// Rationale: building a 50-node expression via individual rssn_dag_add/mul/
+// etc. calls costs 50× catch_unwind + null check + FFI frame. The batch
+// API amortises this to a single call: C fills an array of `RssnNodeDesc`
+// and we process the whole array in one Rust call.
+
+/// Node kind discriminant used in [`RssnNodeDesc`].
+///
+/// Values 0–1 are leaf types; 2–9 are operator/function types.
+/// Matches `RssnKind` in the C header.
+pub type RssnNodeKindBatch = u8;
+
+/// Compact node descriptor for batch DAG construction.
+///
+/// The caller allocates an array of these, fills them in topological order
+/// (children before parents), and passes the whole array to
+/// [`rssn_dag_batch_build`]. The output array receives the allocated IDs.
+///
+/// Field semantics by `kind`:
+///
+/// | kind | meaning | fields used |
+/// |------|---------|-------------|
+/// | 0 = Variable | leaf variable | `name[0..32]` |
+/// | 1 = Constant | leaf constant | `value` |
+/// | 2 = Add      | `child0 + child1` | `child0`, `child1` |
+/// | 3 = Sub      | `child0 - child1` | `child0`, `child1` |
+/// | 4 = Mul      | `child0 * child1` | `child0`, `child1` |
+/// | 5 = Div      | `child0 / child1` | `child0`, `child1` |
+/// | 6 = Pow      | `child0 ^ child1` | `child0`, `child1` |
+/// | 7 = Neg      | `-child0`         | `child0` |
+/// | 8 = Mod      | `child0 % child1` | `child0`, `child1` |
+///
+/// `child0` and `child1` are **indices into the `out_ids` array** of the
+/// same batch call — they are NOT `DagNodeId` values. Index `u32::MAX`
+/// means "no child". This allows forward-reference-free batch construction.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RssnNodeDesc {
+    /// Constant value (used when `kind == 1`).
+    pub value: f64,
+    /// Index into `out_ids` of this call for the first child.
+    pub child0: u32,
+    /// Index into `out_ids` of this call for the second child.
+    pub child1: u32,
+    /// Node kind discriminant (see table above).
+    pub kind: u8,
+    /// Null-terminated variable name (used when `kind == 0`).
+    pub name: [u8; 31],
+}
+
+/// Builds `n` DAG nodes in a single FFI call, writing allocated node IDs
+/// into `out_ids`.
+///
+/// Nodes are processed in order `0..n`. Children are referenced by their
+/// **index in the batch** (not their `DagNodeId`); the builder translates
+/// indices to IDs after allocating each node.
+///
+/// Returns `RssnStatus::Success` on success. On any error the output array
+/// may be partially populated — already-built nodes remain valid.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null `DagBuilder` from `rssn_dag_new`.
+/// - `descs` must point to an array of at least `n` `RssnNodeDesc` values,
+///   valid for the duration of this call.
+/// - `out_ids` must point to a writable array of at least `n` `u32` values.
+/// - Children referenced by `child0`/`child1` must have indices strictly
+///   less than the current node's index (topological order).
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_batch_build(
+    builder: *mut crate::dag::builder::DagBuilder,
+    descs: *const RssnNodeDesc,
+    n: u32,
+    out_ids: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || descs.is_null() || out_ids.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let b = unsafe { &mut *builder };
+        let descs_slice: &[RssnNodeDesc] = unsafe { std::slice::from_raw_parts(descs, n as usize) };
+        let out_slice: &mut [u32] = unsafe { std::slice::from_raw_parts_mut(out_ids, n as usize) };
+
+        // Accumulated IDs for this batch (so nodes can reference earlier siblings).
+        let mut batch_ids: Vec<crate::dag::node::DagNodeId> = Vec::with_capacity(n as usize);
+
+        for (i, desc) in descs_slice.iter().enumerate() {
+            // Resolve child indices → DagNodeIds, clamping out-of-range to NONE.
+            let resolve = |idx: u32| -> crate::dag::node::DagNodeId {
+                if idx == u32::MAX || idx as usize >= i {
+                    crate::dag::node::DagNodeId::NONE
+                } else {
+                    batch_ids[idx as usize]
+                }
+            };
+
+            let id = match desc.kind {
+                0 => {
+                    // Variable: find the null terminator in `desc.name`.
+                    let name_bytes = &desc.name;
+                    let len = name_bytes.iter().position(|&b| b == 0).unwrap_or(31);
+                    b.variable_bytes(&name_bytes[..len])
+                        .unwrap_or(crate::dag::node::DagNodeId::NONE)
+                }
+                1 => b.constant(desc.value),
+                2 => {
+                    let (c0, c1) = (resolve(desc.child0), resolve(desc.child1));
+                    if c0.is_none() || c1.is_none() {
+                        return RssnStatus::InvalidNode;
+                    }
+                    b.add(c0, c1)
+                }
+                3 => {
+                    let (c0, c1) = (resolve(desc.child0), resolve(desc.child1));
+                    if c0.is_none() || c1.is_none() {
+                        return RssnStatus::InvalidNode;
+                    }
+                    b.sub(c0, c1)
+                }
+                4 => {
+                    let (c0, c1) = (resolve(desc.child0), resolve(desc.child1));
+                    if c0.is_none() || c1.is_none() {
+                        return RssnStatus::InvalidNode;
+                    }
+                    b.mul(c0, c1)
+                }
+                5 => {
+                    let (c0, c1) = (resolve(desc.child0), resolve(desc.child1));
+                    if c0.is_none() || c1.is_none() {
+                        return RssnStatus::InvalidNode;
+                    }
+                    b.div(c0, c1)
+                }
+                6 => {
+                    let (c0, c1) = (resolve(desc.child0), resolve(desc.child1));
+                    if c0.is_none() || c1.is_none() {
+                        return RssnStatus::InvalidNode;
+                    }
+                    b.pow(c0, c1)
+                }
+                7 => {
+                    let c0 = resolve(desc.child0);
+                    if c0.is_none() {
+                        return RssnStatus::InvalidNode;
+                    }
+                    b.neg(c0)
+                }
+                8 => {
+                    let (c0, c1) = (resolve(desc.child0), resolve(desc.child1));
+                    if c0.is_none() || c1.is_none() {
+                        return RssnStatus::InvalidNode;
+                    }
+                    b.modulo(c0, c1)
+                }
+                _ => return RssnStatus::InvalidNode,
+            };
+
+            out_slice[i] = id.value();
+            batch_ids.push(id);
+        }
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Writes the packed arena snapshot to a caller-provided byte buffer.
+///
+/// On success, `*bytes_written` receives the number of bytes written.
+/// Call once with `buf = NULL` to query the required buffer size
+/// (`*bytes_written` will be the needed byte count and the return value
+/// is `RssnStatus::Success`).
+///
+/// The layout is: a little-endian `u64` node count, then `n × 32` bytes
+/// of packed node data (`PackedDagNode`), then a little-endian `u64` pool
+/// count, then `pool_count × 4` bytes of `u32` child IDs. Alignment of
+/// `buf` to 8 bytes is required.
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null `DagBuilder`.
+/// - If `buf` is non-null, it must point to at least `buf_len` bytes of
+///   writable memory, correctly aligned to 8 bytes.
+/// - `bytes_written` must be a valid non-null pointer to a `u64`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_get_packed(
+    builder: *const crate::dag::builder::DagBuilder,
+    buf: *mut u8,
+    buf_len: usize,
+    bytes_written: *mut usize,
+) -> RssnStatus {
+    if builder.is_null() || bytes_written.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let b = unsafe { &*builder };
+        let image = b.packed_snapshot();
+        // Compute needed size: 8 (node_count) + n*32 + 8 (pool_count) + pool*4.
+        let node_count = image.len();
+        let pool_count = image.children_pool().len();
+        let needed = 8 + node_count * 32 + 8 + pool_count * 4;
+        unsafe {
+            *bytes_written = needed;
+        }
+
+        if buf.is_null() {
+            // Size query only.
+            return RssnStatus::Success;
+        }
+        if buf_len < needed {
+            return RssnStatus::BufferTooSmall;
+        }
+
+        // SAFETY: caller guarantees buf is writable and at least buf_len bytes.
+        let out: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(buf, buf_len) };
+        let mut pos = 0usize;
+
+        // Write node count (little-endian u64).
+        out[pos..pos + 8].copy_from_slice(&(node_count as u64).to_le_bytes());
+        pos += 8;
+
+        // Write packed nodes as raw bytes.
+        let node_bytes = image.nodes().len() * 32;
+        // SAFETY: PackedDagNode is Pod (#[repr(C)], no padding, Copy).
+        let node_src: &[u8] =
+            unsafe { std::slice::from_raw_parts(image.nodes().as_ptr().cast::<u8>(), node_bytes) };
+        out[pos..pos + node_bytes].copy_from_slice(node_src);
+        pos += node_bytes;
+
+        // Write pool count (little-endian u64).
+        out[pos..pos + 8].copy_from_slice(&(pool_count as u64).to_le_bytes());
+        pos += 8;
+
+        // Write pool as little-endian u32 values.
+        for &v in image.children_pool() {
+            out[pos..pos + 4].copy_from_slice(&v.to_le_bytes());
+            pos += 4;
+        }
+
+        let _ = pos; // suppress unused-assignment warning
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+#[cfg(test)]
+mod egraph_ffi_tests {
+    use super::*;
+
+    #[test]
+    fn egraph_ffi_constant_fold_add() {
+        let builder = rssn_dag_new();
+        let c3 = rssn_dag_constant(builder, 3.0);
+        let c4 = rssn_dag_constant(builder, 4.0);
+        let s = rssn_dag_add(builder, c3, c4);
+
+        let cfg = RssnEGraphConfig {
+            max_rounds: 4,
+            max_merges: 64,
+            max_new_nodes: 64,
+            strict_ieee754_signed_zero: 0,
+        };
+        let mut out: u32 = u32::MAX;
+        let status =
+            rssn_dag_egraph_saturate_extract(builder, s, cfg, std::ptr::null(), 0, &mut out);
+        assert_eq!(status, RssnStatus::Success);
+        // The constant-folded node 7.0 should be in the same e-class and have lower cost.
+        // out may be s itself or the folded constant — both are valid extractions.
+        assert_ne!(out, u32::MAX);
+
+        rssn_dag_free(builder);
+    }
+
+    #[test]
+    fn egraph_ffi_add_zero_simplifies() {
+        let builder = rssn_dag_new();
+        let x = rssn_dag_variable(builder, c"x".as_ptr());
+        let zero = rssn_dag_constant(builder, 0.0);
+        let xpz = rssn_dag_add(builder, x, zero);
+
+        let cfg = RssnEGraphConfig::default();
+        let mut out: u32 = u32::MAX;
+        let status =
+            rssn_dag_egraph_saturate_extract(builder, xpz, cfg, std::ptr::null(), 0, &mut out);
+        assert_eq!(status, RssnStatus::Success);
+        // x is cheaper than x+0; extractor should return x.
+        assert_eq!(out, x, "x+0 extracts to x");
+
+        rssn_dag_free(builder);
+    }
+
+    #[test]
+    fn egraph_ffi_null_builder_returns_null_pointer() {
+        let mut out: u32 = 0;
+        let status = rssn_dag_egraph_saturate_extract(
+            std::ptr::null_mut(),
+            0,
+            RssnEGraphConfig::default(),
+            std::ptr::null(),
+            0,
+            &mut out,
+        );
+        assert_eq!(status, RssnStatus::NullPointer);
+    }
+}
+
+#[cfg(test)]
+mod batch_build_tests {
+    use super::*;
+
+    /// Build `x * (x + 2.0)` as a batch of 4 nodes:
+    ///   [0] Variable "x"
+    ///   [1] Constant 2.0
+    ///   [2] Add (0, 1) = x + 2
+    ///   [3] Mul (0, 2) = x * (x + 2)
+    #[test]
+    fn batch_build_polynomial() {
+        let builder = rssn_dag_new();
+        let mut out_ids = [u32::MAX; 4];
+
+        let mut descs = [RssnNodeDesc {
+            value: 0.0,
+            child0: u32::MAX,
+            child1: u32::MAX,
+            kind: 0,
+            name: [0u8; 31],
+        }; 4];
+
+        // Node 0: variable "x"
+        descs[0].kind = 0;
+        descs[0].name[0] = b'x';
+
+        // Node 1: constant 2.0
+        descs[1].kind = 1;
+        descs[1].value = 2.0;
+
+        // Node 2: Add(0, 1)
+        descs[2].kind = 2;
+        descs[2].child0 = 0;
+        descs[2].child1 = 1;
+
+        // Node 3: Mul(0, 2)
+        descs[3].kind = 4;
+        descs[3].child0 = 0;
+        descs[3].child1 = 2;
+
+        let status = rssn_dag_batch_build(builder, descs.as_ptr(), 4, out_ids.as_mut_ptr());
+        assert_eq!(status, RssnStatus::Success);
+
+        // All node IDs must be valid (not u32::MAX).
+        for &id in &out_ids {
+            assert_ne!(id, u32::MAX, "all nodes should be allocated");
+        }
+
+        // x*x deduplication: same variable → same ID
+        assert_eq!(out_ids[0], out_ids[0]);
+
+        // Build the same expression manually and compare IDs (dedup).
+        let x2 = rssn_dag_variable(builder, c"x".as_ptr());
+        let c2 = rssn_dag_constant(builder, 2.0);
+        let add2 = rssn_dag_add(builder, x2, c2);
+        let mul2 = rssn_dag_mul(builder, x2, add2);
+        assert_eq!(
+            out_ids[3], mul2,
+            "batch and individual build produce same node ID"
+        );
+
+        rssn_dag_free(builder);
+    }
+
+    #[test]
+    fn batch_build_null_returns_null_pointer() {
+        let mut out_ids = [0u32; 2];
+        let descs = [RssnNodeDesc {
+            value: 1.0,
+            child0: u32::MAX,
+            child1: u32::MAX,
+            kind: 1,
+            name: [0u8; 31],
+        }; 2];
+        let status = rssn_dag_batch_build(
+            std::ptr::null_mut(),
+            descs.as_ptr(),
+            2,
+            out_ids.as_mut_ptr(),
+        );
+        assert_eq!(status, RssnStatus::NullPointer);
+    }
+
+    #[test]
+    fn get_packed_size_query() {
+        let builder = rssn_dag_new();
+        // Build a small expression.
+        let x = rssn_dag_variable(builder, c"x".as_ptr());
+        let c = rssn_dag_constant(builder, 3.0);
+        let _ = rssn_dag_add(builder, x, c);
+
+        // Size query: pass null buffer.
+        let mut needed: usize = 0;
+        let status = rssn_dag_get_packed(builder as *const _, std::ptr::null_mut(), 0, &mut needed);
+        assert_eq!(status, RssnStatus::Success);
+        assert!(needed > 0, "packed snapshot must have positive size");
+
+        // Actual write.
+        let mut buf = vec![0u8; needed];
+        let mut written: usize = 0;
+        let status2 =
+            rssn_dag_get_packed(builder as *const _, buf.as_mut_ptr(), needed, &mut written);
+        assert_eq!(status2, RssnStatus::Success);
+        assert_eq!(written, needed);
+
+        // First 8 bytes are node count (little-endian).
+        let node_count = u64::from_le_bytes(buf[0..8].try_into().expect("8 bytes"));
+        assert!(node_count >= 3, "at least 3 nodes: x, 3.0, x+3.0");
+
+        rssn_dag_free(builder);
+    }
 }

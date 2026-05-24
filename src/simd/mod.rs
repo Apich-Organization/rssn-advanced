@@ -21,4 +21,4 @@ pub use arithmetic::{
 };
 pub use detect::{has_avx2, has_neon, has_sse42};
 pub use hash::batch_hash;
-pub use kernel::{SimdKernel, ScalarKernel, global_kernel};
+pub use kernel::{ScalarKernel, SimdKernel, global_kernel};

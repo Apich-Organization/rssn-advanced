@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use rssn_advanced::zerocopy::{
-    AlignedBytes, BorrowedArena, BorrowedSlice, encode_zerocopy, decode_zerocopy, MmapBuffer,
+    AlignedBytes, BorrowedArena, BorrowedSlice, MmapBuffer, decode_zerocopy, encode_zerocopy,
 };
 
 fn main() {
@@ -53,9 +53,14 @@ fn main() {
     let buf_end = buf_start + encoded_buf.as_bytes().len();
     let decoded_start = decoded.as_slice().as_ptr() as usize;
     let is_zero_copy = decoded_start >= buf_start && decoded_start < buf_end;
-    println!("  Decoded slice inside source?   : {} (zero-copy: {})\n",
+    println!(
+        "  Decoded slice inside source?   : {} (zero-copy: {})\n",
         if is_zero_copy { "YES" } else { "NO" },
-        if is_zero_copy { "verified" } else { "violated!" }
+        if is_zero_copy {
+            "verified"
+        } else {
+            "violated!"
+        }
     );
 
     assert!(is_zero_copy, "zero-copy invariant violated");
@@ -64,7 +69,9 @@ fn main() {
     // 3. BorrowedArena<f64>: encode an f64 arena, decode back, spot-check values
     // -------------------------------------------------------------------------
     println!("Part 3: BorrowedArena<f64> round-trip");
-    let node_values: Vec<f64> = (0..128).map(|i| (i as f64) * std::f64::consts::PI).collect();
+    let node_values: Vec<f64> = (0..128)
+        .map(|i| (i as f64) * std::f64::consts::PI)
+        .collect();
     let arena = BorrowedArena::from_slice(node_values.as_slice());
 
     let arena_buf = encode_zerocopy(arena).expect("arena encode failed");
@@ -73,15 +80,18 @@ fn main() {
 
     println!("  Encoded node count             : {}", node_values.len());
     println!("  Decoded node count             : {}", decoded_arena.len());
-    println!("  Node[0]  = {:.6} (expected {:.6})",
+    println!(
+        "  Node[0]  = {:.6} (expected {:.6})",
         decoded_arena.get(0).copied().unwrap_or(f64::NAN),
         0.0_f64
     );
-    println!("  Node[1]  = {:.6} (expected {:.6})",
+    println!(
+        "  Node[1]  = {:.6} (expected {:.6})",
         decoded_arena.get(1).copied().unwrap_or(f64::NAN),
         std::f64::consts::PI
     );
-    println!("  Node[63] = {:.6} (expected {:.6})\n",
+    println!(
+        "  Node[63] = {:.6} (expected {:.6})\n",
         decoded_arena.get(63).copied().unwrap_or(f64::NAN),
         63.0 * std::f64::consts::PI
     );

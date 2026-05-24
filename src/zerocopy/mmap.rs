@@ -209,14 +209,14 @@ mod win {
     use super::*;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::System::Memory::{
-        CreateFileMappingW, MapViewOfFile, PAGE_READONLY, UnmapViewOfFile, FILE_MAP_READ,
-        MEMORY_MAPPED_VIEW_ADDRESS,
+        CreateFileMappingW, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+        PAGE_READONLY, UnmapViewOfFile,
     };
 
     pub struct WinMapping {
         pub ptr: *const u8,
-        pub len: usize,
         view: MEMORY_MAPPED_VIEW_ADDRESS,
         mapping: HANDLE,
     }
@@ -250,7 +250,7 @@ mod win {
         let mapping = unsafe {
             CreateFileMappingW(
                 raw_handle,
-                core::ptr::null(),
+                core::ptr::null::<SECURITY_ATTRIBUTES>(),
                 PAGE_READONLY,
                 0,
                 0,
@@ -274,7 +274,6 @@ mod win {
         Ok(super::MmapBuffer {
             backing: super::Backing::WinMap(WinMapping {
                 ptr: view.Value.cast::<u8>(),
-                len,
                 view,
                 mapping,
             }),

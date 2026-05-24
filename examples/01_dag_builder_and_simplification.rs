@@ -7,8 +7,8 @@
 //! Run with: `cargo run --example 01_dag_builder_and_simplification`
 
 use rssn_advanced::dag::builder::DagBuilder;
+use rssn_advanced::heuristic::{HeuristicConfig, HeuristicEngine, SearchStrategy};
 use rssn_advanced::parser::parse_expression;
-use rssn_advanced::heuristic::{HeuristicEngine, HeuristicConfig, SearchStrategy};
 
 fn main() {
     println!("=== RSSN-Advanced Example 01: DAG & Simplification ===\n");
@@ -20,24 +20,27 @@ fn main() {
     // Identical sub-expressions "x * y" are repeated in the string representation
     let expr_str = "x * y + (x * y) + 5.0 + 3.0";
     println!("Parsing symbolic formula: \"{}\"", expr_str);
-    
-    let root_id = parse_expression(expr_str, &mut builder)
-        .expect("Failed to parse expression string");
-    
-    println!("Parsing completed. Root node allocated at index: {:?}\n", root_id);
+
+    let root_id =
+        parse_expression(expr_str, &mut builder).expect("Failed to parse expression string");
+
+    println!(
+        "Parsing completed. Root node allocated at index: {:?}\n",
+        root_id
+    );
 
     // 3. Demonstrate Structural Sharing / Deduplication
     // Check that both instances of "x * y" were deduplicated to the exact same node ID!
     let x_id = builder.variable("x");
     let y_id = builder.variable("y");
-    
+
     // Explicitly build "x * y" from the builder, which looks up or inserts
     let xy_id = builder.mul(x_id, y_id);
     println!("Structural Sharing Verification:");
     println!("  Variable 'x' node index        : {:?}", x_id);
     println!("  Variable 'y' node index        : {:?}", y_id);
     println!("  Sub-expression 'x * y' index   : {:?}", xy_id);
-    
+
     // Total nodes currently in the arena
     let total_nodes = builder.arena().len();
     println!("  Total unique nodes in DagArena : {}\n", total_nodes);
@@ -52,7 +55,10 @@ fn main() {
     println!("Simplification completed.");
     println!("  Original root node index       : {:?}", root_id);
     println!("  Simplified root node index     : {:?}", simplified_id);
-    println!("  New unique nodes in DagArena   : {}\n", builder.arena().len());
+    println!(
+        "  New unique nodes in DagArena   : {}\n",
+        builder.arena().len()
+    );
 
     println!("=====================================================");
 }

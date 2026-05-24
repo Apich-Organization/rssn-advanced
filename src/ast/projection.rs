@@ -72,7 +72,7 @@ impl AstChildList {
             Self::Two(arr) => arr,
             Self::Three(arr) => arr,
             Self::Four(arr) => arr,
-            Self::Many { start, len } => &pool[*start as usize .. *start as usize + *len as usize],
+            Self::Many { start, len } => &pool[*start as usize..*start as usize + *len as usize],
         }
     }
 
@@ -137,7 +137,10 @@ impl AstProjection {
     /// Creates a new, empty AST projection buffer.
     #[must_use]
     pub fn new() -> Self {
-        Self { nodes: Vec::new(), children_pool: Vec::new() }
+        Self {
+            nodes: Vec::new(),
+            children_pool: Vec::new(),
+        }
     }
 
     /// Accesses the root node of the AST projection.
@@ -207,7 +210,9 @@ impl AstProjection {
         // Iterative post-order using an explicit stack of (node_idx, visited).
         let mut stack: Vec<(usize, bool)> = vec![(0, false)];
         while let Some((idx, visited)) = stack.pop() {
-            let Some(node) = self.nodes.get(idx) else { continue };
+            let Some(node) = self.nodes.get(idx) else {
+                continue;
+            };
             if visited {
                 if !visitor.visit(node, idx) {
                     return;
@@ -215,7 +220,12 @@ impl AstProjection {
             } else {
                 // Push self again with visited=true, then push children.
                 stack.push((idx, true));
-                for ptr in node.children.as_slice_with_pool(&self.children_pool).iter().rev() {
+                for ptr in node
+                    .children
+                    .as_slice_with_pool(&self.children_pool)
+                    .iter()
+                    .rev()
+                {
                     if let Some(child_idx) = ptr.resolve(idx) {
                         if child_idx < self.nodes.len() {
                             stack.push((child_idx, false));
