@@ -1,4 +1,4 @@
-//! `fma_f64x4_avx2` — fused multiply-add `out = a * b + c`.
+//! `fma_f64x4` — fused multiply-add `out = a * b + c`.
 //!
 //! Single-rounding FMA is what `plan.md §3.1` calls out for coefficient
 //! merging hot paths; the scalar fallback uses `f64::mul_add` so the
@@ -22,7 +22,7 @@
 pub fn apply(a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]) {
     debug_assert!(
         a.len() == 4 && b.len() == 4 && c.len() == 4 && out.len() == 4,
-        "fma_f64x4_avx2::apply requires exactly 4-element slices \
+        "fma_f64x4::apply requires exactly 4-element slices \
          (got a={}, b={}, c={}, out={})",
         a.len(),
         b.len(),

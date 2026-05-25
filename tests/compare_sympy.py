@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 RSSN-Advanced JIT vs NumPy — bulk evaluation benchmark.
 
@@ -38,9 +37,9 @@ import sympy
 # ── Load shared library ────────────────────────────────────────────────────
 
 _lib_candidates = [
-    "../target/release/librssn_advanced.so",    # Linux
-    "../target/release/librssn_advanced.dylib", # macOS
-    "../target/release/rssn_advanced.dll",       # Windows
+    "../target/release/librssn_advanced.so",  # Linux
+    "../target/release/librssn_advanced.dylib",  # macOS
+    "../target/release/rssn_advanced.dll",  # Windows
 ]
 
 lib_path = None
@@ -62,28 +61,29 @@ c_void_p = ctypes.c_void_p
 c_uint32 = ctypes.c_uint32
 c_double = ctypes.c_double
 c_size_t = ctypes.c_size_t
-c_int    = ctypes.c_int
+c_int = ctypes.c_int
 c_char_p = ctypes.c_char_p
-DoubleP  = ctypes.POINTER(ctypes.c_double)
-UInt32P  = ctypes.POINTER(ctypes.c_uint32)
-VoidPP   = ctypes.POINTER(ctypes.c_void_p)
+DoubleP = ctypes.POINTER(ctypes.c_double)
+UInt32P = ctypes.POINTER(ctypes.c_uint32)
+VoidPP = ctypes.POINTER(ctypes.c_void_p)
+
 
 def _sig(fn, argtypes, restype):
     fn.argtypes = argtypes
-    fn.restype  = restype
+    fn.restype = restype
 
-_sig(lib.rssn_dag_new,          [],                                   c_void_p)
-_sig(lib.rssn_dag_free,         [c_void_p],                           None)
-_sig(lib.rssn_dag_parse,        [c_void_p, c_char_p, UInt32P],       c_int)
-_sig(lib.rssn_dag_simplify,     [c_void_p, c_uint32],                c_uint32)
-_sig(lib.rssn_dag_compile,      [c_void_p, c_uint32, VoidPP],        c_int)
-_sig(lib.rssn_dag_compile_batch,[c_void_p, c_uint32, VoidPP],        c_int)
-_sig(lib.rssn_dag_execute_bulk,
-     [c_void_p, VoidPP, c_uint32, c_size_t, DoubleP],                c_int)
-_sig(lib.rssn_dag_execute_batch,
-     [c_void_p, VoidPP, c_size_t, DoubleP],                          c_int)
+
+_sig(lib.rssn_dag_new, [], c_void_p)
+_sig(lib.rssn_dag_free, [c_void_p], None)
+_sig(lib.rssn_dag_parse, [c_void_p, c_char_p, UInt32P], c_int)
+_sig(lib.rssn_dag_simplify, [c_void_p, c_uint32], c_uint32)
+_sig(lib.rssn_dag_compile, [c_void_p, c_uint32, VoidPP], c_int)
+_sig(lib.rssn_dag_compile_batch, [c_void_p, c_uint32, VoidPP], c_int)
+_sig(lib.rssn_dag_execute_bulk, [c_void_p, VoidPP, c_uint32, c_size_t, DoubleP], c_int)
+_sig(lib.rssn_dag_execute_batch, [c_void_p, VoidPP, c_size_t, DoubleP], c_int)
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
 
 def col_ptrs(*arrays):
     """ctypes void* array pointing at each numpy column's data."""
@@ -103,12 +103,13 @@ def build_expr(expr_str: str):
 
     scalar_ptr = ctypes.c_void_p()
     status = lib.rssn_dag_compile(builder, simp_id, ctypes.byref(scalar_ptr))
-    assert status == 0 and scalar_ptr.value, \
+    assert status == 0 and scalar_ptr.value, (
         f"scalar compile failed ({status}) for: {expr_str!r}"
+    )
 
     batch_ptr = ctypes.c_void_p()
     bst = lib.rssn_dag_compile_batch(builder, simp_id, ctypes.byref(batch_ptr))
-    has_batch = (bst == 0 and bool(batch_ptr.value))
+    has_batch = bst == 0 and bool(batch_ptr.value)
 
     return builder, simp_id, scalar_ptr, (batch_ptr if has_batch else None)
 
@@ -127,8 +128,8 @@ def bench_fn(fn, warmup=2, repeats=5):
 
 def print_row(label: str, t: float, N: int, ref: float | None = None):
     ns = t / N * 1e9
-    ratio = f"  {ref/t:6.2f}x faster than NumPy" if ref is not None else ""
-    print(f"  {label:<44s}  {t*1e3:7.3f} ms   {ns:6.2f} ns/eval{ratio}")
+    ratio = f"  {ref / t:6.2f}x faster than NumPy" if ref is not None else ""
+    print(f"  {label:<44s}  {t * 1e3:7.3f} ms   {ns:6.2f} ns/eval{ratio}")
 
 
 # ── Expression suite ───────────────────────────────────────────────────────
@@ -157,29 +158,45 @@ SUITE = [
         "x^3 + y^3 + z^3 - 3*x*y*z + x^2*y - x*y^2 + y^2*z - y*z^2 + z^2*x - z*x^2",
         3,
         lambda xc, yc, zc: (
-            xc**3 + yc**3 + zc**3 - 3*xc*yc*zc
-            + xc**2*yc - xc*yc**2 + yc**2*zc - yc*zc**2 + zc**2*xc - zc*xc**2
+            xc**3
+            + yc**3
+            + zc**3
+            - 3 * xc * yc * zc
+            + xc**2 * yc
+            - xc * yc**2
+            + yc**2 * zc
+            - yc * zc**2
+            + zc**2 * xc
+            - zc * xc**2
         ),
-        x**3 + y**3 + z**3 - 3*x*y*z
-        + x**2*y - x*y**2 + y**2*z - y*z**2 + z**2*x - z*x**2,
+        x**3
+        + y**3
+        + z**3
+        - 3 * x * y * z
+        + x**2 * y
+        - x * y**2
+        + y**2 * z
+        - y * z**2
+        + z**2 * x
+        - z * x**2,
     ),
     (
         "4. Rational w/ CSE  [2 vars, repeated subexpr]",
-        "(x^2 + y^2) / (x^2 + y^2 + 1.0)"
-        " + x*y*(x^2 - y^2) / (x^2 + y^2 + 1.0)^2",
+        "(x^2 + y^2) / (x^2 + y^2 + 1.0) + x*y*(x^2 - y^2) / (x^2 + y^2 + 1.0)^2",
         2,
         # NumPy *optimised*: subexpr computed once
         lambda xc, yc: (
             lambda r2: r2 / (r2 + 1.0) + xc * yc * (xc**2 - yc**2) / (r2 + 1.0) ** 2
         )(xc**2 + yc**2),
         (x**2 + y**2) / (x**2 + y**2 + 1)
-        + x*y*(x**2 - y**2) / (x**2 + y**2 + 1)**2,
+        + x * y * (x**2 - y**2) / (x**2 + y**2 + 1) ** 2,
     ),
 ]
 
 # ── Main ───────────────────────────────────────────────────────────────────
 
 N = 1_000_000
+
 
 def run_benchmark():
     sep = "=" * 78
@@ -195,20 +212,20 @@ def run_benchmark():
         "y": np.ascontiguousarray(rng.uniform(-5.0, 5.0, N), np.float64),
         "z": np.ascontiguousarray(rng.uniform(-5.0, 5.0, N), np.float64),
     }
-    var_order = ["x", "y", "z"]   # matches parse-intern order for all exprs
+    var_order = ["x", "y", "z"]  # matches parse-intern order for all exprs
 
-    out     = np.empty(N, np.float64)
-    out_p   = out.ctypes.data_as(DoubleP)
-    cols_3  = col_ptrs(*[cols_data[v] for v in var_order])          # 3-var ptr array
-    cols_2  = col_ptrs(*[cols_data[v] for v in var_order[:2]])      # 2-var ptr array
+    out = np.empty(N, np.float64)
+    out_p = out.ctypes.data_as(DoubleP)
+    cols_3 = col_ptrs(*[cols_data[v] for v in var_order])  # 3-var ptr array
+    cols_2 = col_ptrs(*[cols_data[v] for v in var_order[:2]])  # 2-var ptr array
 
-    summary = []   # (expr_name, t_numpy, t_bulk, t_batch_or_None, speedup)
+    summary = []  # (expr_name, t_numpy, t_bulk, t_batch_or_None, speedup)
 
-    for (name, expr_str, n_vars, numpy_fn, sympy_expr) in SUITE:
-        print(f"\n{'─'*78}")
+    for name, expr_str, n_vars, numpy_fn, sympy_expr in SUITE:
+        print(f"\n{'─' * 78}")
         print(f"  {name}")
         print(f"  {expr_str}")
-        print(f"{'─'*78}")
+        print(f"{'─' * 78}")
 
         # ── build + compile ────────────────────────────────────────────────
         builder, _, scalar_ptr, batch_ptr = build_expr(expr_str)
@@ -228,23 +245,25 @@ def run_benchmark():
         # ── Rust JIT batch (vectorised, if available) ──────────────────────
         t_batch = None
         if batch_ptr is not None:
+
             def rust_batch():
                 lib.rssn_dag_execute_batch(batch_ptr, cols, N, out_p)
+
             t_batch = bench_fn(rust_batch)
             rust_batch_out = out.copy()
 
         # ── NumPy (vectorised, hand-optimised) ────────────────────────────
         def numpy_eval():
             res = numpy_fn(*args)
-            np.copyto(out, res)          # write into pre-allocated buffer
+            np.copyto(out, res)  # write into pre-allocated buffer
 
         t_numpy = bench_fn(numpy_eval)
         numpy_out = out.copy()
 
         # ── SymPy lambdify → numpy backend ────────────────────────────────
-        syms   = [x, y, z][:n_vars]
+        syms = [x, y, z][:n_vars]
         lam_np = sympy.lambdify(syms, sympy_expr, "numpy")
-        lam_np(*args)   # warm up
+        lam_np(*args)  # warm up
 
         def sympy_np_eval():
             lam_np(*args)
@@ -255,11 +274,11 @@ def run_benchmark():
         print_row("Rust JIT bulk  (scalar, Rust loop)", t_bulk, N)
         if t_batch is not None:
             print_row("Rust JIT batch (2-row ILP vectorised)", t_batch, N)
-        print_row("NumPy (SIMD / C, hand-optimised)",  t_numpy, N)
-        print_row("SymPy lambdify → numpy backend",    t_sympy_np, N)
+        print_row("NumPy (SIMD / C, hand-optimised)", t_numpy, N)
+        print_row("SymPy lambdify → numpy backend", t_sympy_np, N)
 
         # Speedup relative to NumPy
-        speedup_bulk  = t_numpy / t_bulk
+        speedup_bulk = t_numpy / t_bulk
         speedup_batch = (t_numpy / t_batch) if t_batch is not None else None
         faster = "faster" if speedup_bulk >= 1.0 else "slower"
         print(f"\n  JIT bulk  vs NumPy: {speedup_bulk:5.2f}x {faster}")
@@ -270,21 +289,32 @@ def run_benchmark():
         # ── Accuracy ──────────────────────────────────────────────────────
         ref = numpy_out
         max_bulk = float(np.max(np.abs(rust_bulk_out - ref)))
-        ok_bulk  = max_bulk < 1e-9
-        print(f"\n  Accuracy  bulk  max|Δ|={max_bulk:.2e}  {'✔' if ok_bulk else '✗ MISMATCH'}")
+        ok_bulk = max_bulk < 1e-9
+        print(
+            f"\n  Accuracy  bulk  max|Δ|={max_bulk:.2e}  {'✔' if ok_bulk else '✗ MISMATCH'}"
+        )
         if t_batch is not None:
             max_batch = float(np.max(np.abs(rust_batch_out - ref)))
-            ok_batch  = max_batch < 1e-9
-            print(f"            batch max|Δ|={max_batch:.2e}  {'✔' if ok_batch else '✗ MISMATCH'}")
+            ok_batch = max_batch < 1e-9
+            print(
+                f"            batch max|Δ|={max_batch:.2e}  {'✔' if ok_batch else '✗ MISMATCH'}"
+            )
 
         # ── Temp-array analysis ───────────────────────────────────────────
         # Count the number of intermediate arrays NumPy's ufunc chain creates.
         # Each binary op on two arrays produces one new array (without in-place).
-        ops = expr_str.count("+") + expr_str.count("-") + expr_str.count("*") \
-            + expr_str.count("/") + expr_str.count("^")
+        ops = (
+            expr_str.count("+")
+            + expr_str.count("-")
+            + expr_str.count("*")
+            + expr_str.count("/")
+            + expr_str.count("^")
+        )
         # Each intermediate array: N × 8 bytes
         tmp_mb = ops * N * 8 / 1024 / 1024
-        print(f"\n  NumPy intermediate arrays: ~{ops} ops → ~{tmp_mb:.0f} MB peak temp memory")
+        print(
+            f"\n  NumPy intermediate arrays: ~{ops} ops → ~{tmp_mb:.0f} MB peak temp memory"
+        )
         print(f"  JIT: 0 intermediate arrays — all values kept in CPU registers")
 
         summary.append((name, t_numpy, t_bulk, t_batch))
@@ -294,9 +324,9 @@ def run_benchmark():
     print(f"\n{sep}")
     print("  SUMMARY: JIT speedup vs hand-optimised NumPy")
     print(f"  {'Expression':<46}  {'bulk':>8}  {'batch':>8}")
-    print(f"  {'─'*46}  {'─'*8}  {'─'*8}")
-    for (name, t_np, t_bulk, t_batch) in summary:
-        su_bulk  = t_np / t_bulk
+    print(f"  {'─' * 46}  {'─' * 8}  {'─' * 8}")
+    for name, t_np, t_bulk, t_batch in summary:
+        su_bulk = t_np / t_bulk
         su_batch = (t_np / t_batch) if t_batch is not None else None
         label = name.split("  ")[0] if "  " in name else name
         batch_str = f"{su_batch:6.2f}x" if su_batch is not None else "  n/a  "

@@ -5,7 +5,8 @@
 //!
 //! * x86_64 + AVX2: `vcmpeqpd ymm` + `vmovmskpd` to collapse sign bits.
 //! * AArch64: two `fcmeq v.2d` + `umov` to extract lane masks (NEON mandatory).
-//! * riscv64: scalar (RVV predicate-mask expansion is overly complex for 4 lanes).
+//! * riscv64 + RVV: `vmfeq.vv` to produce a mask register, then `vmerge.vim`
+//!   with e8/vl=4 to expand each mask bit to `0xFF` or `0x00`.
 //! * fallback: scalar `==` loop.
 
 #![allow(unsafe_code)]
@@ -99,6 +100,44 @@ pub fn apply(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) {
         let lane_bits = [m0, m1, m2, m3];
         for (slot, &bits) in mask.iter_mut().zip(lane_bits.iter()) {
             *slot = if bits != 0 { 0xFF } else { 0x00 };
+        }
+        return;
+    }
+
+    #[cfg(all(target_arch = "riscv64", target_feature = "v"))]
+    {
+        // RVV 1.0 with vl=4, e64 for the comparison, then vl=4, e8 to
+        // expand each mask bit to 0xFF / 0x00 in one `vmerge.vim`.
+        //
+        // `vmfeq.vv v0, v1, v2` writes a *mask register* (v0.m) where
+        // bit i = 1 iff lhs[i] == rhs[i] (NaN != NaN per IEEE-754).
+        // Switching SEW to e8 with the same vl=4 keeps the mask bits
+        // aligned: bit i of v0 still corresponds to element i.
+        // `vmerge.vim v1, v1, -1, v0` writes 0xFF (simm5=-1 sign-extends
+        // to all-ones for e8) where the mask bit is 1, 0x00 otherwise.
+        unsafe {
+            use core::arch::asm;
+            asm!(
+                // Phase 1: compare as f64x4, result in mask register v0.
+                "li t0, 4",
+                "vsetvli t0, t0, e64, m1, ta, ma",
+                "vle64.v v1, ({lhs})",
+                "vle64.v v2, ({rhs})",
+                "vmfeq.vv v0, v1, v2",
+                // Phase 2: expand mask bits to 0xFF/0x00 bytes.
+                "vsetvli t0, t0, e8, m1, ta, ma",
+                "vmv.v.i v1, 0",
+                "vmerge.vim v1, v1, -1, v0",
+                "vse8.v v1, ({mask})",
+                lhs  = in(reg) lhs.as_ptr(),
+                rhs  = in(reg) rhs.as_ptr(),
+                mask = in(reg) mask.as_mut_ptr(),
+                out("t0") _,
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+                options(nostack),
+            );
         }
         return;
     }

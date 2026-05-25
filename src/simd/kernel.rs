@@ -113,12 +113,12 @@ pub struct Avx2Kernel;
 #[cfg(target_arch = "x86_64")]
 impl SimdKernel for Avx2Kernel {
     fn batch_add(&self, a: &[f64], b: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::add_f64x4_avx2;
+        use crate::asm_presets::add_f64x4;
         const LANES: usize = 4;
         let n = out.len();
         let mut i = 0;
         while i + LANES <= n {
-            add_f64x4_avx2::apply(&a[i..i + LANES], &b[i..i + LANES], &mut out[i..i + LANES]);
+            add_f64x4::apply(&a[i..i + LANES], &b[i..i + LANES], &mut out[i..i + LANES]);
             i += LANES;
         }
         while i < n {
@@ -128,12 +128,12 @@ impl SimdKernel for Avx2Kernel {
     }
 
     fn batch_sub(&self, a: &[f64], b: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::sub_f64x4_avx2;
+        use crate::asm_presets::sub_f64x4;
         const LANES: usize = 4;
         let n = out.len();
         let mut i = 0;
         while i + LANES <= n {
-            sub_f64x4_avx2::apply(&a[i..i + LANES], &b[i..i + LANES], &mut out[i..i + LANES]);
+            sub_f64x4::apply(&a[i..i + LANES], &b[i..i + LANES], &mut out[i..i + LANES]);
             i += LANES;
         }
         while i < n {
@@ -143,12 +143,12 @@ impl SimdKernel for Avx2Kernel {
     }
 
     fn batch_mul(&self, a: &[f64], b: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::mul_f64x4_avx2;
+        use crate::asm_presets::mul_f64x4;
         const LANES: usize = 4;
         let n = out.len();
         let mut i = 0;
         while i + LANES <= n {
-            mul_f64x4_avx2::apply(&a[i..i + LANES], &b[i..i + LANES], &mut out[i..i + LANES]);
+            mul_f64x4::apply(&a[i..i + LANES], &b[i..i + LANES], &mut out[i..i + LANES]);
             i += LANES;
         }
         while i < n {
@@ -158,12 +158,12 @@ impl SimdKernel for Avx2Kernel {
     }
 
     fn batch_div(&self, a: &[f64], b: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::div_f64x4_avx2;
+        use crate::asm_presets::div_f64x4;
         const LANES: usize = 4;
         let n = out.len();
         let mut i = 0;
         while i + LANES <= n {
-            div_f64x4_avx2::apply(&a[i..i + LANES], &b[i..i + LANES], &mut out[i..i + LANES]);
+            div_f64x4::apply(&a[i..i + LANES], &b[i..i + LANES], &mut out[i..i + LANES]);
             i += LANES;
         }
         while i < n {
@@ -173,12 +173,12 @@ impl SimdKernel for Avx2Kernel {
     }
 
     fn batch_fma(&self, a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::fma_f64x4_avx2;
+        use crate::asm_presets::fma_f64x4;
         const LANES: usize = 4;
         let n = out.len();
         let mut i = 0;
         while i + LANES <= n {
-            fma_f64x4_avx2::apply(
+            fma_f64x4::apply(
                 &a[i..i + LANES],
                 &b[i..i + LANES],
                 &c[i..i + LANES],
@@ -253,7 +253,7 @@ pub struct NeonKernel;
 #[cfg(target_arch = "aarch64")]
 impl SimdKernel for NeonKernel {
     fn batch_add(&self, a: &[f64], b: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::add_f64x2_neon;
+        use crate::asm_presets::add_f64x2;
         const LANES: usize = 2;
         let n = out.len();
         let mut i = 0;
@@ -261,7 +261,7 @@ impl SimdKernel for NeonKernel {
             let a2: &[f64; 2] = (&a[i..i + LANES]).try_into().unwrap();
             let b2: &[f64; 2] = (&b[i..i + LANES]).try_into().unwrap();
             let o2: &mut [f64; 2] = (&mut out[i..i + LANES]).try_into().unwrap();
-            add_f64x2_neon::apply(a2, b2, o2);
+            add_f64x2::apply(a2, b2, o2);
             i += LANES;
         }
         while i < n {
@@ -271,7 +271,7 @@ impl SimdKernel for NeonKernel {
     }
 
     fn batch_sub(&self, a: &[f64], b: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::sub_f64x2_neon;
+        use crate::asm_presets::sub_f64x2;
         const LANES: usize = 2;
         let n = out.len();
         let mut i = 0;
@@ -279,7 +279,7 @@ impl SimdKernel for NeonKernel {
             let a2: &[f64; 2] = (&a[i..i + LANES]).try_into().unwrap();
             let b2: &[f64; 2] = (&b[i..i + LANES]).try_into().unwrap();
             let o2: &mut [f64; 2] = (&mut out[i..i + LANES]).try_into().unwrap();
-            sub_f64x2_neon::apply(a2, b2, o2);
+            sub_f64x2::apply(a2, b2, o2);
             i += LANES;
         }
         while i < n {
@@ -289,7 +289,7 @@ impl SimdKernel for NeonKernel {
     }
 
     fn batch_mul(&self, a: &[f64], b: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::mul_f64x2_neon;
+        use crate::asm_presets::mul_f64x2;
         const LANES: usize = 2;
         let n = out.len();
         let mut i = 0;
@@ -297,7 +297,7 @@ impl SimdKernel for NeonKernel {
             let a2: &[f64; 2] = (&a[i..i + LANES]).try_into().unwrap();
             let b2: &[f64; 2] = (&b[i..i + LANES]).try_into().unwrap();
             let o2: &mut [f64; 2] = (&mut out[i..i + LANES]).try_into().unwrap();
-            mul_f64x2_neon::apply(a2, b2, o2);
+            mul_f64x2::apply(a2, b2, o2);
             i += LANES;
         }
         while i < n {
@@ -307,7 +307,7 @@ impl SimdKernel for NeonKernel {
     }
 
     fn batch_div(&self, a: &[f64], b: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::div_f64x2_neon;
+        use crate::asm_presets::div_f64x2;
         const LANES: usize = 2;
         let n = out.len();
         let mut i = 0;
@@ -315,7 +315,7 @@ impl SimdKernel for NeonKernel {
             let a2: &[f64; 2] = (&a[i..i + LANES]).try_into().unwrap();
             let b2: &[f64; 2] = (&b[i..i + LANES]).try_into().unwrap();
             let o2: &mut [f64; 2] = (&mut out[i..i + LANES]).try_into().unwrap();
-            div_f64x2_neon::apply(a2, b2, o2);
+            div_f64x2::apply(a2, b2, o2);
             i += LANES;
         }
         while i < n {
@@ -332,14 +332,14 @@ impl SimdKernel for NeonKernel {
     }
 
     fn batch_sqrt(&self, a: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::sqrt_f64x2_neon;
+        use crate::asm_presets::sqrt_f64x2;
         const LANES: usize = 2;
         let n = out.len();
         let mut i = 0;
         while i + LANES <= n {
             let a2: &[f64; 2] = (&a[i..i + LANES]).try_into().unwrap();
             let o2: &mut [f64; 2] = (&mut out[i..i + LANES]).try_into().unwrap();
-            sqrt_f64x2_neon::apply(a2, o2);
+            sqrt_f64x2::apply(a2, o2);
             i += LANES;
         }
         while i < n {
@@ -349,14 +349,14 @@ impl SimdKernel for NeonKernel {
     }
 
     fn batch_neg(&self, a: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::neg_f64x2_neon;
+        use crate::asm_presets::neg_f64x2;
         const LANES: usize = 2;
         let n = out.len();
         let mut i = 0;
         while i + LANES <= n {
             let a2: &[f64; 2] = (&a[i..i + LANES]).try_into().unwrap();
             let o2: &mut [f64; 2] = (&mut out[i..i + LANES]).try_into().unwrap();
-            neg_f64x2_neon::apply(a2, o2);
+            neg_f64x2::apply(a2, o2);
             i += LANES;
         }
         while i < n {
@@ -366,14 +366,14 @@ impl SimdKernel for NeonKernel {
     }
 
     fn batch_abs(&self, a: &[f64], out: &mut [f64]) {
-        use crate::asm_presets::abs_f64x2_neon;
+        use crate::asm_presets::abs_f64x2;
         const LANES: usize = 2;
         let n = out.len();
         let mut i = 0;
         while i + LANES <= n {
             let a2: &[f64; 2] = (&a[i..i + LANES]).try_into().unwrap();
             let o2: &mut [f64; 2] = (&mut out[i..i + LANES]).try_into().unwrap();
-            abs_f64x2_neon::apply(a2, o2);
+            abs_f64x2::apply(a2, o2);
             i += LANES;
         }
         while i < n {

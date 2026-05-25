@@ -10,7 +10,11 @@
 //!   (M1+, `target_vendor = "apple"`) AES is mandatory so the runtime check
 //!   is elided at compile time; other AArch64 hosts probe via
 //!   `is_aarch64_feature_detected!`.
-//! * riscv64: scalar xor-mix (no stable RVV crypto asm available).
+//! * riscv64 + Zkn: `aes64esm` scalar AES-round instructions. The RISC-V Zkn
+//!   extension provides `aes64esm rd, rs1, rs2` which performs SubBytes +
+//!   ShiftRows + MixColumns on the 128-bit state `{rs2, rs1}`, outputting
+//!   one 64-bit half. Two calls (with rs1/rs2 swapped) give both halves.
+//!   AddRoundKey is performed with a subsequent XOR.
 //! * fallback: scalar multiplicative xor-mix.
 
 #![allow(unsafe_code)]
@@ -116,9 +120,47 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
         }
     }
 
-    // Scalar fallback (also covers riscv64 and non-crypto AArch64): a classic multiplicative xor-mix. Constants
-    // declared at the function top so the items-after-statements lint
-    // is satisfied even when all hardware paths are excluded.
+    #[cfg(all(target_arch = "riscv64", target_feature = "zkn"))]
+    {
+        // RISC-V Zkn scalar AES: one full round (SubBytes + ShiftRows +
+        // MixColumns) via `aes64esm`, plus explicit AddRoundKey XOR.
+        //
+        // The 128-bit state is {lhs (low 64 bits), rhs (high 64 bits)}.
+        // `aes64esm rd, rs1, rs2` computes the low (or high) half of
+        // SubBytes(ShiftRows({rs2, rs1})) + MixColumns, depending on
+        // which half rs1/rs2 map to. Swapping the argument order produces
+        // the complementary half — this is the standard two-instruction
+        // RV64 AES-round pattern from the RISC-V Scalar Crypto spec §3.4.
+        const RK_LO: u64 = 0xcbf2_9ce4_8422_2325; // same FNV-derived key as other paths
+        const RK_HI: u64 = 0x1000_0000_01b3_0000;
+        let lo: u64;
+        let hi: u64;
+        unsafe {
+            use core::arch::asm;
+            asm!(
+                // Low half: aes64esm(rd, low, high)
+                "aes64esm {lo}, {lhs}, {rhs}",
+                // High half: aes64esm(rd, high, low) — args swapped per spec
+                "aes64esm {hi}, {rhs}, {lhs}",
+                // AddRoundKey
+                "xor {lo}, {lo}, {rk_lo}",
+                "xor {hi}, {hi}, {rk_hi}",
+                lhs   = in(reg) lhs,
+                rhs   = in(reg) rhs,
+                rk_lo = in(reg) RK_LO,
+                rk_hi = in(reg) RK_HI,
+                lo    = out(reg) lo,
+                hi    = out(reg) hi,
+                options(nostack, pure, nomem),
+            );
+        }
+        return (lo, hi);
+    }
+
+    // Scalar fallback (non-crypto AArch64, riscv64 without Zkn, and other
+    // targets): a classic multiplicative xor-mix. Constants declared at the
+    // function top so the items-after-statements lint is satisfied even when
+    // all hardware paths are excluded.
     let mut x = lhs.wrapping_mul(MIX) ^ rhs;
     let mut y = rhs.wrapping_mul(MIX) ^ lhs;
     x ^= x >> 27;
