@@ -227,6 +227,90 @@ struct RssnJitContext;
 struct RssnRuleRegistry;
 
 /*
+ Opaque handle returned by [`rssn_dag_compile_async`].
+
+ Pass to [`rssn_async_compile_join`] to block until the fiber finishes and
+ retrieve the compiled function pointer.
+
+ The `fn_ptr_bits` field stores the raw function pointer as a `u64`; it is
+ undefined until after a successful join.
+ */
+struct RssnAsyncCompileHandle {
+    /*
+     Internal fiber handle id, or `u64::MAX` on early error.
+     */
+    uint64_t mHandleId;
+    /*
+     Compiled function pointer bits (valid only after a successful join).
+     Cast to `double (*)(const double*)` before calling.
+     */
+    uint64_t mFnPtrBits;
+    /*
+     Status set by the fiber; valid after join.
+     */
+    RssnStatus mStatus;
+
+    RssnAsyncCompileHandle(uint64_t const& aMHandleId,
+                           uint64_t const& aMFnPtrBits,
+                           RssnStatus const& aMStatus)
+      : mHandleId(aMHandleId),
+        mFnPtrBits(aMFnPtrBits),
+        mStatus(aMStatus)
+    {}
+
+    bool operator==(const RssnAsyncCompileHandle& aOther) const {
+        return mHandleId == aOther.mHandleId &&
+               mFnPtrBits == aOther.mFnPtrBits &&
+               mStatus == aOther.mStatus;
+    }
+    bool operator!=(const RssnAsyncCompileHandle& aOther) const {
+        return mHandleId != aOther.mHandleId ||
+               mFnPtrBits != aOther.mFnPtrBits ||
+               mStatus != aOther.mStatus;
+    }
+};
+
+/*
+ Opaque handle returned by [`rssn_dag_eval_async`].
+
+ Pass to [`rssn_async_eval_join`] to block until the fiber finishes and
+ retrieve the computed `f64` result.
+ */
+struct RssnAsyncEvalHandle {
+    /*
+     Internal fiber handle id, or `u64::MAX` on early error.
+     */
+    uint64_t mHandleId;
+    /*
+     Computed result (valid only after a successful join).
+     */
+    double mResult;
+    /*
+     Status set by the fiber; valid after join.
+     */
+    RssnStatus mStatus;
+
+    RssnAsyncEvalHandle(uint64_t const& aMHandleId,
+                        double const& aMResult,
+                        RssnStatus const& aMStatus)
+      : mHandleId(aMHandleId),
+        mResult(aMResult),
+        mStatus(aMStatus)
+    {}
+
+    bool operator==(const RssnAsyncEvalHandle& aOther) const {
+        return mHandleId == aOther.mHandleId &&
+               mResult == aOther.mResult &&
+               mStatus == aOther.mStatus;
+    }
+    bool operator!=(const RssnAsyncEvalHandle& aOther) const {
+        return mHandleId != aOther.mHandleId ||
+               mResult != aOther.mResult ||
+               mStatus != aOther.mStatus;
+    }
+};
+
+/*
  Opaque async simplification handle. Returned by
  [`rssn_dag_simplify_async_v2`]; pass to [`rssn_async_join`] to block
  until the fiber completes and obtain the result.
@@ -269,6 +353,27 @@ struct RssnAsyncHandle {
                mStatus != aOther.mStatus;
     }
 };
+
+/*
+ Callback type for a custom batch-build operator.
+
+ Called during [`rssn_dag_batch_build`] when the node `kind` field matches
+ a registered custom kind.  The callback receives a `DagBuilder`, the
+ resolved child node IDs and their count, and the `user_data` pointer
+ supplied at registration.  Return a new valid node ID allocated in
+ `builder`, or `u32::MAX` to signal failure.
+
+ # Safety
+
+ - `builder` is valid and non-null for the duration of this call.
+ - `child_ids` points to an array of exactly `n_children` resolved node IDs.
+ - `user_data` is the opaque pointer provided at `rssn_batch_op_register` time;
+   the caller is responsible for its lifetime.
+ */
+using RssnBatchOpCallback = uint32_t(*)(DagBuilder *builder,
+                                        const uint32_t *child_ids,
+                                        uint32_t n_children,
+                                        void *user_data);
 
 /*
  Compact node descriptor for batch DAG construction.
@@ -542,6 +647,40 @@ using RssnRuleCallback = uint32_t(*)(DagBuilder *builder,
 extern "C" {
 
 /*
+ Blocks until the compile fiber completes, writes the function pointer to
+ `*out_fn` (if non-null), frees the handle, and returns the fiber's status.
+
+ After this call `builder` may be freed.  The function pointer written to
+ `*out_fn` (if `status == Success`) is valid for as long as the process-level
+ JIT module lives — i.e. for the lifetime of the process.
+
+ # Safety
+
+ `handle` must have been obtained from [`rssn_dag_compile_async`] and must
+ not be used after this call.
+ */
+
+RssnStatus rssn_async_compile_join(RssnAsyncCompileHandle *aHandle,
+                                   void **aOutFn)
+;
+
+/*
+ Blocks until the eval fiber completes, writes the result to `*out_val`
+ (if non-null), frees the handle, and returns the fiber's status.
+
+ After this call `builder` and `vars` may be freed.
+
+ # Safety
+
+ `handle` must have been obtained from [`rssn_dag_eval_async`] and must
+ not be used after this call.
+ */
+
+RssnStatus rssn_async_eval_join(RssnAsyncEvalHandle *aHandle,
+                                double *aOutVal)
+;
+
+/*
  Blocks until the fiber behind `handle` completes, then frees the handle
  and writes the result to `*out_root` (if non-null).
 
@@ -558,7 +697,46 @@ RssnStatus rssn_async_join(RssnAsyncHandle *aHandle,
 ;
 
 /*
+ Registers a custom batch operator for use with [`rssn_dag_batch_build`].
+
+ `kind` must be in the range `16..=255`; kinds `0..=15` are reserved for
+ built-in operators and this function returns [`RssnStatus::InvalidNodeId`]
+ if `kind` falls in that range.  Registering the same `kind` twice returns
+ [`RssnStatus::RuleConflict`].
+
+ The `callback` receives the resolved child node IDs for the batch node and
+ must allocate a new DAG node in `builder`, returning its id.  `n_children`
+ specifies how many of `child0`/`child1` are meaningful in the descriptor
+ (currently capped at 2 by the `RssnNodeDesc` layout).
+
+ # Safety
+
+ - `callback` must be a valid function pointer that remains valid until
+   [`rssn_batch_op_unregister`] is called for the same `kind`.
+ - `user_data` is forwarded to the callback opaquely; its lifetime is the
+   caller's responsibility.
+ */
+
+RssnStatus rssn_batch_op_register(uint8_t aKind,
+                                  uint32_t aNChildren,
+                                  Option<RssnBatchOpCallback> aCallback,
+                                  void *aUserData)
+;
+
+/*
+ Unregisters a previously registered custom batch operator.
+
+ Returns [`RssnStatus::Success`] if the kind was registered, or
+ [`RssnStatus::InvalidNodeId`] if it was not (or if `kind < 16`).
+ */
+
+RssnStatus rssn_batch_op_unregister(uint8_t aKind)
+;
+
+/*
  Allocates a new addition node in the DAG: `lhs + rhs`.
+
+ Returns `u32::MAX` on error.  **Deprecated** — use [`rssn_dag_add_v2`].
 
  # Safety
 
@@ -681,6 +859,72 @@ RssnStatus rssn_dag_compile(DagBuilder *aBuilder,
 ;
 
 /*
+ Simplifies and JIT-compiles an expression asynchronously.
+
+ Fires a fiber that runs `simplify(builder, root)` followed by
+ `JitCompiler::compile(ast)` using the process-level JIT context.
+ Returns immediately with an opaque handle; call [`rssn_async_compile_join`]
+ to block until the fiber finishes and obtain the function pointer.
+
+ The caller **must** call [`rssn_async_compile_join`] before freeing `builder`.
+
+ Returns a non-null handle even on early error (null `builder`) — the handle
+ will have `status = NullPointer` and joining it is a no-op.
+
+ # Safety
+
+ - `builder` must remain valid and unmodified until after
+   [`rssn_async_compile_join`] returns.
+ - The returned handle must be freed by [`rssn_async_compile_join`].
+ */
+
+RssnAsyncCompileHandle *rssn_dag_compile_async(DagBuilder *aBuilder,
+                                               uint32_t aRoot)
+;
+
+/*
+ Stub for non-JIT builds: returns an immediately-joined error handle.
+ */
+
+RssnAsyncCompileHandle *rssn_dag_compile_async(DagBuilder *aBuilder,
+                                               uint32_t aRoot)
+;
+
+/*
+ Compiles a 2-row ILP-vectorised version of the expression.
+
+ The Cranelift backend generates two independent SSA chains that evaluate
+ two rows simultaneously, keeping execution units busy across instruction
+ latency gaps. For memory-bound workloads this approaches 2× scalar
+ throughput; for compute-bound workloads the speedup is limited by
+ available instruction-level parallelism.
+
+ On success writes the batch function pointer to `*out_fn`.
+ Use [`rssn_dag_execute_batch`] to dispatch the compiled function.
+
+ Returns [`RssnStatus::CompilationError`] if the expression cannot be
+ vectorised (e.g. contains non-vectorisable operations).
+
+ # Safety
+
+ Same as [`rssn_dag_compile`].
+ */
+
+RssnStatus rssn_dag_compile_batch(DagBuilder *aBuilder,
+                                  uint32_t aRoot,
+                                  void **aOutFn)
+;
+
+/*
+ Stub for non-JIT builds.
+ */
+
+RssnStatus rssn_dag_compile_batch(DagBuilder *aBuilder,
+                                  uint32_t aRoot,
+                                  void **aOutFn)
+;
+
+/*
  JIT compiles a target expression. Status-returning variant.
 
  On `Success`, writes the compiled function pointer to `*out_fn`.
@@ -768,6 +1012,8 @@ RssnStatus rssn_dag_compile_with_opts(void *aCtx,
 /*
  Allocates a new constant node in the DAG.
 
+ Returns `u32::MAX` on error.  **Deprecated** — use [`rssn_dag_constant_v2`].
+
  # Safety
 
  `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
@@ -853,7 +1099,44 @@ RssnStatus rssn_dag_egraph_saturate_extract(DagBuilder *aBuilder,
 ;
 
 /*
+ Simplifies, JIT-compiles, and evaluates an expression asynchronously.
+
+ The full pipeline — `simplify → compile → execute(vars)` — runs in a fiber.
+ Returns immediately; call [`rssn_async_eval_join`] to block and get the
+ `f64` result.
+
+ The caller **must** call [`rssn_async_eval_join`] before freeing `builder`
+ **or** `vars`.
+
+ # Safety
+
+ - `builder` must remain valid and unmodified until after
+   [`rssn_async_eval_join`] returns.
+ - `vars` must point to an array of at least as many `f64` values as there
+   are distinct variables in the expression, ordered by `SymbolId`.  It must
+   remain valid and unmodified until after [`rssn_async_eval_join`] returns.
+ - The returned handle must be freed by [`rssn_async_eval_join`].
+ */
+
+RssnAsyncEvalHandle *rssn_dag_eval_async(DagBuilder *aBuilder,
+                                         uint32_t aRoot,
+                                         const double *aVars)
+;
+
+/*
+ Stub for non-JIT builds.
+ */
+
+RssnAsyncEvalHandle *rssn_dag_eval_async(DagBuilder *aBuilder,
+                                         uint32_t aRoot,
+                                         const double *aVars)
+;
+
+/*
  Executes a previously compiled JIT function with the given variable input array.
+
+ Returns `0.0` on error, which is indistinguishable from a legitimate zero result.
+ **Deprecated** — use [`rssn_dag_execute_v2`] to get a distinct error status.
 
  # Safety
 
@@ -874,6 +1157,75 @@ double rssn_dag_execute(const void *aFunc,
 
 double rssn_dag_execute(const void *aFunc,
                         const double *aVariables)
+;
+
+/*
+ Dispatches a batch-compiled function over `n_rows` rows.
+
+ `vars_cols` is an array of column pointers (one per variable, each of
+ length `n_rows`).  The batch function processes two rows per cycle via
+ independent SSA chains; a scalar tail handles any odd final row.
+
+ # Safety
+
+ - `batch_fn` must be a valid function pointer from [`rssn_dag_compile_batch`].
+ - `vars_cols` must point to an array of column pointers, each of length `n_rows`.
+ - `out` must point to a writable array of `n_rows` `f64` values.
+ */
+
+RssnStatus rssn_dag_execute_batch(const void *aBatchFn,
+                                  const double *const *aVarsCols,
+                                  size_t aNRows,
+                                  double *aOut)
+;
+
+/*
+ Stub for non-JIT builds.
+ */
+
+RssnStatus rssn_dag_execute_batch(const void *aBatchFn,
+                                  const double *const *aVarsCols,
+                                  size_t aNRows,
+                                  double *aOut)
+;
+
+/*
+ Evaluates a scalar JIT function over `n_rows` rows in a tight Rust loop,
+ eliminating per-row FFI overhead from the calling language.
+
+ `vars_cols` is an array of `n_vars` pointers; each pointer addresses a
+ contiguous column of `n_rows` `f64` values for the corresponding variable.
+ Columns must be ordered by **`SymbolId`**: the first variable interned into
+ the `DagBuilder` has `SymbolId` 0 and uses `vars_cols[0]`, etc.
+
+ One FFI call amortises setup cost over `n_rows` evaluations. For `n_rows`
+ ≥ 1 000, throughput is limited by memory bandwidth, not FFI overhead.
+
+ # Safety
+
+ - `func` must be a valid function pointer from [`rssn_dag_compile`].
+ - `vars_cols` must point to `n_vars` valid column pointers, each of length
+   `n_rows`.
+ - `out` must point to a writable array of `n_rows` `f64` values.
+ - All pointers must remain valid for the duration of this call.
+ */
+
+RssnStatus rssn_dag_execute_bulk(const void *aFunc,
+                                 const double *const *aVarsCols,
+                                 uint32_t aNVars,
+                                 size_t aNRows,
+                                 double *aOut)
+;
+
+/*
+ Stub for non-JIT builds.
+ */
+
+RssnStatus rssn_dag_execute_bulk(const void *aFunc,
+                                 const double *const *aVarsCols,
+                                 uint32_t aNVars,
+                                 size_t aNRows,
+                                 double *aOut)
 ;
 
 /*
@@ -1116,7 +1468,8 @@ RssnStatus rssn_dag_pow_v2(DagBuilder *aBuilder,
 /*
  Simplifies a target expression using the default heuristic engine.
 
- Returns the new root node index of the simplified expression.
+ Returns the new root node index, or `u32::MAX` on error.
+ **Deprecated** — use [`rssn_dag_simplify_v2`] or [`rssn_dag_simplify_with_config`].
 
  # Safety
 
@@ -1244,10 +1597,7 @@ RssnStatus rssn_dag_sub_v2(DagBuilder *aBuilder,
  Returns the index of the variable node, or `u32::MAX` if a panic
  occurred, the builder was null, or `name` was not valid UTF-8.
 
- Looks up `name` zero-allocation on the hot path:
- [`CStr::to_bytes`] → `SymbolRegistry::intern_bytes`. Only the
- first time a given name is interned does an allocation happen
- (`ffi_review §2`).
+ **Deprecated** — use [`rssn_dag_variable_v2`] for richer error reporting.
 
  # Safety
 

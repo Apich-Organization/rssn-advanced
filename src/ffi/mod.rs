@@ -66,7 +66,8 @@ pub use c_api::{
     rssn_dag_call_fn, // legacy
 
     rssn_dag_call_fn_v2,
-    rssn_dag_compile, // legacy (still returns RssnStatus)
+    rssn_dag_compile,       // legacy (still returns RssnStatus)
+    rssn_dag_compile_batch, // compiles 2-row ILP-vectorised version
     // ── JIT compile / execute (canonical) ───────────────────────────────
     rssn_dag_compile_v2,
     rssn_dag_constant,
@@ -80,6 +81,9 @@ pub use c_api::{
 
     rssn_dag_execute, // legacy (returns f64, 0.0 on error)
 
+    rssn_dag_execute_batch, // dispatches the vectorised batch fn
+    // ── Bulk / batch evaluation (amortises FFI overhead) ─────────────────
+    rssn_dag_execute_bulk, // scalar JIT fn called in a tight Rust loop
     rssn_dag_execute_v2,
     rssn_dag_free,
 

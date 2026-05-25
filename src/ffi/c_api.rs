@@ -363,6 +363,206 @@ pub extern "C" fn rssn_dag_execute_v2(
     RssnStatus::CompilationError
 }
 
+// =========================================================================
+// Bulk / batch evaluation — amortises FFI overhead across many rows
+// =========================================================================
+//
+// Calling `rssn_dag_execute` from an interpreted language (Python, Julia, …)
+// inside a tight loop is ~200–400 ns per call just for the FFI dispatch,
+// completely swamping the 1–5 ns the JIT needs per evaluation.
+//
+// These three functions bring the overhead down to O(1) per batch:
+//
+//   rssn_dag_execute_bulk   — scalar JIT fn called in a tight *Rust* loop;
+//                             ~1–5 ns amortised overhead per row.
+//   rssn_dag_compile_batch  — compiles a 2-row ILP vectorised version of the
+//                             expression (Cranelift SSA dual-path).
+//   rssn_dag_execute_batch  — dispatches the vectorised batch fn; fastest path.
+//
+// Both functions use *column-major* layout for variables:
+//   vars_cols[var_index]  →  pointer to an array of n_rows f64 values.
+// This mirrors NumPy's column-major convention and avoids transposition.
+
+/// Evaluates a scalar JIT function over `n_rows` rows in a tight Rust loop,
+/// eliminating per-row FFI overhead from the calling language.
+///
+/// `vars_cols` is an array of `n_vars` pointers; each pointer addresses a
+/// contiguous column of `n_rows` `f64` values for the corresponding variable.
+/// Columns must be ordered by **`SymbolId`**: the first variable interned into
+/// the `DagBuilder` has `SymbolId` 0 and uses `vars_cols[0]`, etc.
+///
+/// One FFI call amortises setup cost over `n_rows` evaluations. For `n_rows`
+/// ≥ 1 000, throughput is limited by memory bandwidth, not FFI overhead.
+///
+/// # Safety
+///
+/// - `func` must be a valid function pointer from [`rssn_dag_compile`].
+/// - `vars_cols` must point to `n_vars` valid column pointers, each of length
+///   `n_rows`.
+/// - `out` must point to a writable array of `n_rows` `f64` values.
+/// - All pointers must remain valid for the duration of this call.
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn rssn_dag_execute_bulk(
+    func: *const c_void,
+    vars_cols: *const *const f64,
+    n_vars: u32,
+    n_rows: usize,
+    out: *mut f64,
+) -> RssnStatus {
+    if func.is_null() || out.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if n_vars > 0 && vars_cols.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let compiled_fn: crate::jit::compiler::CompiledExprFn =
+            unsafe { std::mem::transmute(func) };
+        let nv = n_vars as usize;
+        let cols: &[*const f64] = unsafe { std::slice::from_raw_parts(vars_cols, nv) };
+        let out_slice: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(out, n_rows) };
+
+        // Fixed stack buffer for the common case (≤ 8 variables).
+        // Avoids heap allocation inside the hot loop.
+        if nv <= 8 {
+            let mut buf = [0.0f64; 8];
+            for row in 0..n_rows {
+                for (vi, &col) in cols.iter().enumerate() {
+                    buf[vi] = unsafe { *col.add(row) };
+                }
+                out_slice[row] = compiled_fn(buf.as_ptr());
+            }
+        } else {
+            let mut buf = vec![0.0f64; nv];
+            for row in 0..n_rows {
+                for (vi, &col) in cols.iter().enumerate() {
+                    buf[vi] = unsafe { *col.add(row) };
+                }
+                out_slice[row] = compiled_fn(buf.as_ptr());
+            }
+        }
+        RssnStatus::Success
+    }));
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Stub for non-JIT builds.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_execute_bulk(
+    _func: *const c_void,
+    _vars_cols: *const *const f64,
+    _n_vars: u32,
+    _n_rows: usize,
+    _out: *mut f64,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
+/// Compiles a 2-row ILP-vectorised version of the expression.
+///
+/// The Cranelift backend generates two independent SSA chains that evaluate
+/// two rows simultaneously, keeping execution units busy across instruction
+/// latency gaps. For memory-bound workloads this approaches 2× scalar
+/// throughput; for compute-bound workloads the speedup is limited by
+/// available instruction-level parallelism.
+///
+/// On success writes the batch function pointer to `*out_fn`.
+/// Use [`rssn_dag_execute_batch`] to dispatch the compiled function.
+///
+/// Returns [`RssnStatus::CompilationError`] if the expression cannot be
+/// vectorised (e.g. contains non-vectorisable operations).
+///
+/// # Safety
+///
+/// Same as [`rssn_dag_compile`].
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn rssn_dag_compile_batch(
+    builder: *mut DagBuilder,
+    root: u32,
+    out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    if builder.is_null() || out_fn.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(|| {
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+        let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
+        let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
+        let mut ctx = ctx_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        match ctx.compiler_mut().compile_batch_f64x2(&ast) {
+            Ok(Some(batch_fn)) => {
+                unsafe { *out_fn = batch_fn as *mut c_void };
+                RssnStatus::Success
+            }
+            _ => RssnStatus::CompilationError,
+        }
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Stub for non-JIT builds.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_compile_batch(
+    _builder: *mut DagBuilder,
+    _root: u32,
+    _out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
+/// Dispatches a batch-compiled function over `n_rows` rows.
+///
+/// `vars_cols` is an array of column pointers (one per variable, each of
+/// length `n_rows`).  The batch function processes two rows per cycle via
+/// independent SSA chains; a scalar tail handles any odd final row.
+///
+/// # Safety
+///
+/// - `batch_fn` must be a valid function pointer from [`rssn_dag_compile_batch`].
+/// - `vars_cols` must point to an array of column pointers, each of length `n_rows`.
+/// - `out` must point to a writable array of `n_rows` `f64` values.
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn rssn_dag_execute_batch(
+    batch_fn: *const c_void,
+    vars_cols: *const *const f64,
+    n_rows: usize,
+    out: *mut f64,
+) -> RssnStatus {
+    if batch_fn.is_null() || vars_cols.is_null() || out.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let f: crate::jit::compiler::CompiledBatchFn = unsafe { std::mem::transmute(batch_fn) };
+        f(vars_cols, n_rows, out);
+        RssnStatus::Success
+    }));
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Stub for non-JIT builds.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_execute_batch(
+    _batch_fn: *const c_void,
+    _vars_cols: *const *const f64,
+    _n_rows: usize,
+    _out: *mut f64,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
 /// Simplifies an expression. Status-returning variant.
 ///
 /// # Safety
