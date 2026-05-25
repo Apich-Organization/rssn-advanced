@@ -2617,3 +2617,555 @@ mod batch_build_tests {
         rssn_dag_free(builder);
     }
 }
+
+// =============================================================================
+// Unified Custom-Operator Registry — C FFI
+// =============================================================================
+//
+// The `RssnCustomOpRegistry` is an opaque handle to a
+// `crate::custom::descriptor::CustomOpRegistry`.  It is the C-facing
+// equivalent of the Rust `CustomOpRegistry` and lets C/C++ callers register
+// operators that plug into all three pipelines in one place.
+//
+// Lifecycle:
+//   RssnCustomOpRegistry* reg = rssn_custom_op_registry_new();
+//   rssn_custom_op_register_fn1(reg, fn_id, "name", fn_ptr, vectorizable);
+//   rssn_custom_op_add_simplify_rule(reg, fn_id, "rule name", priority, cb, ud);
+//   rssn_custom_op_add_egraph_rule(reg, fn_id, after_builtins, cb, ud);
+//
+//   // Use in each pipeline step:
+//   rssn_dag_compile_with_custom_ops(builder, root, reg, &fn_ptr);
+//   rssn_dag_simplify_with_custom_ops(builder, root, reg, &out_id);
+//   rssn_dag_egraph_with_custom_ops(builder, root, cfg, reg, &out_id);
+//
+//   rssn_custom_op_registry_free(reg);
+
+use crate::custom::descriptor::{
+    CustomOpDescriptor, CustomOpRegistry, EvalFn, EvalFn1, EvalFn2, EvalFn3,
+};
+use std::sync::Arc;
+
+/// Opaque handle to a [`CustomOpRegistry`].
+///
+/// Heap-allocated; must be freed exactly once via [`rssn_custom_op_registry_free`].
+pub struct RssnCustomOpRegistry(Arc<CustomOpRegistry>);
+
+/// Allocates an empty [`RssnCustomOpRegistry`].
+///
+/// # Safety
+///
+/// The returned pointer must be freed exactly once via
+/// [`rssn_custom_op_registry_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_custom_op_registry_new() -> *mut RssnCustomOpRegistry {
+    let result = catch_unwind(|| {
+        Box::into_raw(Box::new(RssnCustomOpRegistry(Arc::new(
+            CustomOpRegistry::new(),
+        ))))
+    });
+    result.unwrap_or(std::ptr::null_mut())
+}
+
+/// Frees a [`RssnCustomOpRegistry`] allocated by [`rssn_custom_op_registry_new`].
+///
+/// # Safety
+///
+/// `reg` must be a pointer from [`rssn_custom_op_registry_new`], or NULL.
+/// Double-free is undefined behaviour.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_custom_op_registry_free(reg: *mut RssnCustomOpRegistry) {
+    if reg.is_null() {
+        return;
+    }
+    let _ = catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        drop(Box::from_raw(reg))
+    }));
+}
+
+// ── Internal helper: get a mutable reference to the inner registry ─────────
+//
+// The Arc inside RssnCustomOpRegistry is unwrapped mutably only while the
+// registry is being built (before it is shared with the JIT).  We use
+// Arc::get_mut; if the Arc has been cloned (i.e. shared with a JitCompiler)
+// this returns None and we return InvalidNodeId.
+
+fn registry_mut(reg: *mut RssnCustomOpRegistry) -> Option<&'static mut CustomOpRegistry> {
+    if reg.is_null() {
+        return None;
+    }
+    let wrapper = unsafe { &mut *reg };
+    Arc::get_mut(&mut wrapper.0)
+}
+
+// ── Operator registration ──────────────────────────────────────────────────
+
+/// Registers a 1-argument (`f64 → f64`) custom operator.
+///
+/// - `fn_id`: numeric identifier (must be unique in the registry).
+/// - `name`: null-terminated operator name (resolved by the parser).
+/// - `eval_fn`: `extern "C" fn(f64) -> f64` pointer.
+/// - `vectorizable`: non-zero if the function is pure and safe to duplicate
+///   in the ILP batch path.
+///
+/// # Safety
+///
+/// `reg` and `name` must be valid non-null pointers for the duration of
+/// this call.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_custom_op_register_fn1(
+    reg: *mut RssnCustomOpRegistry,
+    fn_id: u32,
+    name: *const c_char,
+    eval_fn: Option<EvalFn1>,
+    vectorizable: u8,
+) -> RssnStatus {
+    if reg.is_null() || name.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let Some(eval_fn) = eval_fn else {
+        return RssnStatus::NullPointer;
+    };
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let name_str = unsafe { CStr::from_ptr(name) }
+            .to_str()
+            .map_err(|_| RssnStatus::ParseError)?
+            .to_owned();
+        let reg_mut = registry_mut(reg).ok_or(RssnStatus::InvalidNode)?;
+        let desc = CustomOpDescriptor::builder(
+            crate::dag::symbol::FnId(fn_id),
+            name_str,
+            EvalFn::Arity1(eval_fn),
+        )
+        .cost(2.0);
+        let desc = if vectorizable != 0 {
+            desc.vectorizable()
+        } else {
+            desc
+        };
+        reg_mut
+            .register(desc.build())
+            .map_err(|_| RssnStatus::RuleConflict)?;
+        Ok(RssnStatus::Success)
+    }));
+    result
+        .unwrap_or(Err(RssnStatus::Panic))
+        .unwrap_or_else(|e| e)
+}
+
+/// Registers a 2-argument (`f64, f64 → f64`) custom operator.
+///
+/// # Safety
+///
+/// Same as [`rssn_custom_op_register_fn1`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_custom_op_register_fn2(
+    reg: *mut RssnCustomOpRegistry,
+    fn_id: u32,
+    name: *const c_char,
+    eval_fn: Option<EvalFn2>,
+    vectorizable: u8,
+) -> RssnStatus {
+    if reg.is_null() || name.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let Some(eval_fn) = eval_fn else {
+        return RssnStatus::NullPointer;
+    };
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let name_str = unsafe { CStr::from_ptr(name) }
+            .to_str()
+            .map_err(|_| RssnStatus::ParseError)?
+            .to_owned();
+        let reg_mut = registry_mut(reg).ok_or(RssnStatus::InvalidNode)?;
+        let desc = CustomOpDescriptor::builder(
+            crate::dag::symbol::FnId(fn_id),
+            name_str,
+            EvalFn::Arity2(eval_fn),
+        )
+        .cost(2.0);
+        let desc = if vectorizable != 0 {
+            desc.vectorizable()
+        } else {
+            desc
+        };
+        reg_mut
+            .register(desc.build())
+            .map_err(|_| RssnStatus::RuleConflict)?;
+        Ok(RssnStatus::Success)
+    }));
+    result
+        .unwrap_or(Err(RssnStatus::Panic))
+        .unwrap_or_else(|e| e)
+}
+
+/// Registers a 3-argument (`f64, f64, f64 → f64`) custom operator.
+///
+/// # Safety
+///
+/// Same as [`rssn_custom_op_register_fn1`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_custom_op_register_fn3(
+    reg: *mut RssnCustomOpRegistry,
+    fn_id: u32,
+    name: *const c_char,
+    eval_fn: Option<EvalFn3>,
+    vectorizable: u8,
+) -> RssnStatus {
+    if reg.is_null() || name.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let Some(eval_fn) = eval_fn else {
+        return RssnStatus::NullPointer;
+    };
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let name_str = unsafe { CStr::from_ptr(name) }
+            .to_str()
+            .map_err(|_| RssnStatus::ParseError)?
+            .to_owned();
+        let reg_mut = registry_mut(reg).ok_or(RssnStatus::InvalidNode)?;
+        let desc = CustomOpDescriptor::builder(
+            crate::dag::symbol::FnId(fn_id),
+            name_str,
+            EvalFn::Arity3(eval_fn),
+        )
+        .cost(2.0);
+        let desc = if vectorizable != 0 {
+            desc.vectorizable()
+        } else {
+            desc
+        };
+        reg_mut
+            .register(desc.build())
+            .map_err(|_| RssnStatus::RuleConflict)?;
+        Ok(RssnStatus::Success)
+    }));
+    result
+        .unwrap_or(Err(RssnStatus::Panic))
+        .unwrap_or_else(|e| e)
+}
+
+// ── Rule attachment ────────────────────────────────────────────────────────
+
+/// Returns the `u8` kind discriminant for a `SymbolKind` value, matching
+/// the `RssnKind` encoding used throughout the C API.
+fn symbol_kind_to_u8(kind: &crate::dag::symbol::SymbolKind) -> u8 {
+    use crate::dag::symbol::{OpKind, SymbolKind};
+    match kind {
+        SymbolKind::Variable(_) => 0,
+        SymbolKind::Constant(_) => 1,
+        SymbolKind::Operator(OpKind::Add) => 2,
+        SymbolKind::Operator(OpKind::Sub) => 3,
+        SymbolKind::Operator(OpKind::Mul) => 4,
+        SymbolKind::Operator(OpKind::Div) => 5,
+        SymbolKind::Operator(OpKind::Pow) => 6,
+        SymbolKind::Operator(OpKind::Neg) => 7,
+        SymbolKind::Operator(OpKind::Mod) => 8,
+        SymbolKind::Function(_) => 9,
+    }
+}
+
+/// Adds a heuristic simplification rule to a custom operator.
+///
+/// `fn_id` must already be registered via `rssn_custom_op_register_fn*`.
+/// `callback` is called by the simplifier for every node it visits.
+/// Return `u32::MAX` from the callback to pass (no rewrite); any other value
+/// is treated as the replacement node ID.
+///
+/// # Safety
+///
+/// `reg`, `rule_name`, and `user_data` must remain valid for the lifetime of
+/// the registry (until [`rssn_custom_op_registry_free`]).
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_custom_op_add_simplify_rule(
+    reg: *mut RssnCustomOpRegistry,
+    fn_id: u32,
+    rule_name: *const c_char,
+    priority: i32,
+    callback: Option<RssnRuleCallback>,
+    user_data: *mut c_void,
+) -> RssnStatus {
+    if reg.is_null() || rule_name.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let Some(callback) = callback else {
+        return RssnStatus::NullPointer;
+    };
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let name_str = unsafe { CStr::from_ptr(rule_name) }
+            .to_str()
+            .map_err(|_| RssnStatus::ParseError)?
+            .to_owned();
+        let reg_mut = registry_mut(reg).ok_or(RssnStatus::InvalidNode)?;
+        let target_id = crate::dag::symbol::FnId(fn_id);
+        let desc = reg_mut
+            .get_mut(target_id)
+            .ok_or(RssnStatus::InvalidNodeId)?;
+
+        // Capture callback + user_data (as usize for Send safety).
+        let ud = user_data as usize;
+        desc.simplify_rules
+            .push(crate::custom::descriptor::SimplifyRule {
+                name: name_str,
+                priority,
+                rule: std::sync::Arc::new(
+                    move |builder: &mut DagBuilder,
+                          kind: crate::dag::symbol::SymbolKind,
+                          children: &[DagNodeId]| {
+                        let kind_byte = symbol_kind_to_u8(&kind);
+                        let child_ids: Vec<u32> = children.iter().map(|id| id.value()).collect();
+                        // SAFETY: callback and ud were valid when registered; the
+                        // registry lifetime covers any call through this closure.
+                        let result = unsafe {
+                            callback(
+                                builder as *mut DagBuilder,
+                                kind_byte,
+                                child_ids.as_ptr(),
+                                child_ids.len() as u32,
+                                ud as *mut c_void,
+                            )
+                        };
+                        if result == u32::MAX {
+                            None
+                        } else {
+                            Some(DagNodeId::new(result))
+                        }
+                    },
+                ),
+            });
+        Ok(RssnStatus::Success)
+    }));
+    result
+        .unwrap_or(Err(RssnStatus::Panic))
+        .unwrap_or_else(|e| e)
+}
+
+/// Adds an e-graph rewrite rule to a custom operator.
+///
+/// `after_builtins`: non-zero → run after built-in algebraic rules each round.
+///
+/// # Safety
+///
+/// Same as [`rssn_custom_op_add_simplify_rule`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_custom_op_add_egraph_rule(
+    reg: *mut RssnCustomOpRegistry,
+    fn_id: u32,
+    after_builtins: u8,
+    callback: Option<RssnEGraphRuleCallback>,
+    user_data: *mut c_void,
+) -> RssnStatus {
+    if reg.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let Some(callback) = callback else {
+        return RssnStatus::NullPointer;
+    };
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let reg_mut = registry_mut(reg).ok_or(RssnStatus::InvalidNode)?;
+        let target_id = crate::dag::symbol::FnId(fn_id);
+        let desc = reg_mut
+            .get_mut(target_id)
+            .ok_or(RssnStatus::InvalidNodeId)?;
+
+        let ud = user_data as usize;
+        desc.egraph_rules
+            .push(crate::custom::descriptor::EGraphRule {
+                after_builtins: after_builtins != 0,
+                rule: std::sync::Arc::new(
+                    move |builder: &mut DagBuilder,
+                          kind: &crate::dag::symbol::SymbolKind,
+                          children: &[DagNodeId]| {
+                        let kind_byte = symbol_kind_to_u8(kind);
+                        let child_ids: Vec<u32> = children.iter().map(|id| id.value()).collect();
+                        let result = unsafe {
+                            callback(
+                                builder as *mut DagBuilder,
+                                kind_byte,
+                                child_ids.as_ptr(),
+                                child_ids.len() as u32,
+                                ud as *mut c_void,
+                            )
+                        };
+                        if result == u32::MAX {
+                            None
+                        } else {
+                            Some(DagNodeId::new(result))
+                        }
+                    },
+                ),
+            });
+        Ok(RssnStatus::Success)
+    }));
+    result
+        .unwrap_or(Err(RssnStatus::Panic))
+        .unwrap_or_else(|e| e)
+}
+
+// ── Pipeline integration functions ─────────────────────────────────────────
+
+/// JIT-compiles `root` using operators from `reg`.
+///
+/// Internally calls [`rssn_dag_compile`] after feeding all `eval_fn` pointers
+/// from the registry into the global JIT context.  The batch f64×2 path
+/// honours `vectorizable` flags for `Function` nodes.
+///
+/// # Safety
+///
+/// Same as [`rssn_dag_compile`].
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn rssn_dag_compile_with_custom_ops(
+    builder: *mut DagBuilder,
+    root: u32,
+    reg: *mut RssnCustomOpRegistry,
+    out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    if builder.is_null() || out_fn.is_null() || reg.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let builder_ref = unsafe { &mut *builder };
+        let reg_ref = unsafe { &*reg };
+        // Pre-intern all names so the parser (and any builder calls made
+        // inside this function) can resolve them.
+        reg_ref.0.register_with_builder(builder_ref);
+
+        let root_id = DagNodeId::new(root);
+        let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
+        let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
+        let mut ctx = ctx_mutex.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Install the registry into the JIT context (feeds fn pointers +
+        // enables vectorizable check).
+        ctx.compiler_mut()
+            .set_custom_op_registry(Arc::clone(&reg_ref.0));
+
+        match ctx.compiler_mut().compile(&ast) {
+            Ok(f) => {
+                unsafe { *out_fn = f as *mut c_void };
+                RssnStatus::Success
+            }
+            Err(_) => RssnStatus::CompilationError,
+        }
+    }));
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Non-JIT stub.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_compile_with_custom_ops(
+    _builder: *mut DagBuilder,
+    _root: u32,
+    _reg: *mut RssnCustomOpRegistry,
+    _out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
+/// Simplifies `root` applying all simplification rules from `reg`.
+///
+/// Combines the registry's rules with the built-in heuristic patterns and
+/// runs the standard simplification pass.
+///
+/// # Safety
+///
+/// `builder`, `reg`, and `out_id` must be valid non-null pointers.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn rssn_dag_simplify_with_custom_ops(
+    builder: *mut DagBuilder,
+    root: u32,
+    reg: *mut RssnCustomOpRegistry,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || reg.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let builder_ref = unsafe { &mut *builder };
+        let reg_ref = unsafe { &*reg };
+
+        // Build a RuleRegistry from all attached simplify_rules.
+        let rule_registry = reg_ref.0.build_rule_registry();
+
+        let config = HeuristicConfig::default();
+        let mut engine = HeuristicEngine::new(config, SearchStrategy::Greedy)
+            .with_rule_registry(std::sync::Arc::new(rule_registry));
+
+        let root_id = DagNodeId::new(root);
+        // HeuristicEngine::simplify returns DagNodeId directly (not Result).
+        let simplified = engine.simplify(builder_ref, root_id);
+        unsafe { *out_id = simplified.value() };
+        RssnStatus::Success
+    }));
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// E-graph equality saturation with all rules from `reg`.
+///
+/// Runs the built-in algebraic rules plus all e-graph rules attached to
+/// descriptors in `reg`, then extracts the minimum-cost representative.
+///
+/// # Safety
+///
+/// `builder`, `reg`, and `out_id` must be valid non-null pointers.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn rssn_dag_egraph_with_custom_ops(
+    builder: *mut DagBuilder,
+    root: u32,
+    config: RssnEGraphConfig,
+    reg: *mut RssnCustomOpRegistry,
+    out_id: *mut u32,
+) -> RssnStatus {
+    if builder.is_null() || reg.is_null() || out_id.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let builder_ref = unsafe { &mut *builder };
+        let reg_ref = unsafe { &*reg };
+
+        let eg_config = crate::egraph::egraph::EGraphConfig {
+            max_rounds: if config.max_rounds == 0 {
+                8
+            } else {
+                config.max_rounds as usize
+            },
+            max_merges: if config.max_merges == 0 {
+                512
+            } else {
+                config.max_merges as usize
+            },
+            max_new_nodes: if config.max_new_nodes == 0 {
+                1024
+            } else {
+                config.max_new_nodes as usize
+            },
+            strict_ieee754_signed_zero: config.strict_ieee754_signed_zero != 0,
+            ..Default::default()
+        };
+
+        let root_id = DagNodeId::new(root);
+        let mut egraph = crate::egraph::egraph::EGraph::new(builder_ref, eg_config);
+
+        // Inject all e-graph rules from the custom-op registry.
+        reg_ref.0.apply_to_egraph(&mut egraph);
+
+        egraph.saturate(root_id);
+        let best = egraph.extract(root_id);
+        unsafe { *out_id = best.value() };
+        RssnStatus::Success
+    }));
+    result.unwrap_or(RssnStatus::Panic)
+}

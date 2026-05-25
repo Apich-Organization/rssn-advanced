@@ -145,6 +145,11 @@ pub struct JitCompiler {
     work_stack: Vec<Frame>,
     /// Reusable SSA-value stack for `compile_ast_iterative`.
     work_values: Vec<Value>,
+    /// Unified custom-operator registry set via [`Self::set_custom_op_registry`].
+    ///
+    /// When present it is consulted by [`Self::compile_batch_f64x2`] to
+    /// determine whether a `Function` node is vectorization-safe.
+    custom_op_registry: Option<Arc<crate::custom::descriptor::CustomOpRegistry>>,
 }
 
 impl std::fmt::Debug for JitCompiler {
@@ -206,6 +211,7 @@ impl JitCompiler {
             custom_fns,
             work_stack: Vec::with_capacity(64),
             work_values: Vec::with_capacity(64),
+            custom_op_registry: None,
         })
     }
 
@@ -278,6 +284,40 @@ impl JitCompiler {
                 arity: 3,
             },
         );
+    }
+
+    /// Installs a [`CustomOpRegistry`][crate::custom::descriptor::CustomOpRegistry]
+    /// as the authoritative source for all custom operators.
+    ///
+    /// This method:
+    /// 1. Populates the internal `CustomFnRegistry` (function pointer lookup table)
+    ///    from every descriptor's [`EvalFn`][crate::custom::descriptor::EvalFn],
+    ///    so the JIT linker resolves `rssn_custom_fn_N` symbols correctly.
+    /// 2. Stores the `Arc` reference so [`Self::compile_batch_f64x2`] can query
+    ///    [`CustomOpRegistry::is_vectorizable`] per `Function` node, enabling the
+    ///    ILP batch path for operators flagged `vectorizable`.
+    ///
+    /// Prefer calling this over the individual `register_custom_function_N`
+    /// methods when using the unified custom-operator API.
+    pub fn set_custom_op_registry(
+        &mut self,
+        registry: Arc<crate::custom::descriptor::CustomOpRegistry>,
+    ) {
+        // Populate the existing CustomFnRegistry from all descriptors.
+        let mut guard = self
+            .custom_fns
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for desc in registry.ops_iter() {
+            let (ptr, arity) = match desc.eval_fn {
+                crate::custom::descriptor::EvalFn::Arity1(f) => (f as usize, 1u8),
+                crate::custom::descriptor::EvalFn::Arity2(f) => (f as usize, 2u8),
+                crate::custom::descriptor::EvalFn::Arity3(f) => (f as usize, 3u8),
+            };
+            guard.insert(desc.fn_id.0, CustomFnEntry { ptr, arity });
+        }
+        drop(guard);
+        self.custom_op_registry = Some(registry);
     }
 
     /// Compiles an `AstProjection` expression into a native callable function
@@ -477,8 +517,9 @@ impl JitCompiler {
         let analysis = analyze(ast);
         let opts = OptConfig::default();
 
-        // Check vectorizability: no Mod, no non-expandable Pow, no Function.
-        if !is_vectorizable_ast(ast, &analysis) {
+        // Check vectorizability: no Mod, no non-expandable Pow; Function nodes
+        // are allowed only when registered as vectorizable in the custom-op registry.
+        if !is_vectorizable_ast(ast, &analysis, self.custom_op_registry.as_deref()) {
             return Ok(None);
         }
 
@@ -1618,12 +1659,27 @@ fn constant_behind(builder: &FunctionBuilder<'_>, v: Value) -> Option<f64> {
 }
 
 /// Returns `true` if the expression can be compiled to a vectorized batch
-/// function. Requirements: no `Mod`, no `Function`, no `Pow` nodes with a
-/// `PowExpansion::None` strategy (i.e. all pow exponents must be expandable).
-fn is_vectorizable_ast(ast: &AstProjection, analysis: &[NodeAnalysis]) -> bool {
+/// function.
+///
+/// Requirements:
+/// - No `Mod` nodes.
+/// - No `Pow` nodes whose exponent cannot be expanded (strategy `None`).
+/// - No `Function` nodes — *unless* the function is registered in
+///   `custom_ops` and flagged `vectorizable` (pure, side-effect free).
+fn is_vectorizable_ast(
+    ast: &AstProjection,
+    analysis: &[NodeAnalysis],
+    custom_ops: Option<&crate::custom::descriptor::CustomOpRegistry>,
+) -> bool {
     for (node, an) in ast.nodes.iter().zip(analysis.iter()) {
         match node.kind {
-            SymbolKind::Function(_) => return false,
+            SymbolKind::Function(fn_id) => {
+                // Allow if registered and explicitly flagged vectorizable.
+                if custom_ops.is_some_and(|r| r.is_vectorizable(fn_id)) {
+                    continue;
+                }
+                return false;
+            }
             SymbolKind::Operator(OpKind::Mod) => return false,
             SymbolKind::Operator(OpKind::Pow) => {
                 if matches!(an.pow_expansion, PowExpansion::None) {

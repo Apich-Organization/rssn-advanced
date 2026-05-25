@@ -213,6 +213,13 @@ template<typename T = void>
 struct Option;
 
 /*
+ Opaque handle to a [`CustomOpRegistry`].
+
+ Heap-allocated; must be freed exactly once via [`rssn_custom_op_registry_free`].
+ */
+struct RssnCustomOpRegistry;
+
+/*
  Opaque persistent JIT context. Holds the Cranelift `JitCompiler` so it
  can be reused across multiple `rssn_dag_compile_with_ctx` calls without
  re-paying the per-call ISA detection / module initialisation cost.
@@ -374,6 +381,61 @@ using RssnBatchOpCallback = uint32_t(*)(DagBuilder *builder,
                                         const uint32_t *child_ids,
                                         uint32_t n_children,
                                         void *user_data);
+
+/*
+ A C-callable rewrite rule for the E-graph.
+
+ Called for each node during saturation. Return the ID of an equivalent
+ node to merge into the same e-class, or `u32::MAX` to decline.
+
+ `kind`       — discriminant of the current node's kind (see `RssnKind`).
+ `children`   — pointer to the *canonical* child IDs (length `n_children`).
+ `n_children` — number of children.
+ `user_data`  — opaque pointer forwarded unchanged from the registration call.
+ */
+using RssnEGraphRuleCallback = uint32_t(*)(DagBuilder *builder,
+                                           uint8_t kind,
+                                           const uint32_t *children,
+                                           uint32_t n_children,
+                                           void *user_data);
+
+/*
+ C-callable rewrite rule callback.
+
+ - `builder`: pointer to the `DagBuilder`; call `rssn_dag_*` to create nodes.
+ - `kind`: node kind discriminant (see [`RssnKind`]).
+ - `children`: pointer to an array of child node ids (length `n_children`).
+ - `n_children`: number of children.
+ - `user_data`: the opaque pointer supplied at registration time.
+
+ Return the replacement node id, or `u32::MAX` to leave the node unchanged
+ (pass to the next rule).
+ */
+using RssnRuleCallback = uint32_t(*)(DagBuilder *builder,
+                                     uint8_t kind,
+                                     const uint32_t *children,
+                                     uint32_t n_children,
+                                     void *user_data);
+
+/*
+ 1-argument `extern "C"` evaluation function (`f64 → f64`).
+
+ The function must be `extern "C"` so the JIT can emit a direct `call`
+ with the platform C ABI (same as `libc` math functions).
+ */
+using EvalFn1 = double(*)(double);
+
+/*
+ 2-argument `extern "C"` evaluation function (`f64, f64 → f64`).
+ */
+using EvalFn2 = double(*)(double, double);
+
+/*
+ 3-argument `extern "C"` evaluation function (`f64, f64, f64 → f64`).
+ */
+using EvalFn3 = double(*)(double,
+                          double,
+                          double);
 
 /*
  Compact node descriptor for batch DAG construction.
@@ -544,23 +606,6 @@ struct RssnEGraphConfig {
 };
 
 /*
- A C-callable rewrite rule for the E-graph.
-
- Called for each node during saturation. Return the ID of an equivalent
- node to merge into the same e-class, or `u32::MAX` to decline.
-
- `kind`       — discriminant of the current node's kind (see `RssnKind`).
- `children`   — pointer to the *canonical* child IDs (length `n_children`).
- `n_children` — number of children.
- `user_data`  — opaque pointer forwarded unchanged from the registration call.
- */
-using RssnEGraphRuleCallback = uint32_t(*)(DagBuilder *builder,
-                                           uint8_t kind,
-                                           const uint32_t *children,
-                                           uint32_t n_children,
-                                           void *user_data);
-
-/*
  C-compatible simplification configuration.
 
  Pass a pointer to this struct to [`rssn_dag_simplify_with_config`] to
@@ -617,24 +662,6 @@ using RssnCustomFn2 = double(*)(double,
 using RssnCustomFn3 = double(*)(double,
                                 double,
                                 double);
-
-/*
- C-callable rewrite rule callback.
-
- - `builder`: pointer to the `DagBuilder`; call `rssn_dag_*` to create nodes.
- - `kind`: node kind discriminant (see [`RssnKind`]).
- - `children`: pointer to an array of child node ids (length `n_children`).
- - `n_children`: number of children.
- - `user_data`: the opaque pointer supplied at registration time.
-
- Return the replacement node id, or `u32::MAX` to leave the node unchanged
- (pass to the next rule).
- */
-using RssnRuleCallback = uint32_t(*)(DagBuilder *builder,
-                                     uint8_t kind,
-                                     const uint32_t *children,
-                                     uint32_t n_children,
-                                     void *user_data);
 
 
 
@@ -731,6 +758,121 @@ RssnStatus rssn_batch_op_register(uint8_t aKind,
  */
 
 RssnStatus rssn_batch_op_unregister(uint8_t aKind)
+;
+
+/*
+ Adds an e-graph rewrite rule to a custom operator.
+
+ `after_builtins`: non-zero → run after built-in algebraic rules each round.
+
+ # Safety
+
+ Same as [`rssn_custom_op_add_simplify_rule`].
+ */
+
+RssnStatus rssn_custom_op_add_egraph_rule(RssnCustomOpRegistry *aReg,
+                                          uint32_t aFnId,
+                                          uint8_t aAfterBuiltins,
+                                          Option<RssnEGraphRuleCallback> aCallback,
+                                          void *aUserData)
+;
+
+/*
+ Adds a heuristic simplification rule to a custom operator.
+
+ `fn_id` must already be registered via `rssn_custom_op_register_fn*`.
+ `callback` is called by the simplifier for every node it visits.
+ Return `u32::MAX` from the callback to pass (no rewrite); any other value
+ is treated as the replacement node ID.
+
+ # Safety
+
+ `reg`, `rule_name`, and `user_data` must remain valid for the lifetime of
+ the registry (until [`rssn_custom_op_registry_free`]).
+ */
+
+RssnStatus rssn_custom_op_add_simplify_rule(RssnCustomOpRegistry *aReg,
+                                            uint32_t aFnId,
+                                            const char *aRuleName,
+                                            int32_t aPriority,
+                                            Option<RssnRuleCallback> aCallback,
+                                            void *aUserData)
+;
+
+/*
+ Registers a 1-argument (`f64 → f64`) custom operator.
+
+ - `fn_id`: numeric identifier (must be unique in the registry).
+ - `name`: null-terminated operator name (resolved by the parser).
+ - `eval_fn`: `extern "C" fn(f64) -> f64` pointer.
+ - `vectorizable`: non-zero if the function is pure and safe to duplicate
+   in the ILP batch path.
+
+ # Safety
+
+ `reg` and `name` must be valid non-null pointers for the duration of
+ this call.
+ */
+
+RssnStatus rssn_custom_op_register_fn1(RssnCustomOpRegistry *aReg,
+                                       uint32_t aFnId,
+                                       const char *aName,
+                                       Option<EvalFn1> aEvalFn,
+                                       uint8_t aVectorizable)
+;
+
+/*
+ Registers a 2-argument (`f64, f64 → f64`) custom operator.
+
+ # Safety
+
+ Same as [`rssn_custom_op_register_fn1`].
+ */
+
+RssnStatus rssn_custom_op_register_fn2(RssnCustomOpRegistry *aReg,
+                                       uint32_t aFnId,
+                                       const char *aName,
+                                       Option<EvalFn2> aEvalFn,
+                                       uint8_t aVectorizable)
+;
+
+/*
+ Registers a 3-argument (`f64, f64, f64 → f64`) custom operator.
+
+ # Safety
+
+ Same as [`rssn_custom_op_register_fn1`].
+ */
+
+RssnStatus rssn_custom_op_register_fn3(RssnCustomOpRegistry *aReg,
+                                       uint32_t aFnId,
+                                       const char *aName,
+                                       Option<EvalFn3> aEvalFn,
+                                       uint8_t aVectorizable)
+;
+
+/*
+ Frees a [`RssnCustomOpRegistry`] allocated by [`rssn_custom_op_registry_new`].
+
+ # Safety
+
+ `reg` must be a pointer from [`rssn_custom_op_registry_new`], or NULL.
+ Double-free is undefined behaviour.
+ */
+
+void rssn_custom_op_registry_free(RssnCustomOpRegistry *aReg)
+;
+
+/*
+ Allocates an empty [`RssnCustomOpRegistry`].
+
+ # Safety
+
+ The returned pointer must be freed exactly once via
+ [`rssn_custom_op_registry_free`].
+ */
+
+RssnCustomOpRegistry *rssn_custom_op_registry_new()
 ;
 
 /*
@@ -978,6 +1120,34 @@ RssnStatus rssn_dag_compile_with_ctx(void *aCtx,
 ;
 
 /*
+ JIT-compiles `root` using operators from `reg`.
+
+ Internally calls [`rssn_dag_compile`] after feeding all `eval_fn` pointers
+ from the registry into the global JIT context.  The batch f64×2 path
+ honours `vectorizable` flags for `Function` nodes.
+
+ # Safety
+
+ Same as [`rssn_dag_compile`].
+ */
+
+RssnStatus rssn_dag_compile_with_custom_ops(DagBuilder *aBuilder,
+                                            uint32_t aRoot,
+                                            RssnCustomOpRegistry *aReg,
+                                            void **aOutFn)
+;
+
+/*
+ Non-JIT stub.
+ */
+
+RssnStatus rssn_dag_compile_with_custom_ops(DagBuilder *aBuilder,
+                                            uint32_t aRoot,
+                                            RssnCustomOpRegistry *aReg,
+                                            void **aOutFn)
+;
+
+/*
  Compiles a DAG expression with explicit optimisation knobs.
 
  If `opts` is NULL, uses [`RssnOptConfig`] defaults (equivalent to
@@ -1096,6 +1266,24 @@ RssnStatus rssn_dag_egraph_saturate_extract(DagBuilder *aBuilder,
                                             const RssnEGraphRuleCallback *aRules,
                                             uint32_t aNRules,
                                             uint32_t *aOut)
+;
+
+/*
+ E-graph equality saturation with all rules from `reg`.
+
+ Runs the built-in algebraic rules plus all e-graph rules attached to
+ descriptors in `reg`, then extracts the minimum-cost representative.
+
+ # Safety
+
+ `builder`, `reg`, and `out_id` must be valid non-null pointers.
+ */
+
+RssnStatus rssn_dag_egraph_with_custom_ops(DagBuilder *aBuilder,
+                                           uint32_t aRoot,
+                                           RssnEGraphConfig aConfig,
+                                           RssnCustomOpRegistry *aReg,
+                                           uint32_t *aOutId)
 ;
 
 /*
@@ -1523,6 +1711,23 @@ RssnStatus rssn_dag_simplify_with_config(DagBuilder *aBuilder,
                                          uint32_t aRoot,
                                          const RssnSimplifyConfig *aConfig,
                                          uint32_t *aOutId)
+;
+
+/*
+ Simplifies `root` applying all simplification rules from `reg`.
+
+ Combines the registry's rules with the built-in heuristic patterns and
+ runs the standard simplification pass.
+
+ # Safety
+
+ `builder`, `reg`, and `out_id` must be valid non-null pointers.
+ */
+
+RssnStatus rssn_dag_simplify_with_custom_ops(DagBuilder *aBuilder,
+                                             uint32_t aRoot,
+                                             RssnCustomOpRegistry *aReg,
+                                             uint32_t *aOutId)
 ;
 
 /*

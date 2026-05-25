@@ -150,6 +150,25 @@ pub mod egraph;
 /// runtime feature detection and scalar fallback.
 pub mod simd;
 
+/// Unified custom-operator extension system.
+///
+/// A single [`custom::descriptor::CustomOpDescriptor`] bundles every
+/// pipeline-facing property of a user-defined operator (JIT eval function,
+/// batch-vectorisability flag, heuristic simplification rules, and e-graph
+/// rewrite rules).  Register descriptors into a
+/// [`custom::descriptor::CustomOpRegistry`], then call the three integration
+/// methods to wire the operator into all pipeline stages simultaneously:
+///
+/// ```rust,ignore
+/// let reg = Arc::new(registry);
+/// reg.apply_to_jit(&mut compiler);
+/// let rule_reg = reg.build_rule_registry();
+/// reg.apply_to_egraph(&mut egraph);
+/// ```
+///
+/// C/C++ callers use the `rssn_custom_op_*` family in [`ffi::c_api`].
+pub mod custom;
+
 /// C/C++ Foreign Function Interface.
 ///
 /// Exposes a flat, `extern "C"` API surface via `cbindgen`-compatible

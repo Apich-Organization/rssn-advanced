@@ -139,3 +139,23 @@ pub use types::RssnStatus;
 // Re-export the JIT-gated compile-with-opts and its config type.
 #[cfg(feature = "cranelift-jit")]
 pub use c_api::{RssnOptConfig, rssn_dag_compile_with_opts};
+
+// ── Unified custom-operator registry (Rust + C FFI) ──────────────────────
+pub use c_api::{
+    // Opaque handle for C callers.
+    RssnCustomOpRegistry,
+    // Rule attachment.
+    rssn_custom_op_add_egraph_rule,
+    rssn_custom_op_add_simplify_rule,
+    // Operator registration.
+    rssn_custom_op_register_fn1,
+    rssn_custom_op_register_fn2,
+    rssn_custom_op_register_fn3,
+    // Lifecycle.
+    rssn_custom_op_registry_free,
+    rssn_custom_op_registry_new,
+    // Pipeline integration.
+    rssn_dag_compile_with_custom_ops,
+    rssn_dag_egraph_with_custom_ops,
+    rssn_dag_simplify_with_custom_ops,
+};
