@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use cranelift_codegen::Context;
@@ -119,6 +120,15 @@ struct CustomFnEntry {
 /// symbol-lookup closure) never block each other; only `register_custom_function`
 /// takes a write lock.
 type CustomFnRegistry = Arc<RwLock<HashMap<u32, CustomFnEntry>>>;
+
+/// Process-wide monotone counter for unique JIT function names.
+///
+/// `compile_with_opts` and `compile_batch_f64x2` each increment this before
+/// declaring a new Cranelift function.  Without it, every `DagBuilder` starts
+/// numbering nodes from 0, so the second call with any expression whose root
+/// has the same `DagNodeId` as a previously compiled one would collide inside
+/// the shared `JITModule` and return `ModuleError::DuplicateDefinition`.
+static JIT_FUNC_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// The primary compiler context for compiling symbolic expressions to native code.
 pub struct JitCompiler {
@@ -418,7 +428,7 @@ impl JitCompiler {
         func_builder.ins().return_(&[root_val]);
         func_builder.finalize();
 
-        let fn_name = format!("expr_{}", ast.nodes[0].dag_id.0);
+        let fn_name = format!("expr_{}", JIT_FUNC_COUNTER.fetch_add(1, Ordering::Relaxed));
         let func_id = self
             .module
             .declare_function(&fn_name, Linkage::Export, &ctx.func.signature)
@@ -684,7 +694,10 @@ impl JitCompiler {
 
         func_builder.finalize();
 
-        let fn_name = format!("batch_expr_{}", ast.nodes[0].dag_id.0);
+        let fn_name = format!(
+            "batch_expr_{}",
+            JIT_FUNC_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
         let func_id = self
             .module
             .declare_function(&fn_name, Linkage::Export, &ctx.func.signature)

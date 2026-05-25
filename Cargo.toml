@@ -80,10 +80,18 @@ dtact = "0.2"
 cbindgen = "0.29"
 
 [features]
-default = []
-# Unified JIT feature: enables the full Cranelift stack required by `src/jit`.
-# Use `cargo build --features jit` from now on; the bare `cranelift-jit`
-# weak-dep alone is not enough.
+# JIT is enabled by default.  The `cranelift-jit` named feature is used as the
+# primary gate (all #[cfg(feature = "cranelift-jit")] sites check this).
+# It activates the `jit` feature which pulls in the actual Cranelift crates.
+# Disable JIT with `--no-default-features` for size-constrained builds.
+default = ["cranelift-jit"]
+
+# `cranelift-jit` is the stable gate name used in #[cfg] throughout the codebase.
+"cranelift-jit" = ["jit"]
+
+# `jit` enables the Cranelift crate deps.  Because all #[cfg] gates check
+# `feature = "cranelift-jit"`, use `--features cranelift-jit` (not `--features jit`)
+# when overriding features on the command line.
 jit = [
     "dep:cranelift-jit",
     "dep:cranelift-codegen",
@@ -91,8 +99,6 @@ jit = [
     "dep:cranelift-module",
     "dep:cranelift-native",
 ]
-# Backward-compat alias for the previous gating name.
-"cranelift-jit" = ["jit"]
 
 [dev-dependencies]
 loom = "0.7"

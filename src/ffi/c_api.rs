@@ -47,10 +47,7 @@ pub extern "C" fn rssn_dag_free(builder: *mut DagBuilder) {
 /// Returns the index of the variable node, or `u32::MAX` if a panic
 /// occurred, the builder was null, or `name` was not valid UTF-8.
 ///
-/// Looks up `name` zero-allocation on the hot path:
-/// [`CStr::to_bytes`] → `SymbolRegistry::intern_bytes`. Only the
-/// first time a given name is interned does an allocation happen
-/// (`ffi_review §2`).
+/// **Deprecated** — use [`rssn_dag_variable_v2`] for richer error reporting.
 ///
 /// # Safety
 ///
@@ -74,6 +71,8 @@ pub extern "C" fn rssn_dag_variable(builder: *mut DagBuilder, name: *const c_cha
 
 /// Allocates a new constant node in the DAG.
 ///
+/// Returns `u32::MAX` on error.  **Deprecated** — use [`rssn_dag_constant_v2`].
+///
 /// # Safety
 ///
 /// `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
@@ -90,6 +89,8 @@ pub extern "C" fn rssn_dag_constant(builder: *mut DagBuilder, val: f64) -> u32 {
 }
 
 /// Allocates a new addition node in the DAG: `lhs + rhs`.
+///
+/// Returns `u32::MAX` on error.  **Deprecated** — use [`rssn_dag_add_v2`].
 ///
 /// # Safety
 ///
@@ -110,7 +111,8 @@ pub extern "C" fn rssn_dag_add(builder: *mut DagBuilder, lhs: u32, rhs: u32) -> 
 
 /// Simplifies a target expression using the default heuristic engine.
 ///
-/// Returns the new root node index of the simplified expression.
+/// Returns the new root node index, or `u32::MAX` on error.
+/// **Deprecated** — use [`rssn_dag_simplify_v2`] or [`rssn_dag_simplify_with_config`].
 ///
 /// # Safety
 ///
@@ -189,6 +191,9 @@ pub extern "C" fn rssn_dag_compile(
 
 /// Executes a previously compiled JIT function with the given variable input array.
 ///
+/// Returns `0.0` on error, which is indistinguishable from a legitimate zero result.
+/// **Deprecated** — use [`rssn_dag_execute_v2`] to get a distinct error status.
+///
 /// # Safety
 ///
 /// - `func` must be a valid function pointer previously written by [`rssn_dag_compile`],
@@ -218,14 +223,16 @@ pub extern "C" fn rssn_dag_execute(_func: *const c_void, _variables: *const f64)
 }
 
 // =========================================================================
-// T6.2 — status-returning v2 surface
+// Status-returning surface (canonical API)
 // =========================================================================
 //
 // Each `*_v2` function takes an `out_id: *mut u32` (or equivalent) and
-// returns [`RssnStatus`]. This replaces the `u32::MAX` sentinel
-// convention used by the original API (`ffi_review §1`). The original
-// functions remain as backward-compat wrappers; new C consumers should
-// prefer the v2 forms.
+// returns [`RssnStatus`].  This is the canonical API for new code.
+//
+// The legacy `*` (non-v2) functions below return `u32::MAX` / 0.0 on error,
+// which is ambiguous and cannot distinguish between different failure modes.
+// They are **deprecated**: use the `_v2` equivalents for all new consumers.
+// They are retained for ABI compatibility (e.g. existing Python/C++ callers).
 
 /// Creates a new variable node. Status-returning variant.
 ///
@@ -503,11 +510,14 @@ pub extern "C" fn rssn_dag_simplify_with_config(
 }
 
 // =========================================================================
-// T6.3 — Full operator surface (sub, mul, div, pow, mod, neg)
+// Full operator surface: sub, mul, div, pow, mod, neg
 // =========================================================================
 //
-// All operators follow the same pattern as `rssn_dag_add` / `rssn_dag_add_v2`:
-// a legacy u32-sentinel variant and a status-returning v2 variant.
+// Each operator comes in two variants:
+//   • Legacy (no suffix)  — returns u32::MAX on error. **Deprecated.**
+//   • Canonical (_v2)     — returns RssnStatus; writes node id to *out_id.
+//
+// New code should use the _v2 forms.
 
 /// Allocates a subtraction node: `lhs - rhs`.
 ///
@@ -1820,17 +1830,146 @@ pub extern "C" fn rssn_dag_simplify_with_egraph(
 }
 
 // =========================================================================
+// Batch custom operator registry
+// =========================================================================
+//
+// Developers can register user-defined operators for use with the batch-build
+// API without modifying library source code.  Registered kinds must fall in
+// the range 16..=255 (kinds 0..=15 are reserved for built-in operators).
+//
+// Thread safety: the registry uses a `RwLock`; concurrent reads (during
+// `rssn_dag_batch_build`) never block each other.  Writes (registration /
+// unregistration) acquire an exclusive lock.
+
+use std::collections::HashMap as StdHashMap;
+use std::sync::OnceLock;
+
+/// Callback type for a custom batch-build operator.
+///
+/// Called during [`rssn_dag_batch_build`] when the node `kind` field matches
+/// a registered custom kind.  The callback receives a `DagBuilder`, the
+/// resolved child node IDs and their count, and the `user_data` pointer
+/// supplied at registration.  Return a new valid node ID allocated in
+/// `builder`, or `u32::MAX` to signal failure.
+///
+/// # Safety
+///
+/// - `builder` is valid and non-null for the duration of this call.
+/// - `child_ids` points to an array of exactly `n_children` resolved node IDs.
+/// - `user_data` is the opaque pointer provided at `rssn_batch_op_register` time;
+///   the caller is responsible for its lifetime.
+pub type RssnBatchOpCallback = unsafe extern "C" fn(
+    builder: *mut DagBuilder,
+    child_ids: *const u32,
+    n_children: u32,
+    user_data: *mut c_void,
+) -> u32;
+
+/// Entry stored in the process-level batch operator registry.
+struct BatchOpEntry {
+    callback: RssnBatchOpCallback,
+    /// Expected number of resolved children (capped at 2 by `RssnNodeDesc`).
+    n_children: u32,
+    /// Caller-provided opaque pointer, stored as `usize` for `Send` safety.
+    user_data: usize,
+}
+
+static BATCH_OP_REGISTRY: OnceLock<std::sync::RwLock<StdHashMap<u8, BatchOpEntry>>> =
+    OnceLock::new();
+
+#[inline]
+fn batch_op_registry() -> &'static std::sync::RwLock<StdHashMap<u8, BatchOpEntry>> {
+    BATCH_OP_REGISTRY.get_or_init(|| std::sync::RwLock::new(StdHashMap::new()))
+}
+
+/// Registers a custom batch operator for use with [`rssn_dag_batch_build`].
+///
+/// `kind` must be in the range `16..=255`; kinds `0..=15` are reserved for
+/// built-in operators and this function returns [`RssnStatus::InvalidNodeId`]
+/// if `kind` falls in that range.  Registering the same `kind` twice returns
+/// [`RssnStatus::RuleConflict`].
+///
+/// The `callback` receives the resolved child node IDs for the batch node and
+/// must allocate a new DAG node in `builder`, returning its id.  `n_children`
+/// specifies how many of `child0`/`child1` are meaningful in the descriptor
+/// (currently capped at 2 by the `RssnNodeDesc` layout).
+///
+/// # Safety
+///
+/// - `callback` must be a valid function pointer that remains valid until
+///   [`rssn_batch_op_unregister`] is called for the same `kind`.
+/// - `user_data` is forwarded to the callback opaquely; its lifetime is the
+///   caller's responsibility.
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn rssn_batch_op_register(
+    kind: u8,
+    n_children: u32,
+    callback: Option<RssnBatchOpCallback>,
+    user_data: *mut c_void,
+) -> RssnStatus {
+    if kind < 16 {
+        // Built-in range is 0..=15; custom operators start at 16.
+        return RssnStatus::InvalidNodeId;
+    }
+    let Some(cb) = callback else {
+        return RssnStatus::NullPointer;
+    };
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let reg = batch_op_registry();
+        let mut guard = reg.write().unwrap_or_else(|e| e.into_inner());
+        if guard.contains_key(&kind) {
+            return RssnStatus::RuleConflict;
+        }
+        guard.insert(
+            kind,
+            BatchOpEntry {
+                callback: cb,
+                n_children,
+                user_data: user_data as usize,
+            },
+        );
+        RssnStatus::Success
+    }));
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Unregisters a previously registered custom batch operator.
+///
+/// Returns [`RssnStatus::Success`] if the kind was registered, or
+/// [`RssnStatus::InvalidNodeId`] if it was not (or if `kind < 16`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_batch_op_unregister(kind: u8) -> RssnStatus {
+    if kind < 16 {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let reg = batch_op_registry();
+        let mut guard = reg.write().unwrap_or_else(|e| e.into_inner());
+        if guard.remove(&kind).is_some() {
+            RssnStatus::Success
+        } else {
+            RssnStatus::InvalidNodeId
+        }
+    }));
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+// =========================================================================
 // Batch-build API — reduced cross-FFI overhead
 // =========================================================================
 // Rationale: building a 50-node expression via individual rssn_dag_add/mul/
 // etc. calls costs 50× catch_unwind + null check + FFI frame. The batch
 // API amortises this to a single call: C fills an array of `RssnNodeDesc`
 // and we process the whole array in one Rust call.
+//
+// Custom operators (kinds 16–255) registered via `rssn_batch_op_register`
+// are dispatched through the process-level `BATCH_OP_REGISTRY` below.
 
 /// Node kind discriminant used in [`RssnNodeDesc`].
 ///
-/// Values 0–1 are leaf types; 2–9 are operator/function types.
-/// Matches `RssnKind` in the C header.
+/// Values 0–8 are built-in; 16–255 are available for user-defined operators
+/// registered via [`rssn_batch_op_register`].  Matches `RssnKind` in the C header.
 pub type RssnNodeKindBatch = u8;
 
 /// Compact node descriptor for batch DAG construction.
@@ -1975,7 +2114,47 @@ pub extern "C" fn rssn_dag_batch_build(
                     }
                     b.modulo(c0, c1)
                 }
-                _ => return RssnStatus::InvalidNode,
+                kind => {
+                    // Look up a user-defined operator in the custom registry.
+                    // We copy the entry fields before dropping the read lock so
+                    // the callback can safely re-enter `builder` without holding
+                    // the registry lock.
+                    let entry = {
+                        let reg = batch_op_registry();
+                        let guard = reg.read().unwrap_or_else(|e| e.into_inner());
+                        guard
+                            .get(&kind)
+                            .map(|e| (e.callback, e.n_children, e.user_data))
+                    };
+                    let Some((cb, n_ch, ud_usize)) = entry else {
+                        return RssnStatus::InvalidNode;
+                    };
+                    // Resolve up to two children from the batch index space.
+                    let resolve_raw = |idx: u32| -> u32 {
+                        if idx == u32::MAX || idx as usize >= i {
+                            u32::MAX
+                        } else {
+                            batch_ids[idx as usize].value()
+                        }
+                    };
+                    let actual_n = (n_ch as usize).min(2);
+                    let mut ch_buf = [u32::MAX; 2];
+                    if actual_n > 0 {
+                        ch_buf[0] = resolve_raw(desc.child0);
+                    }
+                    if actual_n > 1 {
+                        ch_buf[1] = resolve_raw(desc.child1);
+                    }
+                    let ud = ud_usize as *mut c_void;
+                    // SAFETY: callback is a valid fn ptr (guaranteed by rssn_batch_op_register),
+                    // builder is valid for this call, ch_buf lives on the stack.
+                    let result_id =
+                        unsafe { cb(b as *mut DagBuilder, ch_buf.as_ptr(), actual_n as u32, ud) };
+                    if result_id == u32::MAX {
+                        return RssnStatus::InvalidNode;
+                    }
+                    DagNodeId::new(result_id)
+                }
             };
 
             out_slice[i] = id.value();
