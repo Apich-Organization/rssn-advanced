@@ -1,5 +1,5 @@
-#ifndef RSSN_ADVANCED_H
-#define RSSN_ADVANCED_H
+#ifndef RSSNADV_H
+#define RSSNADV_H
 
 /* Generated with cbindgen:0.29.2 */
 
@@ -12,147 +12,1862 @@
 #include <stdlib.h>
 
 #ifdef __cplusplus
-namespace rssn-advanced {
+namespace rssn_advanced {
 #endif  // __cplusplus
 
 /*
- A buffer containing binary data from bincode serialization.
-
- The caller is responsible for freeing this buffer using `rssn_free_bincode_buffer`.
+ `+`
  */
-typedef struct rssn_advanced_BincodeBuffer {
+#define ADD 0
+
+/*
+ Constant: numeric value lives in the `coefficient` field.
+ */
+#define CONSTANT 1
+
+/*
+ `/`
+ */
+#define DIV 3
+
+/*
+ Function: `kind_payload` carries the `FnId`.
+ */
+#define FUNCTION 3
+
+/*
+ Maximum allowed depth of parenthesis / operator recursion.
+
+ Each parse level requires two stack frames (`parse_expr_climbing` +
+ `parse_atom`). In debug builds these frames are large enough that
+ 1024 levels can overflow the default 8 MB thread stack. 200 keeps
+ the recursive depth ≈ 400 frames, which is safe on every target.
+ */
+#define MAX_PAREN_DEPTH 200
+
+/*
+ `%` (IEEE-754 remainder)
+ */
+#define MOD 6
+
+/*
+ `*`
+ */
+#define MUL 2
+
+/*
+ unary `-`
+ */
+#define NEG 5
+
+/*
+ The null sentinel for `i64` relative pointers.
+
+ `i64::MIN` is chosen for the same reason as [`RelPtr::<T, i32>::NULL_OFFSET`]:
+ a valid offset of ±2^63 is unreachable for any practical arena.
+ */
+#define RelPtr_NULL_OFFSET INT64_MIN
+
+/*
+ Number of independent shards. Picked to be ≥ a typical core count
+ (32–128 cores on modern servers) while remaining cheap to
+ allocate. 32 means each shard owns ~3 % of the keyspace on average.
+ */
+#define NUM_SHARDS 32
+
+/*
+ Operator: `op_tag` carries the `OpKind`.
+ */
+#define OPERATOR 2
+
+/*
+ `^`
+ */
+#define POW 4
+
+/*
+ `-`
+ */
+#define SUB 1
+
+/*
+ Variable: `kind_payload` carries the `SymbolId`.
+ */
+#define VARIABLE 0
+
+/*
+ Return status codes for C-API function invocations.
+
+ Values 0–6 are the original surface; 7–13 are new variants added to give
+ C consumers richer diagnostics without needing to inspect Rust error types.
+ */
+typedef enum RssnStatus {
     /*
-     Pointer to the binary data.
+     Operation completed successfully.
      */
-    uint8_t *mData;
+    RssnStatusSuccess = 0,
     /*
-     Length of the binary data in bytes.
+     A null pointer was passed for a mandatory parameter.
      */
-    size_t mLen;
-} rssn_advanced_BincodeBuffer;
+    RssnStatusNullPointer = 1,
+    /*
+     Failed to parse expression.
+     */
+    RssnStatusParseError = 2,
+    /*
+     Failed to JIT compile the target expression.
+     */
+    RssnStatusCompilationError = 3,
+    /*
+     A panic occurred during execution.
+     */
+    RssnStatusPanic = 4,
+    /*
+     A C string argument was not valid UTF-8.
+     */
+    RssnStatusInvalidUtf8 = 5,
+    /*
+     A `DagNodeId` argument referred to an arena slot that doesn't
+     exist (or is the null sentinel where one wasn't expected).
+     */
+    RssnStatusInvalidNodeId = 6,
+    /*
+     The DAG arena reached its maximum capacity (`u32::MAX - 1` nodes).
+     */
+    RssnStatusArenaFull = 7,
+    /*
+     Attempted to register a symbol that already exists in the registry.
+     */
+    RssnStatusDuplicateSymbol = 8,
+    /*
+     An underlying I/O operation failed (file open, read, write, or mmap).
+     */
+    RssnStatusStorageIo = 9,
+    /*
+     The on-disk arena format is corrupt or incompatible.
+     */
+    RssnStatusStorageFormat = 10,
+    /*
+     A rewrite rule conflicts with an existing rule in the registry.
+     */
+    RssnStatusRuleConflict = 11,
+    /*
+     SIMD batch operation received slices of different lengths.
+     */
+    RssnStatusSimdLengthMismatch = 12,
+    /*
+     A node was constructed with the wrong number of children for its operator.
+     */
+    RssnStatusInvalidArity = 13,
+    /*
+     A node descriptor referenced an invalid kind or out-of-range child index.
+     */
+    RssnStatusInvalidNode = 14,
+    /*
+     A caller-provided output buffer was too small to hold the result.
+     */
+    RssnStatusBufferTooSmall = 15,
+} RssnStatus;
+
+/*
+ The primary context for building symbolic expression DAGs.
+
+ It coordinates the symbol registry, arena storage, and deduplication map
+ to construct perfectly-shared Directed Acyclic Graphs.
+ */
+typedef struct DagBuilder DagBuilder;
+
+/*
+ An index into the `DagArena`, identifying a specific `DagNode`.
+
+ This is a lightweight handle (4 bytes) that can be freely copied
+ and compared. It is only valid within the arena that created it.
+ */
+typedef struct DagNodeId DagNodeId;
+
+/*
+ A function identifier, referencing a named function in the registry.
+
+ Values `0..=6` are reserved as **intrinsic** identifiers, one per
+ [`OpKind`] variant (matching its `#[repr(u8)]` discriminant). This
+ lets built-in operators be expressed as `FnId` for the JIT/parallel
+ engines that want to handle them uniformly alongside user functions.
+
+ User-defined functions must use IDs ≥ [`FnId::FIRST_USER`].
+ */
+typedef struct FnId FnId;
+
+/*
+ Flags that describe algebraic properties of a node.
+ */
+typedef struct NodeFlags NodeFlags;
+
+/*
+ Hash value computed by `rapidhash` for structural deduplication.
+
+ Two nodes with the same `NodeHash` are structurally identical
+ (modulo hash collisions, which are verified by full structural comparison).
+ */
+typedef struct NodeHash NodeHash;
+
+typedef struct Option_RssnBatchOpCallback Option_RssnBatchOpCallback;
+
+typedef struct Option_RssnEGraphRuleCallback Option_RssnEGraphRuleCallback;
+
+typedef struct Option_RssnRuleCallback Option_RssnRuleCallback;
+
+/*
+ Opaque handle to a [`CustomOpRegistry`].
+
+ Heap-allocated; must be freed exactly once via [`rssn_custom_op_registry_free`].
+ */
+typedef struct RssnCustomOpRegistry RssnCustomOpRegistry;
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Opaque persistent JIT context. Holds the Cranelift `JitCompiler` so it
+ can be reused across multiple `rssn_dag_compile_with_ctx` calls without
+ re-paying the per-call ISA detection / module initialisation cost.
+ */
+typedef struct RssnJitContext RssnJitContext;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Opaque persistent JIT context. Dummy definition for non-JIT builds.
+ */
+typedef struct RssnJitContext RssnJitContext;
+#endif
+
+/*
+ Opaque handle for a registered C rewrite rule registry.
+
+ Create with [`rssn_rule_registry_new`]; free with [`rssn_rule_registry_free`].
+ */
+typedef struct RssnRuleRegistry RssnRuleRegistry;
+
+/*
+ Opaque handle returned by [`rssn_dag_compile_async`].
+
+ Pass to [`rssn_async_compile_join`] to block until the fiber finishes and
+ retrieve the compiled function pointer.
+
+ The `fn_ptr_bits` field stores the raw function pointer as a `u64`; it is
+ undefined until after a successful join.
+ */
+typedef struct RssnAsyncCompileHandle {
+    /*
+     Internal fiber handle id, or `u64::MAX` on early error.
+     */
+    uint64_t mHandleId;
+    /*
+     Compiled function pointer bits (valid only after a successful join).
+     Cast to `double (*)(const double*)` before calling.
+     */
+    uint64_t mFnPtrBits;
+    /*
+     Status set by the fiber; valid after join.
+     */
+    enum RssnStatus mStatus;
+} RssnAsyncCompileHandle;
+
+/*
+ Opaque handle returned by [`rssn_dag_eval_async`].
+
+ Pass to [`rssn_async_eval_join`] to block until the fiber finishes and
+ retrieve the computed `f64` result.
+ */
+typedef struct RssnAsyncEvalHandle {
+    /*
+     Internal fiber handle id, or `u64::MAX` on early error.
+     */
+    uint64_t mHandleId;
+    /*
+     Computed result (valid only after a successful join).
+     */
+    double mResult;
+    /*
+     Status set by the fiber; valid after join.
+     */
+    enum RssnStatus mStatus;
+} RssnAsyncEvalHandle;
+
+/*
+ Opaque async simplification handle. Returned by
+ [`rssn_dag_simplify_async_v2`]; pass to [`rssn_async_join`] to block
+ until the fiber completes and obtain the result.
+
+ The handle stores the `TaskHandle` value as a `u64` for C ABI
+ compatibility. A value of `u64::MAX` signals an early error (null
+ builder, etc.).
+ */
+typedef struct RssnAsyncHandle {
+    /*
+     Internal fiber handle, or `u64::MAX` on error.
+     */
+    uint64_t mHandleId;
+    /*
+     Predicted simplified root (written by the fiber before completion).
+     Zero until the fiber writes it; read only after [`rssn_async_join`].
+     */
+    uint32_t mSimplifiedRoot;
+    /*
+     Status code set by the fiber.
+     */
+    enum RssnStatus mStatus;
+} RssnAsyncHandle;
+
+/*
+ Compact node descriptor for batch DAG construction.
+
+ The caller allocates an array of these, fills them in topological order
+ (children before parents), and passes the whole array to
+ [`rssn_dag_batch_build`]. The output array receives the allocated IDs.
+
+ Field semantics by `kind`:
+
+ | kind | meaning | fields used |
+ |------|---------|-------------|
+ | 0 = Variable | leaf variable | `name[0..32]` |
+ | 1 = Constant | leaf constant | `value` |
+ | 2 = Add      | `child0 + child1` | `child0`, `child1` |
+ | 3 = Sub      | `child0 - child1` | `child0`, `child1` |
+ | 4 = Mul      | `child0 * child1` | `child0`, `child1` |
+ | 5 = Div      | `child0 / child1` | `child0`, `child1` |
+ | 6 = Pow      | `child0 ^ child1` | `child0`, `child1` |
+ | 7 = Neg      | `-child0`         | `child0` |
+ | 8 = Mod      | `child0 % child1` | `child0`, `child1` |
+
+ `child0` and `child1` are **indices into the `out_ids` array** of the
+ same batch call — they are NOT `DagNodeId` values. Index `u32::MAX`
+ means "no child". This allows forward-reference-free batch construction.
+ */
+typedef struct RssnNodeDesc {
+    /*
+     Constant value (used when `kind == 1`).
+     */
+    double mValue;
+    /*
+     Index into `out_ids` of this call for the first child.
+     */
+    uint32_t mChild0;
+    /*
+     Index into `out_ids` of this call for the second child.
+     */
+    uint32_t mChild1;
+    /*
+     Node kind discriminant (see table above).
+     */
+    uint8_t mKind;
+    /*
+     Null-terminated variable name (used when `kind == 0`).
+     */
+    uint8_t mName[31];
+} RssnNodeDesc;
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ C-compatible JIT optimisation configuration.
+
+ Fields mirror [`crate::jit::compiler::OptConfig`]. Pass a pointer to this
+ struct to [`rssn_dag_compile_with_opts`]; pass NULL to use the defaults.
+ */
+typedef struct RssnOptConfig {
+    /*
+     Maximum integer exponent expanded without a `powf` call (default: 16).
+     */
+    uint32_t mMaxIntPow;
+    /*
+     Non-zero to expand `x^0.5` to a native `sqrt` instruction (default: 1).
+     */
+    uint32_t mExpandSqrt;
+    /*
+     Non-zero to replace `x / C` with `x * (1/C)` (default: 0).
+     */
+    uint32_t mAllowReciprocalMath;
+    /*
+     Non-zero to skip divide-by-zero guards when the denominator is proven
+     non-zero by the analysis pass (default: 1).
+     */
+    uint32_t mElideNanGuard;
+    /*
+     Non-zero to reuse SSA values for repeated DAG sub-expressions (default: 1).
+     */
+    uint32_t mEnableCse;
+} RssnOptConfig;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Dummy C-compatible JIT optimisation configuration for non-JIT builds.
+ */
+typedef struct RssnOptConfig {
+
+} RssnOptConfig;
+#endif
+
+/*
+ Configuration for E-graph equality saturation.
+
+ Passed by value across the FFI boundary; zero-initialise for defaults.
+ */
+typedef struct RssnEGraphConfig {
+    /*
+     Maximum saturation rounds (0 → use library default of 8).
+     */
+    uint32_t mMaxRounds;
+    /*
+     Maximum equivalence merges before stopping (0 → default 512).
+     */
+    uint32_t mMaxMerges;
+    /*
+     Maximum new nodes the E-graph may create via rewrites (0 → default 1024).
+     */
+    uint32_t mMaxNewNodes;
+    /*
+     Non-zero → enable strict IEEE 754 signed-zero semantics.
+
+     When set, `x + (-0.0)` will **not** be simplified to `x`, matching
+     `-fno-unsafe-math-optimizations`. Default (0) uses `-fno-signed-zeros`.
+     */
+    uint8_t mStrictIeee754SignedZero;
+} RssnEGraphConfig;
+
+/*
+ A C-callable rewrite rule for the E-graph.
+
+ Called for each node during saturation. Return the ID of an equivalent
+ node to merge into the same e-class, or `u32::MAX` to decline.
+
+ `kind`       — discriminant of the current node's kind (see `RssnKind`).
+ `children`   — pointer to the *canonical* child IDs (length `n_children`).
+ `n_children` — number of children.
+ `user_data`  — opaque pointer forwarded unchanged from the registration call.
+ */
+typedef uint32_t (*RssnEGraphRuleCallback)(struct DagBuilder *builder,
+                                           uint8_t kind,
+                                           const uint32_t *children,
+                                           uint32_t n_children,
+                                           void *user_data);
+
+/*
+ C-compatible simplification configuration.
+
+ Pass a pointer to this struct to [`rssn_dag_simplify_with_config`] to
+ override the default heuristic parameters. Pass NULL to use defaults.
+ */
+typedef struct RssnSimplifyConfig {
+    /*
+     Maximum rewrite depth (default: 10).
+     */
+    uint32_t mMaxDepth;
+    /*
+     Wall-clock timeout in milliseconds (default: 500).
+     */
+    uint64_t mTimeoutMs;
+    /*
+     Approximate-pruning aggressiveness in `[0.0, 1.0]` (default: 0.1).
+     */
+    double mAggressiveness;
+} RssnSimplifyConfig;
+
+
+
+
+
+
+
+
 
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
 
 /*
- Frees a bincode buffer allocated by an FFI function.
+ Blocks until the compile fiber completes, writes the function pointer to
+ `*out_fn` (if non-null), frees the handle, and returns the fiber's status.
+
+ After this call `builder` may be freed.  The function pointer written to
+ `*out_fn` (if `status == Success`) is valid for as long as the process-level
+ JIT module lives — i.e. for the lifetime of the process.
 
  # Safety
- The buffer must have been allocated by an FFI function that returns `BincodeBuffer`.
- This function should only be called once per buffer.
+
+ `handle` must have been obtained from [`rssn_dag_compile_async`] and must
+ not be used after this call.
  */
-rssn_advanced_
-void rssn_free_bincode_buffer(struct rssn_advanced_BincodeBuffer aBuffer)
+
+enum RssnStatus rssn_async_compile_join(struct RssnAsyncCompileHandle *aHandle,
+                                        void **aOutFn)
 ;
 
 /*
- Frees a string allocated by an FFI function.
+ Blocks until the eval fiber completes, writes the result to `*out_val`
+ (if non-null), frees the handle, and returns the fiber's status.
+
+ After this call `builder` and `vars` may be freed.
 
  # Safety
- The string must have been allocated by an FFI function that returns `*mut c_char`.
- This function should only be called once per string.
+
+ `handle` must have been obtained from [`rssn_dag_eval_async`] and must
+ not be used after this call.
  */
-rssn_advanced_
-void rssn_free_string(char *aS)
+
+enum RssnStatus rssn_async_eval_join(struct RssnAsyncEvalHandle *aHandle,
+                                     double *aOutVal)
 ;
 
 /*
- Frees a C string that was allocated by the `rssn_get_*` functions in this module.
+ Blocks until the fiber behind `handle` completes, then frees the handle
+ and writes the result to `*out_root` (if non-null).
+
+ Returns the final [`RssnStatus`]. After this call, `builder` may be freed.
 
  # Safety
- The `ptr` must be a valid C string pointer allocated by this module.
+
+ `handle` must have been obtained from [`rssn_dag_simplify_async_v2`] and
+ must not be used after this call.
  */
-rssn_advanced_
-void rssn_free_string_constant(char *aPtr)
+
+enum RssnStatus rssn_async_join(struct RssnAsyncHandle *aHandle,
+                                uint32_t *aOutRoot)
 ;
 
 /*
- Returns the build date as a C string.
- The caller must free the returned string using `rssn_free_string`.
+ Registers a custom batch operator for use with [`rssn_dag_batch_build`].
+
+ `kind` must be in the range `16..=255`; kinds `0..=15` are reserved for
+ built-in operators and this function returns [`RssnStatus::InvalidNodeId`]
+ if `kind` falls in that range.  Registering the same `kind` twice returns
+ [`RssnStatus::RuleConflict`].
+
+ The `callback` receives the resolved child node IDs for the batch node and
+ must allocate a new DAG node in `builder`, returning its id.  `n_children`
+ specifies how many of `child0`/`child1` are meaningful in the descriptor
+ (currently capped at 2 by the `RssnNodeDesc` layout).
+
+ # Safety
+
+ - `callback` must be a valid function pointer that remains valid until
+   [`rssn_batch_op_unregister`] is called for the same `kind`.
+ - `user_data` is forwarded to the callback opaquely; its lifetime is the
+   caller's responsibility.
  */
-rssn_advanced_
-char *rssn_get_build_date(void)
+
+enum RssnStatus rssn_batch_op_register(uint8_t aKind,
+                                       uint32_t aNChildren,
+                                       struct Option_RssnBatchOpCallback aCallback,
+                                       void *aUserData)
 ;
 
 /*
- Returns the build date as a `bincode_next` buffer.
- The caller must free the returned buffer using `rssn_free_bincode_buffer`.
+ Unregisters a previously registered custom batch operator.
+
+ Returns [`RssnStatus::Success`] if the kind was registered, or
+ [`RssnStatus::InvalidNodeId`] if it was not (or if `kind < 16`).
  */
-rssn_advanced_
-struct rssn_advanced_BincodeBuffer rssn_get_build_date_bincode(void)
+
+enum RssnStatus rssn_batch_op_unregister(uint8_t aKind)
 ;
 
 /*
- Returns the build date as a JSON string.
- The caller must free the returned string using `rssn_free_string`.
+ Adds an e-graph rewrite rule to a custom operator.
+
+ `after_builtins`: non-zero → run after built-in algebraic rules each round.
+
+ # Safety
+
+ Same as [`rssn_custom_op_add_simplify_rule`].
  */
-rssn_advanced_
-char *rssn_get_build_date_json(void)
+
+enum RssnStatus rssn_custom_op_add_egraph_rule(struct RssnCustomOpRegistry *aReg,
+                                               uint32_t aFnId,
+                                               uint8_t aAfterBuiltins,
+                                               struct Option_RssnEGraphRuleCallback aCallback,
+                                               void *aUserData)
 ;
 
 /*
- Returns all build information as a `bincode_next` buffer.
- The caller must free the returned buffer using `rssn_free_bincode_buffer`.
+ Adds a heuristic simplification rule to a custom operator.
+
+ `fn_id` must already be registered via `rssn_custom_op_register_fn*`.
+ `callback` is called by the simplifier for every node it visits.
+ Return `u32::MAX` from the callback to pass (no rewrite); any other value
+ is treated as the replacement node ID.
+
+ # Safety
+
+ `reg`, `rule_name`, and `user_data` must remain valid for the lifetime of
+ the registry (until [`rssn_custom_op_registry_free`]).
  */
-rssn_advanced_
-struct rssn_advanced_BincodeBuffer rssn_get_build_info_bincode(void)
+
+enum RssnStatus rssn_custom_op_add_simplify_rule(struct RssnCustomOpRegistry *aReg,
+                                                 uint32_t aFnId,
+                                                 const char *aRuleName,
+                                                 int32_t aPriority,
+                                                 struct Option_RssnRuleCallback aCallback,
+                                                 void *aUserData)
 ;
 
 /*
- Returns all build information as a JSON string.
- The caller must free the returned string using `rssn_free_string`.
+ Registers a 1-argument (`f64 → f64`) custom operator.
+
+ - `fn_id`: numeric identifier (must be unique in the registry).
+ - `name`: null-terminated operator name (resolved by the parser).
+ - `eval_fn`: `extern "C" fn(f64) -> f64` pointer.
+ - `vectorizable`: non-zero if the function is pure and safe to duplicate
+   in the ILP batch path.
+
+ # Safety
+
+ `reg` and `name` must be valid non-null pointers for the duration of
+ this call.
  */
-rssn_advanced_
-char *rssn_get_build_info_json(void)
+
+enum RssnStatus rssn_custom_op_register_fn1(struct RssnCustomOpRegistry *aReg,
+                                            uint32_t aFnId,
+                                            const char *aName,
+                                            double (*aEvalFn)(double),
+                                            uint8_t aVectorizable)
 ;
 
 /*
- Returns the cargo target triple as a C string.
- The caller must free the returned string using `rssn_free_string`.
+ Registers a 2-argument (`f64, f64 → f64`) custom operator.
+
+ # Safety
+
+ Same as [`rssn_custom_op_register_fn1`].
  */
-rssn_advanced_
-char *rssn_get_cargo_target_triple(void)
+
+enum RssnStatus rssn_custom_op_register_fn2(struct RssnCustomOpRegistry *aReg,
+                                            uint32_t aFnId,
+                                            const char *aName,
+                                            double (*aEvalFn)(double,
+                                                              double),
+                                            uint8_t aVectorizable)
 ;
 
 /*
- Returns the commit SHA as a C string.
- The caller must free the returned string using `rssn_free_string`.
+ Registers a 3-argument (`f64, f64, f64 → f64`) custom operator.
+
+ # Safety
+
+ Same as [`rssn_custom_op_register_fn1`].
  */
-rssn_advanced_
-char *rssn_get_commit_sha(void)
+
+enum RssnStatus rssn_custom_op_register_fn3(struct RssnCustomOpRegistry *aReg,
+                                            uint32_t aFnId,
+                                            const char *aName,
+                                            double (*aEvalFn)(double,
+                                                              double,
+                                                              double),
+                                            uint8_t aVectorizable)
 ;
 
 /*
- Returns the commit SHA as a `bincode_next` buffer.
- The caller must free the returned buffer using `rssn_free_bincode_buffer`.
+ Frees a [`RssnCustomOpRegistry`] allocated by [`rssn_custom_op_registry_new`].
+
+ # Safety
+
+ `reg` must be a pointer from [`rssn_custom_op_registry_new`], or NULL.
+ Double-free is undefined behaviour.
  */
-rssn_advanced_
-struct rssn_advanced_BincodeBuffer rssn_get_commit_sha_bincode(void)
+
+void rssn_custom_op_registry_free(struct RssnCustomOpRegistry *aReg)
 ;
 
 /*
- Returns the commit SHA as a JSON string.
- The caller must free the returned string using `rssn_free_string`.
+ Allocates an empty [`RssnCustomOpRegistry`].
+
+ # Safety
+
+ The returned pointer must be freed exactly once via
+ [`rssn_custom_op_registry_free`].
  */
-rssn_advanced_
-char *rssn_get_commit_sha_json(void)
+
+struct RssnCustomOpRegistry *rssn_custom_op_registry_new(void)
 ;
 
 /*
- Returns the rustc version as a C string.
- The caller must free the returned string using `rssn_free_string`.
+ Allocates a new addition node in the DAG: `lhs + rhs`.
+
+ Returns `u32::MAX` on error.  **Deprecated** — use [`rssn_dag_add_v2`].
+
+ # Safety
+
+ `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
  */
-rssn_advanced_
-char *rssn_get_rustc_version(void)
+
+uint32_t rssn_dag_add(struct DagBuilder *aBuilder,
+                      uint32_t aLhs,
+                      uint32_t aRhs)
 ;
 
 /*
- Returns the system info as a C string.
- The caller must free the returned string using `rssn_free_string`.
+ Creates an addition node. Status-returning variant.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+ - `out_id` must be a valid, non-null, writable `u32` pointer.
  */
-rssn_advanced_
-char *rssn_get_system_info(void)
+
+enum RssnStatus rssn_dag_add_v2(struct DagBuilder *aBuilder,
+                                uint32_t aLhs,
+                                uint32_t aRhs,
+                                uint32_t *aOutId)
+;
+
+/*
+ Builds `n` DAG nodes in a single FFI call, writing allocated node IDs
+ into `out_ids`.
+
+ Nodes are processed in order `0..n`. Children are referenced by their
+ **index in the batch** (not their `DagNodeId`); the builder translates
+ indices to IDs after allocating each node.
+
+ Returns `RssnStatus::Success` on success. On any error the output array
+ may be partially populated — already-built nodes remain valid.
+
+ # Safety
+
+ - `builder` must be a valid, non-null `DagBuilder` from `rssn_dag_new`.
+ - `descs` must point to an array of at least `n` `RssnNodeDesc` values,
+   valid for the duration of this call.
+ - `out_ids` must point to a writable array of at least `n` `u32` values.
+ - Children referenced by `child0`/`child1` must have indices strictly
+   less than the current node's index (topological order).
+ */
+
+enum RssnStatus rssn_dag_batch_build(struct DagBuilder *aBuilder,
+                                     const struct RssnNodeDesc *aDescs,
+                                     uint32_t aN,
+                                     uint32_t *aOutIds)
+;
+
+/*
+ Builds a function-call node for a previously interned function.
+
+ `args` points to an array of `n_args` node ids. The node ids must all be
+ valid (not `u32::MAX`).
+
+ Returns the new node id, or `u32::MAX` on error.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `args` must point to an array of at least `n_args` valid `u32` values,
+   or be null when `n_args == 0`.
+ */
+
+uint32_t rssn_dag_call_fn(struct DagBuilder *aBuilder,
+                          uint32_t aFnId,
+                          const uint32_t *aArgs,
+                          uint32_t aNArgs)
+;
+
+/*
+ Builds a function-call node. Status-returning variant.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `args` must point to an array of at least `n_args` valid `u32` values,
+   or be null when `n_args == 0`.
+ - `out_id` must be a valid, non-null writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_call_fn_v2(struct DagBuilder *aBuilder,
+                                    uint32_t aFnId,
+                                    const uint32_t *aArgs,
+                                    uint32_t aNArgs,
+                                    uint32_t *aOutId)
+;
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ JIT compiles a target expression and writes the native function pointer to `out_fn`.
+
+ `out_fn` can be called via `rssn_dag_execute` or cast directly as `double (*)(const double*)`.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+ - `out_fn` must be a valid, non-null pointer to a `*mut c_void` that the function will write to.
+ - The compiled function pointer written to `*out_fn` remains valid until the `JITModule`
+   backing this compiler is dropped. Do not call it after that.
+ */
+
+enum RssnStatus rssn_dag_compile(struct DagBuilder *aBuilder,
+                                 uint32_t aRoot,
+                                 void **aOutFn)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ JIT compiles a target expression and writes the native function pointer to `out_fn`.
+
+ `out_fn` can be called via `rssn_dag_execute` or cast directly as `double (*)(const double*)`.
+ */
+
+enum RssnStatus rssn_dag_compile(struct DagBuilder *aBuilder,
+                                 uint32_t aRoot,
+                                 void **aOutFn)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Simplifies and JIT-compiles an expression asynchronously.
+
+ Fires a fiber that runs `simplify(builder, root)` followed by
+ `JitCompiler::compile(ast)` using the process-level JIT context.
+ Returns immediately with an opaque handle; call [`rssn_async_compile_join`]
+ to block until the fiber finishes and obtain the function pointer.
+
+ The caller **must** call [`rssn_async_compile_join`] before freeing `builder`.
+
+ Returns a non-null handle even on early error (null `builder`) — the handle
+ will have `status = NullPointer` and joining it is a no-op.
+
+ # Safety
+
+ - `builder` must remain valid and unmodified until after
+   [`rssn_async_compile_join`] returns.
+ - The returned handle must be freed by [`rssn_async_compile_join`].
+ */
+
+struct RssnAsyncCompileHandle *rssn_dag_compile_async(struct DagBuilder *aBuilder,
+                                                      uint32_t aRoot)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds: returns an immediately-joined error handle.
+ */
+
+struct RssnAsyncCompileHandle *rssn_dag_compile_async(struct DagBuilder *aBuilder,
+                                                      uint32_t aRoot)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Compiles a 2-row ILP-vectorised version of the expression.
+
+ The Cranelift backend generates two independent SSA chains that evaluate
+ two rows simultaneously, keeping execution units busy across instruction
+ latency gaps. For memory-bound workloads this approaches 2× scalar
+ throughput; for compute-bound workloads the speedup is limited by
+ available instruction-level parallelism.
+
+ On success writes the batch function pointer to `*out_fn`.
+ Use [`rssn_dag_execute_batch`] to dispatch the compiled function.
+
+ Returns [`RssnStatus::CompilationError`] if the expression cannot be
+ vectorised (e.g. contains non-vectorisable operations).
+
+ # Safety
+
+ Same as [`rssn_dag_compile`].
+ */
+
+enum RssnStatus rssn_dag_compile_batch(struct DagBuilder *aBuilder,
+                                       uint32_t aRoot,
+                                       void **aOutFn)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds.
+ */
+
+enum RssnStatus rssn_dag_compile_batch(struct DagBuilder *aBuilder,
+                                       uint32_t aRoot,
+                                       void **aOutFn)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ JIT compiles a target expression. Status-returning variant.
+
+ On `Success`, writes the compiled function pointer to `*out_fn`.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+ - `out_fn` must be a valid, non-null, writable `*mut c_void` pointer.
+ - The compiled function pointer remains valid until the `JITModule` is dropped.
+ */
+
+enum RssnStatus rssn_dag_compile_v2(struct DagBuilder *aBuilder,
+                                    uint32_t aRoot,
+                                    void **aOutFn)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ JIT compiles a target expression (stub for non-JIT builds).
+
+ Always returns [`RssnStatus::CompilationError`] when the `cranelift-jit`
+ feature is not enabled.
+ */
+
+enum RssnStatus rssn_dag_compile_v2(struct DagBuilder *aBuilder,
+                                    uint32_t aRoot,
+                                    void **aOutFn)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Compiles a DAG expression using a persistent JIT context.
+
+ Reuses the Cranelift module stored in `ctx`, skipping the per-call
+ ISA detection + module setup that `rssn_dag_compile` pays. On
+ `Success`, writes the compiled function pointer to `*out_fn`.
+ */
+
+enum RssnStatus rssn_dag_compile_with_ctx(struct RssnJitContext *aCtx,
+                                          struct DagBuilder *aBuilder,
+                                          uint32_t aRoot,
+                                          void **aOutFn)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds: always returns `CompilationError`.
+ */
+
+enum RssnStatus rssn_dag_compile_with_ctx(struct RssnJitContext *aCtx,
+                                          struct DagBuilder *aBuilder,
+                                          uint32_t aRoot,
+                                          void **aOutFn)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ JIT-compiles `root` using operators from `reg`.
+
+ Internally calls [`rssn_dag_compile`] after feeding all `eval_fn` pointers
+ from the registry into the global JIT context.  The batch f64×2 path
+ honours `vectorizable` flags for `Function` nodes.
+
+ # Safety
+
+ Same as [`rssn_dag_compile`].
+ */
+
+enum RssnStatus rssn_dag_compile_with_custom_ops(struct DagBuilder *aBuilder,
+                                                 uint32_t aRoot,
+                                                 struct RssnCustomOpRegistry *aReg,
+                                                 void **aOutFn)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Non-JIT stub.
+ */
+
+enum RssnStatus rssn_dag_compile_with_custom_ops(struct DagBuilder *aBuilder,
+                                                 uint32_t aRoot,
+                                                 struct RssnCustomOpRegistry *aReg,
+                                                 void **aOutFn)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Compiles a DAG expression with explicit optimisation knobs.
+
+ If `opts` is NULL, uses [`RssnOptConfig`] defaults (equivalent to
+ [`rssn_dag_compile_v2`]).
+
+ # Safety
+
+ - `ctx` must be a valid, non-null pointer from [`rssn_jit_context_new`].
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `out_fn` must be a valid, non-null writable pointer.
+ - If `opts` is non-null it must point to a valid [`RssnOptConfig`].
+ */
+
+enum RssnStatus rssn_dag_compile_with_opts(struct RssnJitContext *aCtx,
+                                           struct DagBuilder *aBuilder,
+                                           uint32_t aRoot,
+                                           const struct RssnOptConfig *aOpts,
+                                           void **aOutFn)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds: always returns `CompilationError`.
+ */
+
+enum RssnStatus rssn_dag_compile_with_opts(struct RssnJitContext *aCtx,
+                                           struct DagBuilder *aBuilder,
+                                           uint32_t aRoot,
+                                           const struct RssnOptConfig *aOpts,
+                                           void **aOutFn)
+;
+#endif
+
+/*
+ Allocates a new constant node in the DAG.
+
+ Returns `u32::MAX` on error.  **Deprecated** — use [`rssn_dag_constant_v2`].
+
+ # Safety
+
+ `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+ */
+
+uint32_t rssn_dag_constant(struct DagBuilder *aBuilder,
+                           double aVal)
+;
+
+/*
+ Creates a new constant node. Status-returning variant.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+ - `out_id` must be a valid, non-null, writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_constant_v2(struct DagBuilder *aBuilder,
+                                     double aVal,
+                                     uint32_t *aOutId)
+;
+
+/*
+ Allocates a division node: `lhs / rhs`.
+
+ Returns `u32::MAX` on error or null input.
+
+ # Safety
+
+ `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ */
+
+uint32_t rssn_dag_div(struct DagBuilder *aBuilder,
+                      uint32_t aLhs,
+                      uint32_t aRhs)
+;
+
+/*
+ Allocates a division node. Status-returning variant.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `out_id` must be a valid, non-null writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_div_v2(struct DagBuilder *aBuilder,
+                                uint32_t aLhs,
+                                uint32_t aRhs,
+                                uint32_t *aOutId)
+;
+
+/*
+ Runs E-graph equality saturation on `root` and returns the cheapest
+ equivalent node ID, or `u32::MAX` on error.
+
+ # C example
+
+ ```c
+ uint32_t best = rssn_dag_egraph_saturate_extract(
+     builder, expr_id,
+     (RssnEGraphConfig){ .max_rounds = 4, .max_merges = 256, .max_new_nodes = 512 },
+     NULL, 0,   // no user rules
+     NULL
+ );
+ ```
+
+ # Safety
+
+ - `builder` must be a valid, non-null `DagBuilder` from `rssn_dag_new`.
+ - If `rules` is non-null, `n_rules` must be the number of valid callback
+   pointers in the array.
+ - `user_data` pointers must remain valid for the duration of this call.
+ */
+
+enum RssnStatus rssn_dag_egraph_saturate_extract(struct DagBuilder *aBuilder,
+                                                 uint32_t aRoot,
+                                                 struct RssnEGraphConfig aCfg,
+                                                 const RssnEGraphRuleCallback *aRules,
+                                                 uint32_t aNRules,
+                                                 uint32_t *aOut)
+;
+
+/*
+ E-graph equality saturation with all rules from `reg`.
+
+ Runs the built-in algebraic rules plus all e-graph rules attached to
+ descriptors in `reg`, then extracts the minimum-cost representative.
+
+ # Safety
+
+ `builder`, `reg`, and `out_id` must be valid non-null pointers.
+ */
+
+enum RssnStatus rssn_dag_egraph_with_custom_ops(struct DagBuilder *aBuilder,
+                                                uint32_t aRoot,
+                                                struct RssnEGraphConfig aConfig,
+                                                struct RssnCustomOpRegistry *aReg,
+                                                uint32_t *aOutId)
+;
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Simplifies, JIT-compiles, and evaluates an expression asynchronously.
+
+ The full pipeline — `simplify → compile → execute(vars)` — runs in a fiber.
+ Returns immediately; call [`rssn_async_eval_join`] to block and get the
+ `f64` result.
+
+ The caller **must** call [`rssn_async_eval_join`] before freeing `builder`
+ **or** `vars`.
+
+ # Safety
+
+ - `builder` must remain valid and unmodified until after
+   [`rssn_async_eval_join`] returns.
+ - `vars` must point to an array of at least as many `f64` values as there
+   are distinct variables in the expression, ordered by `SymbolId`.  It must
+   remain valid and unmodified until after [`rssn_async_eval_join`] returns.
+ - The returned handle must be freed by [`rssn_async_eval_join`].
+ */
+
+struct RssnAsyncEvalHandle *rssn_dag_eval_async(struct DagBuilder *aBuilder,
+                                                uint32_t aRoot,
+                                                const double *aVars)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds.
+ */
+
+struct RssnAsyncEvalHandle *rssn_dag_eval_async(struct DagBuilder *aBuilder,
+                                                uint32_t aRoot,
+                                                const double *aVars)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Executes a previously compiled JIT function with the given variable input array.
+
+ Returns `0.0` on error, which is indistinguishable from a legitimate zero result.
+ **Deprecated** — use [`rssn_dag_execute_v2`] to get a distinct error status.
+
+ # Safety
+
+ - `func` must be a valid function pointer previously written by [`rssn_dag_compile`],
+   with signature `double (*)(const double*)`.
+ - `variables` must be a valid pointer to an array of at least as many `f64` values
+   as there are distinct variables in the compiled expression, ordered by `SymbolId`.
+ - Both pointers must remain valid for the duration of this call.
+ */
+
+double rssn_dag_execute(const void *aFunc,
+                        const double *aVariables)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Executes a previously compiled JIT function with the given variable input array.
+ */
+
+double rssn_dag_execute(const void *aFunc,
+                        const double *aVariables)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Dispatches a batch-compiled function over `n_rows` rows.
+
+ `vars_cols` is an array of column pointers (one per variable, each of
+ length `n_rows`).  The batch function processes two rows per cycle via
+ independent SSA chains; a scalar tail handles any odd final row.
+
+ # Safety
+
+ - `batch_fn` must be a valid function pointer from [`rssn_dag_compile_batch`].
+ - `vars_cols` must point to an array of column pointers, each of length `n_rows`.
+ - `out` must point to a writable array of `n_rows` `f64` values.
+ */
+
+enum RssnStatus rssn_dag_execute_batch(const void *aBatchFn,
+                                       const double *const *aVarsCols,
+                                       size_t aNRows,
+                                       double *aOut)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds.
+ */
+
+enum RssnStatus rssn_dag_execute_batch(const void *aBatchFn,
+                                       const double *const *aVarsCols,
+                                       size_t aNRows,
+                                       double *aOut)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Evaluates a scalar JIT function over `n_rows` rows in a tight Rust loop,
+ eliminating per-row FFI overhead from the calling language.
+
+ `vars_cols` is an array of `n_vars` pointers; each pointer addresses a
+ contiguous column of `n_rows` `f64` values for the corresponding variable.
+ Columns must be ordered by **`SymbolId`**: the first variable interned into
+ the `DagBuilder` has `SymbolId` 0 and uses `vars_cols[0]`, etc.
+
+ One FFI call amortises setup cost over `n_rows` evaluations. For `n_rows`
+ ≥ 1 000, throughput is limited by memory bandwidth, not FFI overhead.
+
+ # Safety
+
+ - `func` must be a valid function pointer from [`rssn_dag_compile`].
+ - `vars_cols` must point to `n_vars` valid column pointers, each of length
+   `n_rows`.
+ - `out` must point to a writable array of `n_rows` `f64` values.
+ - All pointers must remain valid for the duration of this call.
+ */
+
+enum RssnStatus rssn_dag_execute_bulk(const void *aFunc,
+                                      const double *const *aVarsCols,
+                                      uint32_t aNVars,
+                                      size_t aNRows,
+                                      double *aOut)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds.
+ */
+
+enum RssnStatus rssn_dag_execute_bulk(const void *aFunc,
+                                      const double *const *aVarsCols,
+                                      uint32_t aNVars,
+                                      size_t aNRows,
+                                      double *aOut)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Executes a previously compiled JIT function. Status-returning variant.
+
+ On `Success`, writes the result to `*out_val`.
+
+ # Safety
+
+ - `func` must be a valid function pointer previously written by [`rssn_dag_compile`].
+ - `variables` must be a valid pointer to an array of at least as many `f64` values
+   as there are variables in the compiled expression, ordered by `SymbolId`.
+ - `out_val` must be a valid, non-null, writable `f64` pointer.
+ - All pointers must remain valid for the duration of this call.
+ */
+
+enum RssnStatus rssn_dag_execute_v2(const void *aFunc,
+                                    const double *aVariables,
+                                    double *aOutVal)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Executes a previously compiled JIT function (stub for non-JIT builds).
+ */
+
+enum RssnStatus rssn_dag_execute_v2(const void *aFunc,
+                                    const double *aVariables,
+                                    double *aOutVal)
+;
+#endif
+
+/*
+ Releases the memory of a previously allocated `DagBuilder`.
+
+ # Safety
+
+ `builder` must be a pointer previously returned by [`rssn_dag_new`], or NULL.
+ After this call the pointer is dangling and must not be used.
+ Passing a pointer not from `rssn_dag_new`, or freeing twice, is undefined behaviour.
+ */
+
+void rssn_dag_free(struct DagBuilder *aBuilder)
+;
+
+/*
+ Writes the packed arena snapshot to a caller-provided byte buffer.
+
+ On success, `*bytes_written` receives the number of bytes written.
+ Call once with `buf = NULL` to query the required buffer size
+ (`*bytes_written` will be the needed byte count and the return value
+ is `RssnStatus::Success`).
+
+ The layout is: a little-endian `u64` node count, then `n × 32` bytes
+ of packed node data (`PackedDagNode`), then a little-endian `u64` pool
+ count, then `pool_count × 4` bytes of `u32` child IDs. Alignment of
+ `buf` to 8 bytes is required.
+
+ # Safety
+
+ - `builder` must be a valid, non-null `DagBuilder`.
+ - If `buf` is non-null, it must point to at least `buf_len` bytes of
+   writable memory, correctly aligned to 8 bytes.
+ - `bytes_written` must be a valid non-null pointer to a `u64`.
+ */
+
+enum RssnStatus rssn_dag_get_packed(const struct DagBuilder *aBuilder,
+                                    uint8_t *aBuf,
+                                    size_t aBufLen,
+                                    size_t *aBytesWritten)
+;
+
+/*
+ Interns a function name and returns its numeric `FnId`.
+
+ The returned id can be used with [`rssn_dag_call_fn`] to build
+ function-call nodes, and with the JIT custom-function registration
+ APIs to bind native implementations.
+
+ Returns `u32::MAX` on null input or if interning fails.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `name` must be a valid, non-null, null-terminated C string.
+ */
+
+uint32_t rssn_dag_intern_function(struct DagBuilder *aBuilder,
+                                  const char *aName)
+;
+
+/*
+ Allocates a modulo node: `lhs % rhs`.
+
+ Returns `u32::MAX` on error or null input.
+
+ # Safety
+
+ `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ */
+
+uint32_t rssn_dag_mod(struct DagBuilder *aBuilder,
+                      uint32_t aLhs,
+                      uint32_t aRhs)
+;
+
+/*
+ Allocates a modulo node. Status-returning variant.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `out_id` must be a valid, non-null writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_mod_v2(struct DagBuilder *aBuilder,
+                                uint32_t aLhs,
+                                uint32_t aRhs,
+                                uint32_t *aOutId)
+;
+
+/*
+ Allocates a multiplication node: `lhs * rhs`.
+
+ Returns `u32::MAX` on error or null input.
+
+ # Safety
+
+ `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ */
+
+uint32_t rssn_dag_mul(struct DagBuilder *aBuilder,
+                      uint32_t aLhs,
+                      uint32_t aRhs)
+;
+
+/*
+ Allocates a multiplication node. Status-returning variant.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `out_id` must be a valid, non-null writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_mul_v2(struct DagBuilder *aBuilder,
+                                uint32_t aLhs,
+                                uint32_t aRhs,
+                                uint32_t *aOutId)
+;
+
+/*
+ Allocates a unary negation node: `-operand`.
+
+ Returns `u32::MAX` on error or null input.
+
+ # Safety
+
+ `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ */
+
+uint32_t rssn_dag_neg(struct DagBuilder *aBuilder,
+                      uint32_t aOperand)
+;
+
+/*
+ Allocates a unary negation node. Status-returning variant.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `out_id` must be a valid, non-null writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_neg_v2(struct DagBuilder *aBuilder,
+                                uint32_t aOperand,
+                                uint32_t *aOutId)
+;
+
+/*
+ Creates a new `DagBuilder` context.
+
+ Returns a raw pointer to the builder, or NULL if creation failed or panicked.
+ The returned pointer must be freed exactly once via [`rssn_dag_free`].
+ */
+
+struct DagBuilder *rssn_dag_new(void)
+;
+
+/*
+ Parses a mathematical expression from a C string into the DAG.
+
+ The expression uses the standard infix syntax: `+`, `-`, `*`, `/`,
+ `^` (exponentiation), `%` (modulo), parentheses, numeric literals,
+ and identifier names for variables.
+
+ On `Success`, writes the root node id of the parsed expression to
+ `*out_id`. On failure returns [`RssnStatus::ParseError`].
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `expr` must be a valid, non-null, null-terminated C string.
+ - `out_id` must be a valid, non-null writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_parse(struct DagBuilder *aBuilder,
+                               const char *aExpr,
+                               uint32_t *aOutId)
+;
+
+/*
+ Allocates an exponentiation node: `base ^ exp`.
+
+ Returns `u32::MAX` on error or null input.
+
+ # Safety
+
+ `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ */
+
+uint32_t rssn_dag_pow(struct DagBuilder *aBuilder,
+                      uint32_t aBase,
+                      uint32_t aExp)
+;
+
+/*
+ Allocates an exponentiation node. Status-returning variant.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `out_id` must be a valid, non-null writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_pow_v2(struct DagBuilder *aBuilder,
+                                uint32_t aBase,
+                                uint32_t aExp,
+                                uint32_t *aOutId)
+;
+
+/*
+ Simplifies a target expression using the default heuristic engine.
+
+ Returns the new root node index, or `u32::MAX` on error.
+ **Deprecated** — use [`rssn_dag_simplify_v2`] or [`rssn_dag_simplify_with_config`].
+
+ # Safety
+
+ `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+ */
+
+uint32_t rssn_dag_simplify(struct DagBuilder *aBuilder,
+                           uint32_t aRoot)
+;
+
+/*
+ Fires a simplification fiber and returns an opaque handle.
+
+ The caller must call [`rssn_async_join`] before freeing `builder`, making
+ the use-after-free hazard explicit and auditable from C.
+
+ The returned [`RssnAsyncHandle`] must be freed with [`rssn_async_join`].
+ */
+
+struct RssnAsyncHandle *rssn_dag_simplify_async(struct DagBuilder *aBuilder,
+                                                uint32_t aRoot)
+;
+
+/*
+ Simplifies an expression. Status-returning variant.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+ - `out_id` must be a valid, non-null, writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_simplify_v2(struct DagBuilder *aBuilder,
+                                     uint32_t aRoot,
+                                     uint32_t *aOutId)
+;
+
+/*
+ Simplifies an expression using a caller-supplied configuration.
+
+ If `config` is NULL, behaves identically to [`rssn_dag_simplify_v2`].
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer to a `DagBuilder`.
+ - `out_id` must be a valid, non-null, writable `u32` pointer.
+ - If `config` is non-null, it must point to a valid `RssnSimplifyConfig`.
+ */
+
+enum RssnStatus rssn_dag_simplify_with_config(struct DagBuilder *aBuilder,
+                                              uint32_t aRoot,
+                                              const struct RssnSimplifyConfig *aConfig,
+                                              uint32_t *aOutId)
+;
+
+/*
+ Simplifies `root` applying all simplification rules from `reg`.
+
+ Combines the registry's rules with the built-in heuristic patterns and
+ runs the standard simplification pass.
+
+ # Safety
+
+ `builder`, `reg`, and `out_id` must be valid non-null pointers.
+ */
+
+enum RssnStatus rssn_dag_simplify_with_custom_ops(struct DagBuilder *aBuilder,
+                                                  uint32_t aRoot,
+                                                  struct RssnCustomOpRegistry *aReg,
+                                                  uint32_t *aOutId)
+;
+
+/*
+ Like [`rssn_dag_egraph_saturate_extract`] but also enables the E-graph
+ pass inside the full heuristic simplification pipeline and returns the
+ result after both passes.
+
+ # Safety
+
+ Same as `rssn_dag_egraph_saturate_extract`.
+ */
+
+enum RssnStatus rssn_dag_simplify_with_egraph(struct DagBuilder *aBuilder,
+                                              uint32_t aRoot,
+                                              struct RssnEGraphConfig aEgraphCfg,
+                                              uint32_t *aOut)
+;
+
+/*
+ Simplifies an expression using a caller-supplied C rule registry and configuration.
+
+ If `registry` is NULL, only the built-in heuristic patterns are applied.
+ If `config` is NULL, defaults are used.
+
+ # Safety
+
+ - `builder` and `out_id` must be valid, non-null pointers.
+ - If `registry` is non-null it must be from [`rssn_rule_registry_new`].
+ - If `config` is non-null it must point to a valid [`RssnSimplifyConfig`].
+ */
+
+enum RssnStatus rssn_dag_simplify_with_rules(struct DagBuilder *aBuilder,
+                                             uint32_t aRoot,
+                                             struct RssnRuleRegistry *aRegistry,
+                                             const struct RssnSimplifyConfig *aConfig,
+                                             uint32_t *aOutId)
+;
+
+/*
+ Allocates a subtraction node: `lhs - rhs`.
+
+ Returns `u32::MAX` on error or null input.
+
+ # Safety
+
+ `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ */
+
+uint32_t rssn_dag_sub(struct DagBuilder *aBuilder,
+                      uint32_t aLhs,
+                      uint32_t aRhs)
+;
+
+/*
+ Allocates a subtraction node. Status-returning variant.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
+ - `out_id` must be a valid, non-null writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_sub_v2(struct DagBuilder *aBuilder,
+                                uint32_t aLhs,
+                                uint32_t aRhs,
+                                uint32_t *aOutId)
+;
+
+/*
+ Allocates a new variable node in the DAG.
+
+ Returns the index of the variable node, or `u32::MAX` if a panic
+ occurred, the builder was null, or `name` was not valid UTF-8.
+
+ **Deprecated** — use [`rssn_dag_variable_v2`] for richer error reporting.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+ - `name` must be a valid, non-null, null-terminated C string valid for the duration of
+   this call.
+ */
+
+uint32_t rssn_dag_variable(struct DagBuilder *aBuilder,
+                           const char *aName)
+;
+
+/*
+ Creates a new variable node. Status-returning variant.
+
+ On `Success`, writes the new node id to `*out_id`.
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer to a `DagBuilder` from [`rssn_dag_new`].
+ - `name` must be a valid, non-null, null-terminated C string valid for this call.
+ - `out_id` must be a valid, non-null, writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_dag_variable_v2(struct DagBuilder *aBuilder,
+                                     const char *aName,
+                                     uint32_t *aOutId)
+;
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Frees a persistent JIT context previously created by
+ [`rssn_jit_context_new`]. Passing NULL is a safe no-op.
+ */
+
+void rssn_jit_context_free(struct RssnJitContext *aCtx)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds: no-op.
+ */
+
+void rssn_jit_context_free(struct RssnJitContext *aCtx)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Creates a new persistent JIT context.
+
+ Returns a raw pointer to the context, or NULL if construction panicked.
+ The caller must free the returned context with [`rssn_jit_context_free`].
+ */
+
+struct RssnJitContext *rssn_jit_context_new(void)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds: always returns NULL.
+ */
+
+struct RssnJitContext *rssn_jit_context_new(void)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Registers a one-argument native function with the persistent JIT context
+ so it can be called from compiled expressions.
+
+ The `fn_id` must have been obtained via [`rssn_dag_intern_function`].
+ The `func` pointer must remain valid for the lifetime of the JIT context.
+
+ # Safety
+
+ `func` must be a valid function pointer with the signature `double(double)`.
+ */
+
+enum RssnStatus rssn_jit_register_fn_1(struct RssnJitContext *aCtx,
+                                       uint32_t aFnId,
+                                       double (*aFunc)(double))
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Registers a one-argument native function (stub for non-JIT builds).
+ */
+
+enum RssnStatus rssn_jit_register_fn_1(struct RssnJitContext *aCtx,
+                                       uint32_t aFnId,
+                                       double (*aFunc)(double))
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Registers a two-argument native function with the persistent JIT context.
+
+ # Safety
+
+ `func` must be a valid function pointer with the signature `double(double, double)`.
+ */
+
+enum RssnStatus rssn_jit_register_fn_2(struct RssnJitContext *aCtx,
+                                       uint32_t aFnId,
+                                       double (*aFunc)(double,
+                                                       double))
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Registers a two-argument native function (stub for non-JIT builds).
+ */
+
+enum RssnStatus rssn_jit_register_fn_2(struct RssnJitContext *aCtx,
+                                       uint32_t aFnId,
+                                       double (*aFunc)(double,
+                                                       double))
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Registers a three-argument native function with the persistent JIT context.
+
+ # Safety
+
+ `func` must be a valid function pointer with the signature `double(double, double, double)`.
+ */
+
+enum RssnStatus rssn_jit_register_fn_3(struct RssnJitContext *aCtx,
+                                       uint32_t aFnId,
+                                       double (*aFunc)(double,
+                                                       double,
+                                                       double))
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Registers a three-argument native function (stub for non-JIT builds).
+ */
+
+enum RssnStatus rssn_jit_register_fn_3(struct RssnJitContext *aCtx,
+                                       uint32_t aFnId,
+                                       double (*aFunc)(double,
+                                                       double,
+                                                       double))
+;
+#endif
+
+/*
+ Registers a C callback as a rewrite rule.
+
+ - `name`: human-readable rule name (null-terminated C string, for fingerprinting).
+ - `callback`: the rule function; called during simplification for each node.
+ - `priority`: higher values are tried first (default-priority rules use 0).
+ - `kind_filter`: if non-negative, the rule is only tried for nodes with this
+   kind discriminant (see [`RssnKind`]). Pass `-1` for a wildcard rule.
+ - `user_data`: opaque pointer forwarded to every callback invocation.
+
+ # Safety
+
+ - `registry` must be a valid, non-null pointer from [`rssn_rule_registry_new`].
+ - `name` must be a valid, non-null, null-terminated C string.
+ - `callback` must be a valid, non-null function pointer.
+ - `user_data` must remain valid for the lifetime of the registry.
+ */
+
+enum RssnStatus rssn_rule_register(struct RssnRuleRegistry *aRegistry,
+                                   const char *aName,
+                                   struct Option_RssnRuleCallback aCallback,
+                                   int32_t aPriority,
+                                   int32_t aKindFilter,
+                                   void *aUserData)
+;
+
+/*
+ Frees a rule registry previously created by [`rssn_rule_registry_new`].
+
+ Passing NULL is a safe no-op.
+
+ # Safety
+
+ `registry` must be a pointer returned by [`rssn_rule_registry_new`] or NULL.
+ */
+
+void rssn_rule_registry_free(struct RssnRuleRegistry *aRegistry)
+;
+
+/*
+ Creates a new, empty rule registry.
+
+ The returned pointer must be freed with [`rssn_rule_registry_free`].
+ Returns NULL if construction panics.
+ */
+
+struct RssnRuleRegistry *rssn_rule_registry_new(void)
 ;
 
 #ifdef __cplusplus
@@ -160,7 +1875,7 @@ char *rssn_get_system_info(void)
 #endif  // __cplusplus
 
 #ifdef __cplusplus
-}  // namespace rssn-advanced
+}  // namespace rssn_advanced
 #endif  // __cplusplus
 
-#endif  /* RSSN_ADVANCED_H */
+#endif  /* RSSNADV_H */

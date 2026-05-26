@@ -1,10 +1,10 @@
 [package]
 name = "rssn-advanced"
-version = "0.0.2"
+version = "0.1.0"
 edition = "2024"
-rust-version = "1.90.0"
+rust-version = "1.93.0"
 authors = ["The rssn-advanced developers"]
-description = "A crate containing complex and delicate mathematical algorithms exspcialy heuristic one based on rssn."
+description = "This is rssn-advanced: The next generation symbolic core of rssn."
 license = "Apache-2.0"
 repository = "https://github.com/Apich-Organization/rssn-advanced"
 homepage = "https://github.com/Apich-Organization/rssn-advanced"
@@ -23,39 +23,20 @@ categories = [
     "simulation",
     "algorithms",
 ]
-exclude = [
-    "examples/*",
-    "tests/*",
-    "benches/*",
-    "doc/*",
-    ".gitea/*",
-    ".github/*",
-    ".vscode/*",
-    ".idea/*",
-    "*.sh",
-    "*.bat",
-    "scripts/*",
-    "docs/*",
-    "certificates/*",
-    "*.h",
-    "*.hpp",
-    "*.cpp",
-    "*.c",
-    "*.o",
-    "*.a",
-    "*.so",
-    "*.dylib",
-    "*.lib",
-    "*.obj",
-]
+exclude = []
 
 [lib]
 crate-type = ["cdylib", "rlib", "staticlib"]
 
-[profile.dev]
-lto = false
-opt-level = 0
+[profile.bench]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = false
 debug = true
+debug-assertions = false
+overflow-checks = false
+incremental = true
 
 [profile.release]
 lto = true
@@ -68,41 +49,72 @@ debug-assertions = false
 overflow-checks = false
 incremental = true
 
+[profile.dev]
+lto = false
+opt-level = 0
+debug = true
+
 [dependencies]
-bincode-next = "2.0"
-rssn = { version = "0.2", features = ["full", "experimental"] }
-serde = "1.0"
-serde_json = "1.0"
+bincode-next = "3.0.0-rc.15"
+pastey = "0.2"
+libc = { version = "0.2", optional = true }
+rapidhash = { version = "4.4", default-features = false }
+arbitrary = { version = "1.4", optional = true }
+windows-sys = { version = "0.61", features = [
+    "Win32_Security",
+    "Win32_System_Diagnostics",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_SystemInformation",
+] }
+nom = "8.0"
+cranelift-frontend = { version = "0.132", optional = true }
+cranelift-native = { version = "0.132", optional = true }
+cranelift-codegen = { version = "0.132", optional = true }
+cranelift-module = { version = "0.132", optional = true }
+cranelift-jit = { version = "0.132", optional = true }
+dtact = "0.2"
 
 [build-dependencies]
 cbindgen = "0.29"
-vergen = { version = "9", features = [
-    "build",
-    "cargo",
-    "cargo_metadata",
-    "emit_and_set",
-    "regex",
-    "rustc",
-    "rustc_version",
-    "si",
-    "sysinfo",
-    "time",
-] }
-vergen-gitcl = { version = "9", features = [
-    "build",
-    "cargo",
-    "emit_and_set",
-    "rustc",
-    "si",
-] }
 
 [features]
-default = []
-ffi_api = []
+# JIT is enabled by default.  The `cranelift-jit` named feature is used as the
+# primary gate (all #[cfg(feature = "cranelift-jit")] sites check this).
+# It activates the `jit` feature which pulls in the actual Cranelift crates.
+# Disable JIT with `--no-default-features` for size-constrained builds.
+default = ["cranelift-jit"]
+
+# `cranelift-jit` is the stable gate name used in #[cfg] throughout the codebase.
+"cranelift-jit" = ["jit"]
+
+# `jit` enables the Cranelift crate deps.  Because all #[cfg] gates check
+# `feature = "cranelift-jit"`, use `--features cranelift-jit` (not `--features jit`)
+# when overriding features on the command line.
+jit = [
+    "dep:cranelift-jit",
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+]
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
-proptest = "1.9"
+loom = "0.7"
+proptest = "1.6"
+criterion = { version = "0.8", features = ["async_tokio"] }
+tokio = { version = "1.52", features = ["full"] }
+serial_test = "3.0"
+libc = "0.2"
+windows-sys = { version = "0.61", features = [
+    "Win32_Security",
+    "Win32_System_Diagnostics",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_SystemInformation",
+] }
 assert_approx_eq = "1.1"
 
 [[bench]]

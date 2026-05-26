@@ -1,0 +1,26 @@
+name: Miri
+
+on:
+  push:
+    branches: [trunk, main, 'v*.x', 'ci/*']
+  pull_request:
+    branches: [trunk, main, 'v*.x']
+
+env:
+  CARGO_TERM_COLOR: always
+  MIRIFLAGS: "-Zmiri-disable-isolation"
+
+jobs:
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo miri setup
+        run: cargo miri setup
+      - name: cargo miri test
+        run: cargo miri test --all-features --no-fail-fast

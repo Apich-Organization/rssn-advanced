@@ -1,5 +1,8 @@
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "link-arg=/STACK:17179869184"]
-
-[build]
+[target.'cfg(not(target_arch="wasm32"))']
 rustflags = ["-C", "target-cpu=native"]
+
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=2097152"]
+
+[target.'cfg(not(target_os = "windows"))']
+rustflags = ["-C", "force-unwind-tables=no"]
