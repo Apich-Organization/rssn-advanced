@@ -136,7 +136,7 @@ fn push_dag_frame(
     });
     // Pre-reserve `arity` slots in the shared pool for this frame's children.
     let pool_offset = child_pool.len();
-    child_pool.extend(std::iter::repeat(0).take(arity));
+    child_pool.extend(std::iter::repeat_n(0, arity));
     stack.push(DagFrame {
         dag_id,
         ast_idx,
@@ -226,11 +226,7 @@ pub fn ast_to_dag(ast: &AstProjection, builder: &mut DagBuilder) -> DagNodeId {
         };
 
         if let Some(child_idx) = next_child_idx {
-            let arity = ast
-                .nodes
-                .get(child_idx)
-                .map(|n| n.children.len())
-                .unwrap_or(0);
+            let arity = ast.nodes.get(child_idx).map_or(0, |n| n.children.len());
             stack.push(AstFrame {
                 idx: child_idx,
                 child_dag_ids: Vec::new(),
@@ -270,8 +266,7 @@ fn build_dag_node(
             let name = builder
                 .registry()
                 .name(sym_id)
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("__var{}", sym_id.0));
+                .map_or_else(|| format!("__var{}", sym_id.0), str::to_owned);
             builder.variable(&name)
         }
         // Arity mismatches signal a malformed projection. Previously

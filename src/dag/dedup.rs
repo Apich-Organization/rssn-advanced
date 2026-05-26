@@ -124,7 +124,7 @@ impl DedupMap {
 
     /// Returns the slot index to start probing from.
     #[inline]
-    fn start_idx(&self, raw_hash: u64) -> usize {
+    const fn start_idx(&self, raw_hash: u64) -> usize {
         (raw_hash as usize) & (self.cap - 1)
     }
 
@@ -173,15 +173,13 @@ impl DedupMap {
                 Slot::Occupied { raw_hash, id } => {
                     if *raw_hash == raw {
                         let found_id = *id;
-                        if let Some(existing) = arena.get(found_id) {
-                            if existing.kind == kind
-                                && existing.children == children
-                                && existing.meta.coefficient.to_bits() == coefficient.to_bits()
-                                && existing.meta.flags.without_canonical()
-                                    == flags.without_canonical()
-                            {
-                                return found_id;
-                            }
+                        if let Some(existing) = arena.get(found_id)
+                            && existing.kind == kind
+                            && existing.children == children
+                            && existing.meta.coefficient.to_bits() == coefficient.to_bits()
+                            && existing.meta.flags.without_canonical() == flags.without_canonical()
+                        {
+                            return found_id;
                         }
                     }
                     idx = (idx + 1) & (self.cap - 1);
@@ -215,7 +213,7 @@ impl DedupMap {
 
     /// Clears the deduplication map.
     pub fn clear(&mut self) {
-        for slot in self.slots.iter_mut() {
+        for slot in &mut self.slots {
             *slot = Slot::Empty;
         }
         self.len = 0;

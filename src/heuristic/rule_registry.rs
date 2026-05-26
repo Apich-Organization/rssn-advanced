@@ -40,7 +40,7 @@ struct PrioritizedRule {
     name: String,
 }
 
-/// Rule registry with O(rules_for_kind) dispatch.
+/// Rule registry with `O(rules_for_kind)` dispatch.
 ///
 /// Rules are indexed at registration time: each `SymbolKind`-filtered rule is
 /// stored in a per-kind bucket; unfiltered rules go in a wildcard bucket. Both
@@ -86,7 +86,7 @@ impl Default for RuleRegistry {
 }
 
 /// Map `SymbolKind` to a stable u8 discriminant for the index key.
-fn kind_disc(k: &SymbolKind) -> u8 {
+const fn kind_disc(k: &SymbolKind) -> u8 {
     match k {
         SymbolKind::Variable(_) => 0,
         SymbolKind::Constant(_) => 1,
@@ -121,7 +121,7 @@ impl RuleRegistry {
     ///
     /// Higher priority rules are tried first. Rules with a `kind_filter` are only
     /// tried when the node's `SymbolKind` matches — this avoids virtual calls for
-    /// inapplicable rules entirely (O(rules_for_kind) instead of O(total_rules)).
+    /// inapplicable rules entirely (`O(rules_for_kind)` instead of `O(total_rules)`).
     pub fn register_with_priority<F>(
         &mut self,
         rule: F,
@@ -176,7 +176,7 @@ impl RuleRegistry {
         self.rules.push(PrioritizedRule {
             func: Box::new(rule),
             priority,
-            kind_filter: kind_filter.clone(),
+            kind_filter: kind_filter,
             name,
         });
 
@@ -227,17 +227,17 @@ impl RuleRegistry {
 
     /// Returns the number of registered rules.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.rules.len()
     }
 
     /// Returns `true` if no rules have been registered.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
 
-    /// O(rules_for_kind + wildcard_rules) dispatch — skips all rules
+    /// `O(rules_for_kind` + `wildcard_rules`) dispatch — skips all rules
     /// registered for a different kind entirely.
     ///
     /// Kind-specific rules (higher specificity) are tried before wildcard rules.

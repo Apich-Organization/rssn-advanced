@@ -162,7 +162,9 @@ pub extern "C" fn rssn_dag_compile(
 
         // Reuse the process-level JIT context to amortise Cranelift init cost.
         let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
-        let mut ctx = ctx_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctx = ctx_mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match ctx.compiler_mut().compile(&ast) {
             Ok(compiled_fn) => {
                 let ptr = compiled_fn as *mut c_void;
@@ -497,7 +499,9 @@ pub extern "C" fn rssn_dag_compile_batch(
         let root_id = DagNodeId::new(root);
         let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
         let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
-        let mut ctx = ctx_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctx = ctx_mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match ctx.compiler_mut().compile_batch_f64x2(&ast) {
             Ok(Some(batch_fn)) => {
                 unsafe { *out_fn = batch_fn as *mut c_void };
@@ -621,7 +625,9 @@ pub extern "C" fn rssn_dag_compile_v2(
         let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
         // Reuse the process-level JIT context.
         let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
-        let mut ctx = ctx_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctx = ctx_mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match ctx.compiler_mut().compile(&ast) {
             Ok(compiled_fn) => {
                 unsafe { *out_fn = compiled_fn as *mut c_void };
@@ -1109,7 +1115,7 @@ pub extern "C" fn rssn_dag_call_fn(
             Vec::new()
         } else {
             let slice = unsafe { std::slice::from_raw_parts(args, n_args as usize) };
-            if slice.iter().any(|&id| id == u32::MAX) {
+            if slice.contains(&u32::MAX) {
                 return u32::MAX;
             }
             slice.iter().map(|&id| DagNodeId::new(id)).collect()
@@ -1148,7 +1154,7 @@ pub extern "C" fn rssn_dag_call_fn_v2(
             Vec::new()
         } else {
             let slice = unsafe { std::slice::from_raw_parts(args, n_args as usize) };
-            if slice.iter().any(|&id| id == u32::MAX) {
+            if slice.contains(&u32::MAX) {
                 return RssnStatus::InvalidNodeId;
             }
             slice.iter().map(|&id| DagNodeId::new(id)).collect()
@@ -1566,7 +1572,7 @@ pub extern "C" fn rssn_rule_register(
                 // SAFETY: the caller guarantees the callback and user_data are valid.
                 let result = unsafe {
                     cb(
-                        builder as *mut DagBuilder,
+                        std::ptr::from_mut::<DagBuilder>(builder),
                         kind_to_discriminant(&kind),
                         child_ids.as_ptr(),
                         child_ids.len() as u32,
@@ -1651,7 +1657,7 @@ pub extern "C" fn rssn_dag_simplify_with_rules(
 }
 
 /// Maps a `SymbolKind` to its C discriminant byte.
-fn kind_to_discriminant(kind: &crate::dag::symbol::SymbolKind) -> u8 {
+const fn kind_to_discriminant(kind: &crate::dag::symbol::SymbolKind) -> u8 {
     use crate::dag::symbol::{OpKind, SymbolKind};
     match kind {
         SymbolKind::Variable(_) => 0,
@@ -1857,7 +1863,7 @@ mod tests {
 ///
 /// Passed by value across the FFI boundary; zero-initialise for defaults.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RssnEGraphConfig {
     /// Maximum saturation rounds (0 → use library default of 8).
     pub max_rounds: u32,
@@ -1872,19 +1878,8 @@ pub struct RssnEGraphConfig {
     pub strict_ieee754_signed_zero: u8,
 }
 
-impl Default for RssnEGraphConfig {
-    fn default() -> Self {
-        Self {
-            max_rounds: 0,
-            max_merges: 0,
-            max_new_nodes: 0,
-            strict_ieee754_signed_zero: 0,
-        }
-    }
-}
-
 impl RssnEGraphConfig {
-    fn to_rust(self) -> crate::egraph::EGraphConfig {
+    const fn to_rust(self) -> crate::egraph::EGraphConfig {
         crate::egraph::EGraphConfig {
             max_rounds: if self.max_rounds == 0 {
                 8
@@ -1974,7 +1969,7 @@ pub extern "C" fn rssn_dag_egraph_saturate_extract(
                     let ch_ptr = children.as_ptr().cast::<u32>();
                     let result = unsafe {
                         cb(
-                            builder_inner as *mut DagBuilder,
+                            std::ptr::from_mut::<DagBuilder>(builder_inner),
                             kind_disc,
                             ch_ptr,
                             children.len() as u32,
@@ -2122,7 +2117,9 @@ pub extern "C" fn rssn_batch_op_register(
     };
     let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
         let reg = batch_op_registry();
-        let mut guard = reg.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = reg
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if guard.contains_key(&kind) {
             return RssnStatus::RuleConflict;
         }
@@ -2150,7 +2147,9 @@ pub extern "C" fn rssn_batch_op_unregister(kind: u8) -> RssnStatus {
     }
     let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
         let reg = batch_op_registry();
-        let mut guard = reg.write().unwrap_or_else(|e| e.into_inner());
+        let mut guard = reg
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if guard.remove(&kind).is_some() {
             RssnStatus::Success
         } else {
@@ -2326,7 +2325,9 @@ pub extern "C" fn rssn_dag_batch_build(
                     // the registry lock.
                     let entry = {
                         let reg = batch_op_registry();
-                        let guard = reg.read().unwrap_or_else(|e| e.into_inner());
+                        let guard = reg
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         guard
                             .get(&kind)
                             .map(|e| (e.callback, e.n_children, e.user_data))
@@ -2353,8 +2354,14 @@ pub extern "C" fn rssn_dag_batch_build(
                     let ud = ud_usize as *mut c_void;
                     // SAFETY: callback is a valid fn ptr (guaranteed by rssn_batch_op_register),
                     // builder is valid for this call, ch_buf lives on the stack.
-                    let result_id =
-                        unsafe { cb(b as *mut DagBuilder, ch_buf.as_ptr(), actual_n as u32, ud) };
+                    let result_id = unsafe {
+                        cb(
+                            std::ptr::from_mut::<DagBuilder>(b),
+                            ch_buf.as_ptr(),
+                            actual_n as u32,
+                            ud,
+                        )
+                    };
                     if result_id == u32::MAX {
                         return RssnStatus::InvalidNode;
                     }
@@ -2681,7 +2688,7 @@ pub extern "C" fn rssn_custom_op_registry_free(reg: *mut RssnCustomOpRegistry) {
         return;
     }
     let _ = catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        drop(Box::from_raw(reg))
+        drop(Box::from_raw(reg));
     }));
 }
 
@@ -2851,7 +2858,7 @@ pub extern "C" fn rssn_custom_op_register_fn3(
 
 /// Returns the `u8` kind discriminant for a `SymbolKind` value, matching
 /// the `RssnKind` encoding used throughout the C API.
-fn symbol_kind_to_u8(kind: &crate::dag::symbol::SymbolKind) -> u8 {
+const fn symbol_kind_to_u8(kind: &crate::dag::symbol::SymbolKind) -> u8 {
     use crate::dag::symbol::{OpKind, SymbolKind};
     match kind {
         SymbolKind::Variable(_) => 0,
@@ -2920,7 +2927,7 @@ pub extern "C" fn rssn_custom_op_add_simplify_rule(
                         // registry lifetime covers any call through this closure.
                         let result = unsafe {
                             callback(
-                                builder as *mut DagBuilder,
+                                std::ptr::from_mut::<DagBuilder>(builder),
                                 kind_byte,
                                 child_ids.as_ptr(),
                                 child_ids.len() as u32,
@@ -2982,7 +2989,7 @@ pub extern "C" fn rssn_custom_op_add_egraph_rule(
                         let child_ids: Vec<u32> = children.iter().map(|id| id.value()).collect();
                         let result = unsafe {
                             callback(
-                                builder as *mut DagBuilder,
+                                std::ptr::from_mut::<DagBuilder>(builder),
                                 kind_byte,
                                 child_ids.as_ptr(),
                                 child_ids.len() as u32,
@@ -3040,7 +3047,9 @@ pub extern "C" fn rssn_dag_compile_with_custom_ops(
         let root_id = DagNodeId::new(root);
         let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
         let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
-        let mut ctx = ctx_mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ctx = ctx_mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         // Install the registry into the JIT context (feeds fn pointers +
         // enables vectorizable check).

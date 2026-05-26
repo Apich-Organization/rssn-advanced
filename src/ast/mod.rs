@@ -57,16 +57,16 @@ pub fn walk_projection<V: AstVisitor>(proj: &AstProjection, visitor: &mut V) {
     for (idx, node) in proj.nodes.iter().enumerate() {
         match node.kind {
             crate::dag::symbol::SymbolKind::Variable(sym_id) => {
-                visitor.visit_variable(idx, sym_id, node.dag_id)
+                visitor.visit_variable(idx, sym_id, node.dag_id);
             }
             crate::dag::symbol::SymbolKind::Constant(val) => {
-                visitor.visit_constant(idx, val, node.dag_id)
+                visitor.visit_constant(idx, val, node.dag_id);
             }
             crate::dag::symbol::SymbolKind::Operator(op) => {
-                visitor.visit_operator(idx, op, &node.children, node.dag_id)
+                visitor.visit_operator(idx, op, &node.children, node.dag_id);
             }
             crate::dag::symbol::SymbolKind::Function(fn_id) => {
-                visitor.visit_function(idx, fn_id, &node.children, node.dag_id)
+                visitor.visit_function(idx, fn_id, &node.children, node.dag_id);
             }
         }
     }

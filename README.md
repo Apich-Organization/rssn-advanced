@@ -16,7 +16,7 @@ It provides:
 - a **[Cranelift](https://cranelift.dev/)-backed JIT compiler** that turns a DAG subgraph into a native `f64` function at runtime, with a 2-row ILP batch path for higher throughput;
 - **heuristic and e-graph simplification** — a rule-registry-driven greedy simplifier and a lightweight equality-saturation engine (no `egg` dependency);
 - a **unified custom-operator API** that wires a user-defined function into the JIT, the simplifier, and the e-graph with a single descriptor;
-- **hand-written inline-asm presets** for `f64×2` / `f64×4` arithmetic on x86_64 (SSE2 / AVX2 / AES-NI), AArch64 (NEON / crypto), and riscv64 (RVV 1.0 / Zkn);
+- **hand-written inline-asm presets** for `f64×2` / `f64×4` arithmetic on `x86_64` (SSE2 / AVX2 / AES-NI), `AArch64` (NEON / crypto), and riscv64 (RVV 1.0 / Zkn);
 - a **flat `extern "C"` API** compatible with `cbindgen` for embedding in C, C++, Python (ctypes/cffi), or any other language.
 
 ---
@@ -42,7 +42,7 @@ Bulk evaluation of **N = 1,000,000 rows**, best of 5 runs.
 **Test hardware:** Dell Latitude 5400 · Intel i7-8665U @ 1.90 GHz · 32 GiB RAM · Fedora Linux 44, kernel 6.19
 (laptop-class CPU; server CPUs with larger L3 caches will show a smaller gap for simple expressions).
 
-**Baseline:** hand-optimised NumPy (BLAS-linked, SIMD-enabled C backend).
+**Baseline:** hand-optimised `NumPy` (BLAS-linked, SIMD-enabled C backend).
 
 ```text
 Expression                                      JIT bulk    JIT batch    NumPy     bulk/batch speedup
@@ -54,7 +54,7 @@ rational w/ CSE        (repeated subexpression)  2.53 ns     1.27 ns   15.91 ns 
 ```
 
 **Why the gap grows with expression complexity:**
-NumPy allocates one `float64[N]` scratch array per arithmetic operation.
+`NumPy` allocates one `float64[N]` scratch array per arithmetic operation.
 A 10-term expression at N = 10⁶ creates ~200 MB of temporaries that
 overflow L3 cache.  The JIT keeps every intermediate value in a CPU
 register across the full expression, paying exactly one memory round-trip
@@ -310,7 +310,7 @@ int main(void)
 | `egraph` | Union-find equality saturation with cost-based extraction |
 | `custom` | Unified custom-operator descriptor + registry |
 | `simd` | Slice-level wrappers over `asm_presets` |
-| `asm_presets` | `f64×2` / `f64×4` inline-asm for x86_64 / AArch64 / riscv64 |
+| `asm_presets` | `f64×2` / `f64×4` inline-asm for `x86_64` / `AArch64` / riscv64 |
 | `ffi` | Flat `extern "C"` API + async bridge (fiber-backed via `dtact`) |
 | `parallel` | Fiber-based parallel simplification |
 | `storage` | Disk-backed spill + hot-node frequency cache |

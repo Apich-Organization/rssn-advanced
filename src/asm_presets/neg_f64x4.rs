@@ -1,8 +1,8 @@
 //! `neg_f64x4` — packed `f64x4` negation (unary).
 //!
-//! * x86_64 + AVX2: XOR with sign-bit mask (`vxorpd ymm`) — flips bit 63
+//! * `x86_64` + AVX2: XOR with sign-bit mask (`vxorpd ymm`) — flips bit 63
 //!   of every lane with no intermediate register needed.
-//! * AArch64: two `fneg v.2d` NEON ops (NEON is mandatory on ARMv8-A).
+//! * `AArch64`: two `fneg v.2d` NEON ops (NEON is mandatory on ARMv8-A).
 //! * riscv64 + RVV: `vfsgnjn.vv v0, v0, v0` (sign-inject negated self).
 //! * fallback: unary minus per lane.
 //!

@@ -107,7 +107,7 @@ impl ChildList {
 
     /// Returns the number of children.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         match self {
             Self::Empty => 0,
             Self::One(_) => 1,
@@ -120,7 +120,7 @@ impl ChildList {
 
     /// Returns `true` if there are no children.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         matches!(self, Self::Empty)
     }
 
@@ -165,7 +165,7 @@ pub struct DagNode {
 impl DagNode {
     /// Creates a variable leaf node.
     #[must_use]
-    pub fn variable(kind: SymbolKind, meta: NodeMetadata) -> Self {
+    pub const fn variable(kind: SymbolKind, meta: NodeMetadata) -> Self {
         Self {
             kind,
             meta,
@@ -175,7 +175,7 @@ impl DagNode {
 
     /// Creates a numeric constant leaf node.
     #[must_use]
-    pub fn constant(val: f64, meta: NodeMetadata) -> Self {
+    pub const fn constant(val: f64, meta: NodeMetadata) -> Self {
         Self {
             kind: SymbolKind::Constant(val),
             meta,
@@ -185,7 +185,7 @@ impl DagNode {
 
     /// Creates an operator node with the given children.
     #[must_use]
-    pub fn operator(kind: SymbolKind, meta: NodeMetadata, children: ChildList) -> Self {
+    pub const fn operator(kind: SymbolKind, meta: NodeMetadata, children: ChildList) -> Self {
         Self {
             kind,
             meta,

@@ -1,7 +1,7 @@
 //! `add_f64x4` — packed `f64x4` addition.
 //!
-//! * x86_64 + AVX2: single `vaddpd ymm` (256-bit, 4 lanes at once).
-//! * AArch64: two `fadd v.2d` NEON ops (128-bit each; NEON is mandatory).
+//! * `x86_64` + AVX2: single `vaddpd ymm` (256-bit, 4 lanes at once).
+//! * `AArch64`: two `fadd v.2d` NEON ops (128-bit each; NEON is mandatory).
 //! * riscv64 + RVV: `vfadd.vv` with `vsetvli` for 4×f64.
 //! * fallback: scalar loop.
 

@@ -165,7 +165,7 @@ impl<T> RelPtr<T, i64> {
         if self.is_null() {
             return None;
         }
-        let target = (source as i128) + (self.offset as i128);
+        let target = (source as i128) + i128::from(self.offset);
         if target < 0 {
             None
         } else {
@@ -233,7 +233,7 @@ impl<T> RelPtr<T, i32> {
     ///
     /// Returns `None` if the relative pointer is null.
     #[must_use]
-    pub fn resolve(self, source: usize) -> Option<usize> {
+    pub const fn resolve(self, source: usize) -> Option<usize> {
         if self.is_null() {
             return None;
         }

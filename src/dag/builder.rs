@@ -46,7 +46,7 @@ impl DagBuilder {
     }
 
     /// Accesses the underlying arena mutably.
-    pub fn arena_mut(&mut self) -> &mut DagArena {
+    pub const fn arena_mut(&mut self) -> &mut DagArena {
         &mut self.arena
     }
 

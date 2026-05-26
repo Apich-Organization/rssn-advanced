@@ -163,7 +163,7 @@ pub fn emit_int_pow(builder: &mut FunctionBuilder<'_>, lhs: Value, n: u32) -> Va
 
 /// Emits `sqrt(lhs)` using Cranelift's native `sqrt` instruction.
 ///
-/// On x86-64 this lowers to a single `sqrtsd` instruction. On AArch64 it
+/// On x86-64 this lowers to a single `sqrtsd` instruction. On `AArch64` it
 /// lowers to `fsqrt`. The instruction is polymorphic: it also works on
 /// `F64X2` values (emitting `sqrtpd` on x86 or `fsqrt` on NEON).
 #[must_use]

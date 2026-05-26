@@ -49,7 +49,7 @@ impl HeuristicConfig {
 
     /// Enables the E-graph equality-saturation post-pass with the given budget.
     #[must_use]
-    pub fn with_egraph(mut self, cfg: EGraphConfig) -> Self {
+    pub const fn with_egraph(mut self, cfg: EGraphConfig) -> Self {
         self.use_egraph = true;
         self.egraph_config = cfg;
         self
@@ -57,28 +57,28 @@ impl HeuristicConfig {
 
     /// Sets the maximum search depth limit.
     #[must_use]
-    pub fn max_depth(mut self, depth: usize) -> Self {
+    pub const fn max_depth(mut self, depth: usize) -> Self {
         self.max_depth = depth;
         self
     }
 
     /// Sets the maximum branching factor (beam width).
     #[must_use]
-    pub fn branch_factor(mut self, factor: usize) -> Self {
+    pub const fn branch_factor(mut self, factor: usize) -> Self {
         self.branch_factor = factor;
         self
     }
 
     /// Sets the search timeout.
     #[must_use]
-    pub fn timeout(mut self, timeout: Duration) -> Self {
+    pub const fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// Sets the approximate simplification aggressiveness.
     #[must_use]
-    pub fn simplification_aggressiveness(mut self, aggressiveness: f64) -> Self {
+    pub const fn simplification_aggressiveness(mut self, aggressiveness: f64) -> Self {
         self.simplification_aggressiveness = aggressiveness;
         self
     }

@@ -1,8 +1,8 @@
 //! `neg_f64x2` — 2-lane packed `f64` negation.
 //!
-//! * x86_64: SSE2 `xorpd xmm` with sign-bit mask (128-bit, 2 lanes;
-//!   SSE2 is x86_64 ABI baseline).
-//! * AArch64: NEON `fneg v.2d` (NEON is mandatory on ARMv8-A).
+//! * `x86_64`: SSE2 `xorpd xmm` with sign-bit mask (128-bit, 2 lanes;
+//!   SSE2 is `x86_64` ABI baseline).
+//! * `AArch64`: NEON `fneg v.2d` (NEON is mandatory on ARMv8-A).
 //! * riscv64 + RVV: `vfsgnjn.vv` (sign-inject negated self) with `vsetvli vl=2, e64`.
 //! * fallback: unary minus per lane.
 //!

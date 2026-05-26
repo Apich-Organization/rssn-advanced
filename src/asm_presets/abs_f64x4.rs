@@ -1,8 +1,8 @@
 //! `abs_f64x4` — packed `f64x4` absolute value (unary).
 //!
-//! * x86_64 + AVX2: AND with `0x7FFF_FFFF_FFFF_FFFF` mask (`vandpd ymm`) —
+//! * `x86_64` + AVX2: AND with `0x7FFF_FFFF_FFFF_FFFF` mask (`vandpd ymm`) —
 //!   clears bit 63 (the sign bit) in all 4 lanes.
-//! * AArch64: two `fabs v.2d` NEON ops (NEON is mandatory on ARMv8-A).
+//! * `AArch64`: two `fabs v.2d` NEON ops (NEON is mandatory on ARMv8-A).
 //! * riscv64 + RVV: `vfsgnjx.vv v0, v0, v0` (sign-inject self XOR self = 0).
 //! * fallback: `f64::abs()` per lane.
 //!

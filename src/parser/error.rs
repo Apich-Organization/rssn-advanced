@@ -75,6 +75,7 @@ impl std::error::Error for ParseError {}
 #[cold]
 #[track_caller]
 #[inline(never)]
+#[must_use]
 pub fn cold_parse_error_unexpected_eof(span: Span) -> ParseError {
     ParseError {
         message: "Unexpected end of input; expected closing ')'".to_owned(),
@@ -87,6 +88,7 @@ pub fn cold_parse_error_unexpected_eof(span: Span) -> ParseError {
 #[cold]
 #[track_caller]
 #[inline(never)]
+#[must_use]
 pub fn cold_parse_error_unexpected_token(span: Span, bad: char) -> ParseError {
     ParseError {
         message: format!("Unexpected character {bad:?}; expected a number, variable, or '('"),

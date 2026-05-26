@@ -85,16 +85,12 @@ pub fn mul_identity(builder: &mut DagBuilder, children: &[DagNodeId]) -> Pattern
     let rhs_val = constant_value(builder, rhs);
 
     // `0 * x → 0` only when x is a known finite value.
-    if matches!(lhs_val, Some(v) if v == 0.0) {
-        if matches!(rhs_val, Some(r) if r.is_finite()) {
-            return Some(builder.constant(0.0));
-        }
+    if matches!(lhs_val, Some(v) if v == 0.0) && matches!(rhs_val, Some(r) if r.is_finite()) {
+        return Some(builder.constant(0.0));
     }
     // `x * 0 → 0` only when x is a known finite value.
-    if matches!(rhs_val, Some(v) if v == 0.0) {
-        if matches!(lhs_val, Some(l) if l.is_finite()) {
-            return Some(builder.constant(0.0));
-        }
+    if matches!(rhs_val, Some(v) if v == 0.0) && matches!(lhs_val, Some(l) if l.is_finite()) {
+        return Some(builder.constant(0.0));
     }
     if matches!(lhs_val, Some(v) if v == 1.0) {
         return Some(rhs);
@@ -217,36 +213,36 @@ pub fn mul_coef_merge(builder: &mut DagBuilder, children: &[DagNodeId]) -> Patte
     let (lhs, rhs) = (children[0], children[1]);
 
     // Case: `(c1 * x) * c2`
-    if let Some(c2) = constant_value(builder, rhs) {
-        if let Some(lhs_node) = builder.arena().get(lhs) {
-            if lhs_node.kind == SymbolKind::Operator(OpKind::Mul) && lhs_node.children.len() == 2 {
-                let inner = lhs_node.children.as_slice().to_owned();
-                if let Some(c1) = constant_value(builder, inner[0]) {
-                    let merged = builder.constant(c1 * c2);
-                    return Some(builder.mul(merged, inner[1]));
-                }
-                if let Some(c1) = constant_value(builder, inner[1]) {
-                    let merged = builder.constant(c1 * c2);
-                    return Some(builder.mul(inner[0], merged));
-                }
-            }
+    if let Some(c2) = constant_value(builder, rhs)
+        && let Some(lhs_node) = builder.arena().get(lhs)
+        && lhs_node.kind == SymbolKind::Operator(OpKind::Mul)
+        && lhs_node.children.len() == 2
+    {
+        let inner = lhs_node.children.as_slice().to_owned();
+        if let Some(c1) = constant_value(builder, inner[0]) {
+            let merged = builder.constant(c1 * c2);
+            return Some(builder.mul(merged, inner[1]));
+        }
+        if let Some(c1) = constant_value(builder, inner[1]) {
+            let merged = builder.constant(c1 * c2);
+            return Some(builder.mul(inner[0], merged));
         }
     }
 
     // Case: `c1 * (x * c2)`
-    if let Some(c1) = constant_value(builder, lhs) {
-        if let Some(rhs_node) = builder.arena().get(rhs) {
-            if rhs_node.kind == SymbolKind::Operator(OpKind::Mul) && rhs_node.children.len() == 2 {
-                let inner = rhs_node.children.as_slice().to_owned();
-                if let Some(c2) = constant_value(builder, inner[0]) {
-                    let merged = builder.constant(c1 * c2);
-                    return Some(builder.mul(merged, inner[1]));
-                }
-                if let Some(c2) = constant_value(builder, inner[1]) {
-                    let merged = builder.constant(c1 * c2);
-                    return Some(builder.mul(inner[0], merged));
-                }
-            }
+    if let Some(c1) = constant_value(builder, lhs)
+        && let Some(rhs_node) = builder.arena().get(rhs)
+        && rhs_node.kind == SymbolKind::Operator(OpKind::Mul)
+        && rhs_node.children.len() == 2
+    {
+        let inner = rhs_node.children.as_slice().to_owned();
+        if let Some(c2) = constant_value(builder, inner[0]) {
+            let merged = builder.constant(c1 * c2);
+            return Some(builder.mul(merged, inner[1]));
+        }
+        if let Some(c2) = constant_value(builder, inner[1]) {
+            let merged = builder.constant(c1 * c2);
+            return Some(builder.mul(inner[0], merged));
         }
     }
 
@@ -261,19 +257,19 @@ pub fn add_coef_merge(builder: &mut DagBuilder, children: &[DagNodeId]) -> Patte
     let (lhs, rhs) = (children[0], children[1]);
 
     // `(c1 + x) + c2`
-    if let Some(c2) = constant_value(builder, rhs) {
-        if let Some(lhs_node) = builder.arena().get(lhs) {
-            if lhs_node.kind == SymbolKind::Operator(OpKind::Add) && lhs_node.children.len() == 2 {
-                let inner = lhs_node.children.as_slice().to_owned();
-                if let Some(c1) = constant_value(builder, inner[0]) {
-                    let merged = builder.constant(c1 + c2);
-                    return Some(builder.add(inner[1], merged));
-                }
-                if let Some(c1) = constant_value(builder, inner[1]) {
-                    let merged = builder.constant(c1 + c2);
-                    return Some(builder.add(inner[0], merged));
-                }
-            }
+    if let Some(c2) = constant_value(builder, rhs)
+        && let Some(lhs_node) = builder.arena().get(lhs)
+        && lhs_node.kind == SymbolKind::Operator(OpKind::Add)
+        && lhs_node.children.len() == 2
+    {
+        let inner = lhs_node.children.as_slice().to_owned();
+        if let Some(c1) = constant_value(builder, inner[0]) {
+            let merged = builder.constant(c1 + c2);
+            return Some(builder.add(inner[1], merged));
+        }
+        if let Some(c1) = constant_value(builder, inner[1]) {
+            let merged = builder.constant(c1 + c2);
+            return Some(builder.add(inner[0], merged));
         }
     }
 

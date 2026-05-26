@@ -1,7 +1,7 @@
 //! Cost model for E-graph extraction.
 //!
 //! Lower cost = cheaper to evaluate. The extractor visits each e-class and
-//! returns the DagNodeId whose recursive cost (self + children) is minimal.
+//! returns the `DagNodeId` whose recursive cost (self + children) is minimal.
 //!
 //! ## Design rationale
 //!
@@ -123,7 +123,7 @@ pub fn node_cost(
     };
 
     // x^0.5 → vsqrtpd: reward sqrt path even when pow_general would normally win.
-    let own = if let SymbolKind::Operator(OpKind::Pow) = &node.kind {
+    let own = if matches!(&node.kind, SymbolKind::Operator(OpKind::Pow)) {
         let is_half_pow = node.children.as_slice().get(1).is_some_and(|&exp_id| {
             builder.arena().get(exp_id).is_some_and(|exp_node| {
                 matches!(exp_node.kind, SymbolKind::Constant(v) if (v - 0.5).abs() < 1e-9)

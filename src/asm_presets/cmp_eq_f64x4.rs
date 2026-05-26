@@ -3,8 +3,8 @@
 //! Returns a 4-lane boolean mask: `0xFF` per lane if equal, `0x00`
 //! otherwise. `NaN == NaN` is false (IEEE 754), matching Rust `==`.
 //!
-//! * x86_64 + AVX2: `vcmpeqpd ymm` + `vmovmskpd` to collapse sign bits.
-//! * AArch64: two `fcmeq v.2d` + `umov` to extract lane masks (NEON mandatory).
+//! * `x86_64` + AVX2: `vcmpeqpd ymm` + `vmovmskpd` to collapse sign bits.
+//! * `AArch64`: two `fcmeq v.2d` + `umov` to extract lane masks (NEON mandatory).
 //! * riscv64 + RVV: `vmfeq.vv` to produce a mask register, then `vmerge.vim`
 //!   with e8/vl=4 to expand each mask bit to `0xFF` or `0x00`.
 //! * fallback: scalar `==` loop.

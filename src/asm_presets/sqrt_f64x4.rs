@@ -1,7 +1,7 @@
 //! `sqrt_f64x4` — packed `f64x4` square root (unary).
 //!
-//! * x86_64 + AVX2: `vsqrtpd ymm` (256-bit, 4 lanes at once).
-//! * AArch64: two `fsqrt v.2d` NEON ops (NEON is mandatory on ARMv8-A).
+//! * `x86_64` + AVX2: `vsqrtpd ymm` (256-bit, 4 lanes at once).
+//! * `AArch64`: two `fsqrt v.2d` NEON ops (NEON is mandatory on ARMv8-A).
 //! * riscv64 + RVV: `vfsqrt.v` with `vsetvli` for 4×f64.
 //! * fallback: `f64::sqrt()` per lane.
 //!

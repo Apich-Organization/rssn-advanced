@@ -1,7 +1,7 @@
 //! `mul_f64x2` — 2-lane packed `f64` multiplication.
 //!
-//! * x86_64: SSE2 `mulpd xmm` (128-bit, 2 lanes; SSE2 is x86_64 ABI baseline).
-//! * AArch64: NEON `fmul v.2d` (NEON is mandatory on ARMv8-A).
+//! * `x86_64`: SSE2 `mulpd xmm` (128-bit, 2 lanes; SSE2 is `x86_64` ABI baseline).
+//! * `AArch64`: NEON `fmul v.2d` (NEON is mandatory on ARMv8-A).
 //! * riscv64 + RVV: `vfmul.vv` with `vsetvli vl=2, e64`.
 //! * fallback: scalar loop.
 

@@ -160,7 +160,7 @@ pub struct FrequencyPolicy {
 impl FrequencyPolicy {
     /// Creates a new `FrequencyPolicy` with the given threshold.
     #[must_use]
-    pub fn new(threshold: u64) -> Self {
+    pub const fn new(threshold: u64) -> Self {
         Self { threshold }
     }
 }
@@ -176,19 +176,20 @@ impl EvictionPolicy for FrequencyPolicy {
 }
 
 /// Protects nodes that contribute at least `min_ratio` of total accesses.
+///
 /// Provides decay-like behaviour: a frequently-accessed node that hasn't
 /// been touched recently will see its ratio fall as other nodes are accessed.
 pub struct RecencyWeightedPolicy {
     /// Minimum raw access count.
     pub min_freq: u64,
-    /// node.freq / total_accesses must be >= this to be considered hot.
+    /// node.freq / `total_accesses` must be >= this to be considered hot.
     pub min_ratio: f64,
 }
 
 impl RecencyWeightedPolicy {
     /// Creates a new `RecencyWeightedPolicy`.
     #[must_use]
-    pub fn new(min_freq: u64, min_ratio: f64) -> Self {
+    pub const fn new(min_freq: u64, min_ratio: f64) -> Self {
         Self {
             min_freq,
             min_ratio,
@@ -227,7 +228,7 @@ pub struct CompositePolicy<A: EvictionPolicy, B: EvictionPolicy> {
 impl<A: EvictionPolicy, B: EvictionPolicy> CompositePolicy<A, B> {
     /// Creates a policy that requires **both** `a` and `b` to consider a node hot.
     #[must_use]
-    pub fn and(a: A, b: B) -> Self {
+    pub const fn and(a: A, b: B) -> Self {
         Self {
             primary: a,
             secondary: b,
@@ -236,7 +237,7 @@ impl<A: EvictionPolicy, B: EvictionPolicy> CompositePolicy<A, B> {
     }
     /// Creates a policy that requires **either** `a` or `b` to consider a node hot.
     #[must_use]
-    pub fn or(a: A, b: B) -> Self {
+    pub const fn or(a: A, b: B) -> Self {
         Self {
             primary: a,
             secondary: b,
@@ -290,6 +291,7 @@ pub fn evict_nodes_with_policy<P: EvictionPolicy>(
 }
 
 /// Like `evict_cold_nodes` but limits compaction to at most `budget` protected nodes.
+///
 /// The mark phase always runs fully; only the sweep is bounded.
 /// Pass `usize::MAX` for unlimited (equivalent to the original).
 #[must_use]
@@ -399,15 +401,15 @@ pub fn evict_nodes_budgeted_with_policy<P: EvictionPolicy>(
     for i in 0..compacted_len {
         #[allow(clippy::cast_possible_truncation)]
         let id = DagNodeId::new(i as u32);
-        if let Some(node) = compacted.get(id) {
-            if node.meta.flags.is_canonical() {
-                let children_valid = node
-                    .children
-                    .iter()
-                    .all(|c| !c.is_none() && c.index() < compacted_len);
-                if !children_valid {
-                    to_clear.push(id);
-                }
+        if let Some(node) = compacted.get(id)
+            && node.meta.flags.is_canonical()
+        {
+            let children_valid = node
+                .children
+                .iter()
+                .all(|c| !c.is_none() && c.index() < compacted_len);
+            if !children_valid {
+                to_clear.push(id);
             }
         }
     }

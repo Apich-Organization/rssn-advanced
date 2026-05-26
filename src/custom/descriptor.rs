@@ -67,7 +67,7 @@ pub enum EvalFn {
 impl EvalFn {
     /// Returns the number of `f64` arguments the function accepts.
     #[must_use]
-    pub fn arity(self) -> u8 {
+    pub const fn arity(self) -> u8 {
         match self {
             Self::Arity1(_) => 1,
             Self::Arity2(_) => 2,
@@ -158,7 +158,7 @@ pub struct CustomOpDescriptor {
     /// When `true`, the operator is pure (no side effects) and may be
     /// duplicated by the batch f64×2 ILP vectorisation path.
     pub vectorizable: bool,
-    /// Heuristic simplification rules (fed to the HeuristicEngine).
+    /// Heuristic simplification rules (fed to the `HeuristicEngine`).
     pub simplify_rules: Vec<SimplifyRule>,
     /// E-graph rewrite rules (fed to equality saturation).
     pub egraph_rules: Vec<EGraphRule>,
@@ -228,7 +228,7 @@ pub struct CustomOpDescriptorBuilder {
 impl CustomOpDescriptorBuilder {
     /// Create a builder from the mandatory fields.
     #[must_use]
-    pub fn new(fn_id: FnId, name: String, eval_fn: EvalFn) -> Self {
+    pub const fn new(fn_id: FnId, name: String, eval_fn: EvalFn) -> Self {
         Self {
             fn_id,
             name,
@@ -245,7 +245,7 @@ impl CustomOpDescriptorBuilder {
     /// When set, the batch f64×2 path may call the function twice in the
     /// same loop body (once per row) to expose instruction-level parallelism.
     #[must_use]
-    pub fn vectorizable(mut self) -> Self {
+    pub const fn vectorizable(mut self) -> Self {
         self.vectorizable = true;
         self
     }
@@ -290,7 +290,7 @@ impl CustomOpDescriptorBuilder {
 
     /// Override the e-graph extraction cost (default `2.0`).
     #[must_use]
-    pub fn cost(mut self, c: f64) -> Self {
+    pub const fn cost(mut self, c: f64) -> Self {
         self.cost = c;
         self
     }
@@ -324,9 +324,9 @@ pub enum CustomOpError {
 impl std::fmt::Display for CustomOpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::DuplicateFnId(id) => write!(f, "custom op fn_id {:?} already registered", id),
+            Self::DuplicateFnId(id) => write!(f, "custom op fn_id {id:?} already registered"),
             Self::DuplicateName(name) => {
-                write!(f, "custom op name {:?} already registered", name)
+                write!(f, "custom op name {name:?} already registered")
             }
         }
     }
@@ -409,7 +409,7 @@ impl CustomOpRegistry {
             return Err(CustomOpError::DuplicateFnId(desc.fn_id));
         }
         if self.name_to_id.contains_key(&desc.name) {
-            return Err(CustomOpError::DuplicateName(desc.name.clone()));
+            return Err(CustomOpError::DuplicateName(desc.name));
         }
         self.name_to_id.insert(desc.name.clone(), desc.fn_id);
         self.ops.insert(desc.fn_id, desc);

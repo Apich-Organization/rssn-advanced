@@ -1,8 +1,8 @@
 //! `abs_f64x2` — 2-lane packed `f64` absolute value.
 //!
-//! * x86_64: SSE2 `andpd xmm` with sign-clear mask (128-bit, 2 lanes;
-//!   SSE2 is x86_64 ABI baseline).
-//! * AArch64: NEON `fabs v.2d` (NEON is mandatory on ARMv8-A).
+//! * `x86_64`: SSE2 `andpd xmm` with sign-clear mask (128-bit, 2 lanes;
+//!   SSE2 is `x86_64` ABI baseline).
+//! * `AArch64`: NEON `fabs v.2d` (NEON is mandatory on ARMv8-A).
 //! * riscv64 + RVV: `vfsgnjx.vv` (sign XOR self = 0) with `vsetvli vl=2, e64`.
 //! * fallback: `f64::abs()` per lane.
 //!

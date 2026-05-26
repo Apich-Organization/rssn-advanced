@@ -45,7 +45,7 @@ pub enum AstChildList {
 impl AstChildList {
     /// Returns the number of child pointers.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         match self {
             Self::Empty => 0,
             Self::One(_) => 1,
@@ -58,7 +58,7 @@ impl AstChildList {
 
     /// Returns `true` if this list has no children.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         matches!(self, Self::Empty)
     }
 
@@ -136,7 +136,7 @@ pub struct AstProjection {
 impl AstProjection {
     /// Creates a new, empty AST projection buffer.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             nodes: Vec::new(),
             children_pool: Vec::new(),
@@ -169,13 +169,13 @@ impl AstProjection {
 
     /// Returns the total number of nodes in the projection.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.nodes.len()
     }
 
     /// Returns `true` if the projection is empty.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 }
@@ -226,10 +226,10 @@ impl AstProjection {
                     .iter()
                     .rev()
                 {
-                    if let Some(child_idx) = ptr.resolve(idx) {
-                        if child_idx < self.nodes.len() {
-                            stack.push((child_idx, false));
-                        }
+                    if let Some(child_idx) = ptr.resolve(idx)
+                        && child_idx < self.nodes.len()
+                    {
+                        stack.push((child_idx, false));
                     }
                 }
             }

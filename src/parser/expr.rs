@@ -44,7 +44,7 @@ pub const MAX_PAREN_DEPTH: u16 = 200;
 /// hardcoded `op_precedence` / `op_right_associative` functions.
 #[derive(Debug, Clone)]
 pub struct PrecedenceTable {
-    /// Maps operator string → (precedence, is_right_associative).
+    /// Maps operator string → (precedence, `is_right_associative`).
     /// Single-character operators are stored as single-char strings.
     entries: std::collections::HashMap<String, (u8, bool)>,
     /// Maps prefix unary operator string → DAG `SymbolKind` for the node to build.
@@ -352,8 +352,7 @@ fn parse_atom_with_table<'a>(
         let mut candidates: Vec<(&str, &SymbolKind)> = table.unary_ops().collect();
         candidates.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
         for (prefix, kind) in candidates {
-            if trimmed.starts_with(prefix) {
-                let after = &trimmed[prefix.len()..];
+            if let Some(after) = trimmed.strip_prefix(prefix) {
                 // For single-char prefixes accept any position; for
                 // multi-char word prefixes ensure a word boundary.
                 let ok = prefix
@@ -447,20 +446,17 @@ fn parse_expr_climbing_with_table<'a>(
             let mut candidates: Vec<&str> = table.named_ops().collect();
             candidates.sort_by(|a, b| b.len().cmp(&a.len()));
             for named_op in candidates {
-                if trimmed.starts_with(named_op) {
+                if let Some(after) = trimmed.strip_prefix(named_op) {
                     // Ensure the match is a complete identifier token (not a prefix of a longer word).
-                    let after = &trimmed[named_op.len()..];
                     let is_word_boundary = after.is_empty()
                         || !after
                             .chars()
                             .next()
                             .is_some_and(|c| c.is_alphanumeric() || c == '_');
-                    if is_word_boundary {
-                        if let Some(prec) = table.precedence_str(named_op) {
-                            let ra = table.is_right_associative_str(named_op);
-                            named_match = Some((named_op, prec, ra, after.trim_start()));
-                            break;
-                        }
+                    if is_word_boundary && let Some(prec) = table.precedence_str(named_op) {
+                        let ra = table.is_right_associative_str(named_op);
+                        named_match = Some((named_op, prec, ra, after.trim_start()));
+                        break;
                     }
                 }
             }

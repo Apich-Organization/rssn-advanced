@@ -417,7 +417,7 @@ impl<T: Pod> Encode for BorrowedSlice<'_, T> {
 #[cold]
 #[track_caller]
 #[inline(never)]
-fn decode_error_misaligned() -> DecodeError {
+const fn decode_error_misaligned() -> DecodeError {
     DecodeError::Other("BorrowedSlice: misaligned input buffer")
 }
 

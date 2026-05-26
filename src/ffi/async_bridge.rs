@@ -233,7 +233,9 @@ pub extern "C" fn rssn_dag_compile_async(
             // Convert to AST and compile.
             let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), simplified_id);
             let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
-            let mut ctx = ctx_mutex.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ctx = ctx_mutex
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             ctx.compiler_mut().compile(&ast).map(|f| f as usize as u64)
         }));
 
@@ -388,7 +390,9 @@ pub extern "C" fn rssn_dag_eval_async(
             // Compile.
             let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), simplified_id);
             let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
-            let mut ctx = ctx_mutex.lock().unwrap_or_else(|e| e.into_inner());
+            let mut ctx = ctx_mutex
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let compiled_fn = ctx.compiler_mut().compile(&ast)?;
 
             // Execute.

@@ -70,7 +70,7 @@ pub type CompiledBatchFn =
 #[derive(Debug, Clone)]
 pub struct OptConfig {
     /// Maximum integer exponent for power expansion without `powf`.
-    /// `x^n` for integer n in 2..=max_int_pow is replaced by repeated fmul.
+    /// `x^n` for integer n in `2..=max_int_pow` is replaced by repeated fmul.
     pub max_int_pow: u32,
     /// Expand `x^0.5` to a Cranelift `sqrt` instruction.
     pub expand_sqrt: bool,
@@ -500,7 +500,7 @@ impl JitCompiler {
     /// The returned function operates on column-major data: each variable
     /// has its own contiguous column of `f64` values. See [`CompiledBatchFn`].
     ///
-    /// The vec_body block processes 2 rows per iteration using genuine F64X2
+    /// The `vec_body` block processes 2 rows per iteration using genuine F64X2
     /// SIMD (one load/store of 16 bytes per variable column), with a scalar
     /// tail for any odd final row.
     ///
@@ -529,10 +529,10 @@ impl JitCompiler {
             let mut seen: HashSet<u32> = HashSet::new();
             let mut ordered: Vec<u32> = Vec::new();
             for node in &ast.nodes {
-                if let SymbolKind::Variable(sid) = node.kind {
-                    if seen.insert(sid.0) {
-                        ordered.push(sid.0);
-                    }
+                if let SymbolKind::Variable(sid) = node.kind
+                    && seen.insert(sid.0)
+                {
+                    ordered.push(sid.0);
                 }
             }
             ordered
@@ -851,17 +851,13 @@ fn compile_ast_iterative(
         // CSE check at first visit (cursor == 0): if this node's dag_id
         // has already been computed, reuse the cached Value.
         if opts.enable_cse && top.cursor == 0 && !duplicate_dag_ids.is_empty() {
-            let dag_id = ast
-                .nodes
-                .get(top.idx)
-                .map(|n| n.dag_id.0)
-                .unwrap_or(u32::MAX);
-            if duplicate_dag_ids.contains(&dag_id) {
-                if let Some(&cached) = cse_map.get(&dag_id) {
-                    stack.pop();
-                    values.push(cached);
-                    continue;
-                }
+            let dag_id = ast.nodes.get(top.idx).map_or(u32::MAX, |n| n.dag_id.0);
+            if duplicate_dag_ids.contains(&dag_id)
+                && let Some(&cached) = cse_map.get(&dag_id)
+            {
+                stack.pop();
+                values.push(cached);
+                continue;
             }
         }
 
@@ -912,14 +908,15 @@ fn compile_ast_iterative(
                     &mut mul_factors,
                 )?;
                 // Store result in CSE cache if this dag_id is a duplicate.
-                if opts.enable_cse && !duplicate_dag_ids.is_empty() {
-                    if let Some(node) = ast.nodes.get(idx) {
-                        let dag_id = node.dag_id.0;
-                        if duplicate_dag_ids.contains(&dag_id) {
-                            if let Some(&v) = values.last() {
-                                cse_map.insert(dag_id, v);
-                            }
-                        }
+                if opts.enable_cse
+                    && !duplicate_dag_ids.is_empty()
+                    && let Some(node) = ast.nodes.get(idx)
+                {
+                    let dag_id = node.dag_id.0;
+                    if duplicate_dag_ids.contains(&dag_id)
+                        && let Some(&v) = values.last()
+                    {
+                        cse_map.insert(dag_id, v);
                     }
                 }
             }
@@ -1164,8 +1161,8 @@ fn emit_operator(
                 let rhs_nonzero = child_analyses
                     .get(1)
                     .and_then(|a| *a)
-                    .map_or(false, |a| a.is_nonzero());
-                let rhs_const_nonzero = constants[1].map_or(false, |c| c != 0.0 && !c.is_nan());
+                    .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
+                let rhs_const_nonzero = constants[1].is_some_and(|c| c != 0.0 && !c.is_nan());
                 if rhs_nonzero || rhs_const_nonzero {
                     return Ok(builder.ins().f64const(0.0));
                 }
@@ -1177,7 +1174,7 @@ fn emit_operator(
                 let lhs_nonzero = child_analyses
                     .first()
                     .and_then(|a| *a)
-                    .map_or(false, |a| a.is_nonzero());
+                    .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
                 if lhs_nonzero {
                     return Ok(builder.ins().f64const(1.0));
                 }
@@ -1196,22 +1193,21 @@ fn emit_operator(
             }
 
             // Reciprocal math: x / C → x * (1/C) for constant non-zero C.
-            if opts.allow_reciprocal_math {
-                if let Some(c) = constants[1] {
-                    if c != 0.0 {
-                        let recip = builder.ins().f64const(1.0 / c);
-                        return Ok(builder.ins().fmul(lhs, recip));
-                    }
-                }
+            if opts.allow_reciprocal_math
+                && let Some(c) = constants[1]
+                && c != 0.0
+            {
+                let recip = builder.ins().f64const(1.0 / c);
+                return Ok(builder.ins().fmul(lhs, recip));
             }
 
             // NaN guard elision: check whether the DENOMINATOR (child[1]) is
             // provably non-zero. Use child_analyses[1] directly.
-            let rhs_is_const_nonzero = constants[1].map_or(false, |c| c != 0.0 && !c.is_nan());
+            let rhs_is_const_nonzero = constants[1].is_some_and(|c| c != 0.0 && !c.is_nan());
             let rhs_nonzero = child_analyses
                 .get(1)
                 .and_then(|a| *a)
-                .map_or(false, |a| a.is_nonzero());
+                .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
             let skip_guard = opts.elide_nan_guard && (rhs_nonzero || rhs_is_const_nonzero);
 
             if skip_guard {
@@ -1252,8 +1248,8 @@ fn emit_operator(
                 let exp_positive = child_analyses
                     .get(1)
                     .and_then(|a| *a)
-                    .map_or(false, |a| a.is_positive);
-                let exp_const_positive = constants[1].map_or(false, |e| e > 0.0 && !e.is_nan());
+                    .is_some_and(|a| a.is_positive);
+                let exp_const_positive = constants[1].is_some_and(|e| e > 0.0 && !e.is_nan());
                 if exp_positive || exp_const_positive {
                     return Ok(builder.ins().f64const(0.0));
                 }
@@ -1287,9 +1283,9 @@ fn emit_operator(
                     let one = builder.ins().f64const(1.0);
                     // Guard: if x^n == 0, return NaN (base was zero).
                     let base_nonzero = child_analyses
-                        .get(0)
+                        .first()
                         .and_then(|a| *a)
-                        .map_or(false, |a| a.is_nonzero());
+                        .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
                     if opts.elide_nan_guard && base_nonzero {
                         Ok(builder.ins().fdiv(one, x_n))
                     } else {
@@ -1310,7 +1306,7 @@ fn emit_operator(
                             return Ok(passes::emit_sqrt(builder, child_vals[0]));
                         }
                         let n = exp as u32;
-                        if exp == n as f64 && n >= 2 && n <= opts.max_int_pow {
+                        if exp == f64::from(n) && n >= 2 && n <= opts.max_int_pow {
                             return Ok(passes::emit_int_pow(builder, child_vals[0], n));
                         }
                     }
@@ -1335,11 +1331,11 @@ fn emit_operator(
             // Cranelift has no native frem for f64; call jit_fmod helper.
             // Guard runtime zero-denominator with select(rhs==0, NaN, fmod(lhs,rhs)).
             // Check if denominator is provably nonzero to elide the guard.
-            let rhs_is_const_nonzero = constants[1].map_or(false, |c| c != 0.0 && !c.is_nan());
+            let rhs_is_const_nonzero = constants[1].is_some_and(|c| c != 0.0 && !c.is_nan());
             let rhs_nonzero = child_analyses
                 .get(1)
                 .and_then(|a| *a)
-                .map_or(false, |a| a.is_nonzero());
+                .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
             if opts.elide_nan_guard && (rhs_nonzero || rhs_is_const_nonzero) {
                 let call = builder.ins().call(fmod_func_ref, &[lhs, rhs]);
                 Ok(builder.inst_results(call)[0])
@@ -1562,7 +1558,7 @@ fn emit_operator_simd_f64x2(
             let rhs_nonzero = child_analyses
                 .get(1)
                 .and_then(|a| *a)
-                .map_or(false, |a| a.is_nonzero());
+                .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
             if opts.elide_nan_guard && rhs_nonzero {
                 Ok(builder.ins().fdiv(lhs, rhs))
             } else {
@@ -1604,9 +1600,9 @@ fn emit_operator_simd_f64x2(
                     };
                     let one_vec = f64x2_const(builder, 1.0);
                     let base_nonzero = child_analyses
-                        .get(0)
+                        .first()
                         .and_then(|a| *a)
-                        .map_or(false, |a| a.is_nonzero());
+                        .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
                     if opts.elide_nan_guard && base_nonzero {
                         Ok(builder.ins().fdiv(one_vec, x_n))
                     } else {
@@ -1693,7 +1689,7 @@ fn is_vectorizable_ast(
 }
 
 /// Iterative scalar emitter that substitutes variables from a pre-built map
-/// (`var_vals`: sym_id.0 → SSA Value) instead of loading from a pointer.
+/// (`var_vals`: `sym_id.0` → SSA Value) instead of loading from a pointer.
 ///
 /// Used by `compile_batch_f64x2` to emit two independent expression trees
 /// for the two loop rows.

@@ -399,7 +399,7 @@ static GLOBAL_KERNEL: OnceLock<Box<dyn SimdKernel>> = OnceLock::new();
 /// implementation; all subsequent calls return the cached pointer with a
 /// single Acquire load.
 ///
-/// Priority: AVX2 (x86_64) > NEON (aarch64) > scalar.
+/// Priority: AVX2 (`x86_64`) > NEON (aarch64) > scalar.
 pub fn global_kernel() -> &'static dyn SimdKernel {
     GLOBAL_KERNEL.get_or_init(select_best_kernel).as_ref()
 }

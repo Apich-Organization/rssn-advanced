@@ -14,9 +14,9 @@ use crate::dag::symbol::{OpKind, SymbolKind};
 /// provably true; if it says "false" or "None", we simply do not know.
 #[derive(Debug, Clone)]
 pub struct NodeAnalysis {
-    /// Proven lower bound (value is always ≥ lower_bound if Some).
+    /// Proven lower bound (value is always ≥ `lower_bound` if Some).
     pub lower_bound: Option<f64>,
-    /// Proven upper bound (value is always ≤ upper_bound if Some).
+    /// Proven upper bound (value is always ≤ `upper_bound` if Some).
     pub upper_bound: Option<f64>,
     /// True if the value is provably ≥ 0.0.
     pub is_nonnegative: bool,
@@ -29,17 +29,17 @@ pub struct NodeAnalysis {
 }
 
 impl NodeAnalysis {
-    /// True if provably non-zero (either positive, or lower_bound > 0, or upper_bound < 0).
+    /// True if provably non-zero (either positive, or `lower_bound` > 0, or `upper_bound` < 0).
     #[inline]
     #[must_use]
     pub fn is_nonzero(&self) -> bool {
         self.is_positive
-            || self.lower_bound.map_or(false, |lb| lb > 0.0)
-            || self.upper_bound.map_or(false, |ub| ub < 0.0)
+            || self.lower_bound.is_some_and(|lb| lb > 0.0)
+            || self.upper_bound.is_some_and(|ub| ub < 0.0)
     }
 
     /// Neutral default: nothing is known.
-    fn unknown() -> Self {
+    const fn unknown() -> Self {
         Self {
             lower_bound: None,
             upper_bound: None,
@@ -109,8 +109,8 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                 // Flip bounds: -(x) has lb = -x.ub, ub = -x.lb
                 let new_lower = x.upper_bound.map(|u| -u);
                 let new_upper = x.lower_bound.map(|l| -l);
-                let is_nonneg = x.upper_bound.map_or(false, |u| u <= 0.0);
-                let is_pos = x.upper_bound.map_or(false, |u| u < 0.0);
+                let is_nonneg = x.upper_bound.is_some_and(|u| u <= 0.0);
+                let is_pos = x.upper_bound.is_some_and(|u| u < 0.0);
                 NodeAnalysis {
                     lower_bound: new_lower,
                     upper_bound: new_upper,
@@ -149,8 +149,8 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                 // a - b ≤ a_ub - b_lb  (tightest upper bound)
                 let upper = a.upper_bound.zip(b.lower_bound).map(|(au, bl)| au - bl);
                 // Derive sign info from bounds
-                let is_nonneg = lower.map_or(false, |l| l >= 0.0);
-                let is_pos = lower.map_or(false, |l| l > 0.0);
+                let is_nonneg = lower.is_some_and(|l| l >= 0.0);
+                let is_pos = lower.is_some_and(|l| l > 0.0);
                 NodeAnalysis {
                     lower_bound: lower,
                     upper_bound: upper,
@@ -193,14 +193,14 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
 
                 let is_nonneg = a.is_nonnegative && b.is_nonnegative;
                 // Sign flip: both negative → positive.
-                let is_nonneg_both_neg = a.upper_bound.map_or(false, |u| u < 0.0)
-                    && b.upper_bound.map_or(false, |u| u < 0.0);
+                let is_nonneg_both_neg = a.upper_bound.is_some_and(|u| u < 0.0)
+                    && b.upper_bound.is_some_and(|u| u < 0.0);
                 let is_nonneg_any =
-                    is_nonneg || is_nonneg_both_neg || lower.map_or(false, |l| l >= 0.0);
+                    is_nonneg || is_nonneg_both_neg || lower.is_some_and(|l| l >= 0.0);
                 let is_pos = a.is_positive && b.is_positive;
-                let is_pos_both_neg = a.upper_bound.map_or(false, |u| u < 0.0)
-                    && b.upper_bound.map_or(false, |u| u < 0.0);
-                let is_pos_any = is_pos || is_pos_both_neg || lower.map_or(false, |l| l > 0.0);
+                let is_pos_both_neg = a.upper_bound.is_some_and(|u| u < 0.0)
+                    && b.upper_bound.is_some_and(|u| u < 0.0);
+                let is_pos_any = is_pos || is_pos_both_neg || lower.is_some_and(|l| l > 0.0);
 
                 NodeAnalysis {
                     lower_bound: lower,
@@ -260,7 +260,7 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                         }
                     });
 
-                let pow_expansion = exp_val.map(classify_exponent).unwrap_or(PowExpansion::None);
+                let pow_expansion = exp_val.map_or(PowExpansion::None, classify_exponent);
 
                 // Compute sign/bound properties based on exponent
                 let (lower_bound, upper_bound, is_nonnegative, is_positive, no_nan) = match exp_val
@@ -268,9 +268,9 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                     Some(exp) => {
                         let n = exp as i32;
                         let is_even_int =
-                            n >= 2 && (n as f64 - exp).abs() < f64::EPSILON && n % 2 == 0;
+                            n >= 2 && (f64::from(n) - exp).abs() < f64::EPSILON && n % 2 == 0;
                         let is_odd_pos_int =
-                            n >= 1 && (n as f64 - exp).abs() < f64::EPSILON && n % 2 != 0;
+                            n >= 1 && (f64::from(n) - exp).abs() < f64::EPSILON && n % 2 != 0;
                         let is_sqrt = (exp - 0.5_f64).abs() < f64::EPSILON;
                         let is_neg_exp = exp < 0.0;
 
@@ -299,7 +299,7 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                         } else if is_neg_exp {
                             // x^(-n): nonzero if base nonzero; sign follows base if n is even
                             let neg_n = (-exp) as u32;
-                            let is_even_neg = neg_n % 2 == 0;
+                            let is_even_neg = neg_n.is_multiple_of(2);
                             let is_nonneg = if is_even_neg {
                                 true
                             } else {
@@ -389,7 +389,7 @@ pub fn classify_exponent(exp: f64) -> PowExpansion {
     if exp > 0.0 {
         let n = exp as u32;
         // Confirm exact integer (no fractional part within epsilon).
-        if n >= 2 && n <= 16 && (n as f64 - exp).abs() < f64::EPSILON {
+        if (2..=16).contains(&n) && (f64::from(n) - exp).abs() < f64::EPSILON {
             return PowExpansion::IntPow(n);
         }
     }
@@ -398,7 +398,7 @@ pub fn classify_exponent(exp: f64) -> PowExpansion {
     if exp < 0.0 {
         let n = (-exp) as u32;
         // Confirm exact negative integer.
-        if n >= 1 && n <= 8 && (-(n as f64) - exp).abs() < f64::EPSILON {
+        if (1..=8).contains(&n) && (-f64::from(n) - exp).abs() < f64::EPSILON {
             return PowExpansion::NegIntPow(n);
         }
     }

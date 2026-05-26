@@ -5,16 +5,16 @@
 //! `simd_review §2.2`) — *not* cryptographically secure but extremely
 //! fast and avalanche-friendly enough for hash-cons buckets.
 //!
-//! * x86_64 + AES-NI: `aesenc xmm` (single round, checked at runtime).
-//! * AArch64 + crypto ext: `aese v.16b` + `aesmc v.16b`. On Apple Silicon
+//! * `x86_64` + AES-NI: `aesenc xmm` (single round, checked at runtime).
+//! * `AArch64` + crypto ext: `aese v.16b` + `aesmc v.16b`. On Apple Silicon
 //!   (M1+, `target_vendor = "apple"`) AES is mandatory so the runtime check
-//!   is elided at compile time; other AArch64 hosts probe via
+//!   is elided at compile time; other `AArch64` hosts probe via
 //!   `is_aarch64_feature_detected!`.
 //! * riscv64 + Zkn: `aes64esm` scalar AES-round instructions. The RISC-V Zkn
-//!   extension provides `aes64esm rd, rs1, rs2` which performs SubBytes +
-//!   ShiftRows + MixColumns on the 128-bit state `{rs2, rs1}`, outputting
+//!   extension provides `aes64esm rd, rs1, rs2` which performs `SubBytes` +
+//!   `ShiftRows` + `MixColumns` on the 128-bit state `{rs2, rs1}`, outputting
 //!   one 64-bit half. Two calls (with rs1/rs2 swapped) give both halves.
-//!   AddRoundKey is performed with a subsequent XOR.
+//!   `AddRoundKey` is performed with a subsequent XOR.
 //! * fallback: scalar multiplicative xor-mix.
 
 #![allow(unsafe_code)]

@@ -15,7 +15,7 @@
 //!
 //! Feature detection is hoisted out of the per-chunk inner loop using a
 //! `OnceLock<bool>` — `is_x86_feature_detected!` touches an MMIO-mapped
-//! CPUID leaf on x86_64 and should not be called on every inner iteration.
+//! CPUID leaf on `x86_64` and should not be called on every inner iteration.
 
 use std::sync::OnceLock;
 
@@ -104,13 +104,13 @@ static HAS_NEON: OnceLock<bool> = OnceLock::new();
 /// return the cached result with a single Acquire load.
 #[inline]
 fn avx2_available() -> bool {
-    *HAS_AVX2.get_or_init(|| crate::simd::detect::has_avx2())
+    *HAS_AVX2.get_or_init(crate::simd::detect::has_avx2)
 }
 
 /// Returns `true` if NEON is available on the current host CPU.
 #[inline]
 fn neon_available() -> bool {
-    *HAS_NEON.get_or_init(|| crate::simd::detect::has_neon())
+    *HAS_NEON.get_or_init(crate::simd::detect::has_neon)
 }
 
 rssn_error! {

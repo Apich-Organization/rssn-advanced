@@ -62,7 +62,7 @@ pub(crate) fn global_jit_ctx() -> &'static Mutex<RssnJitContext> {
 impl RssnJitContext {
     /// Returns a mutable reference to the underlying `JitCompiler`.
     #[inline]
-    pub(crate) fn compiler_mut(&mut self) -> &mut crate::jit::compiler::JitCompiler {
+    pub(crate) const fn compiler_mut(&mut self) -> &mut crate::jit::compiler::JitCompiler {
         &mut self.compiler
     }
 }

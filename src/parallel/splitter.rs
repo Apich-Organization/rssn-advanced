@@ -18,7 +18,7 @@ pub fn collect_commutative_add_leaves(
     leaves: &mut Vec<DagNodeId>,
 ) {
     if let Some(node) = arena.get(node_id) {
-        if let SymbolKind::Operator(OpKind::Add) = node.kind {
+        if node.kind == SymbolKind::Operator(OpKind::Add) {
             // Check if all variables in this node's children are commutative
             let is_comm = node.children.iter().all(|child_id| {
                 if let Some(child_node) = arena.get(child_id) {
@@ -59,10 +59,10 @@ pub fn split_commutative_tree(
 
     let n = leaves.len();
     let num_chunks = num_chunks.clamp(1, n);
-    let chunk_size = (n + num_chunks - 1) / num_chunks;
+    let chunk_size = n.div_ceil(num_chunks);
 
     leaves
         .chunks(chunk_size)
-        .map(|chunk| chunk.to_vec())
+        .map(<[crate::dag::node::DagNodeId]>::to_vec)
         .collect()
 }

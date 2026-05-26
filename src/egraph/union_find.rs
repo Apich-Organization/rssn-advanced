@@ -97,13 +97,13 @@ impl UnionFind {
 
     /// Number of elements tracked (not number of distinct classes).
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.parent.len()
     }
 
     /// Returns `true` if no elements have been added yet.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.parent.is_empty()
     }
 }

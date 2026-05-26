@@ -225,7 +225,7 @@ impl<'b> EGraph<'b> {
     /// Merges the e-classes of `a` and `b`.
     ///
     /// Returns `true` if this was a new merge (classes were previously
-    /// distinct). The DagBuilder's dedup map ensures that if `a` and `b`
+    /// distinct). The `DagBuilder`'s dedup map ensures that if `a` and `b`
     /// are *structurally* identical, they already share an ID and this is
     /// a no-op.
     pub fn merge(&mut self, a: DagNodeId, b: DagNodeId) -> bool {
@@ -323,7 +323,7 @@ impl<'b> EGraph<'b> {
         let mut child_costs: HashMap<u32, f64> = HashMap::new();
 
         // Process in ID order (lower IDs tend to be children in our arena).
-        let mut sorted = reachable.clone();
+        let mut sorted = reachable;
         sorted.sort_unstable_by_key(|n| n.0);
 
         for node_id in sorted {
@@ -399,7 +399,7 @@ impl<'b> EGraph<'b> {
         };
 
         // Snapshot what we need to avoid borrow conflicts.
-        let kind = node.kind.clone();
+        let kind = node.kind;
         let children: Vec<DagNodeId> = node.children.as_slice().to_vec();
 
         // Resolve canonical children for rule matching.
@@ -480,7 +480,7 @@ impl<'b> EGraph<'b> {
 
         // x + 0 = x  (guarded by signed-zero policy)
         if cv
-            .get(0)
+            .first()
             .copied()
             .flatten()
             .is_some_and(|v| self.is_identity_zero(v))
@@ -500,7 +500,7 @@ impl<'b> EGraph<'b> {
         // (handled in sub rules when lhs==rhs)
 
         // Constant folding
-        if let (Some(a), Some(b)) = (cv.get(0).copied().flatten(), cv.get(1).copied().flatten()) {
+        if let (Some(a), Some(b)) = (cv.first().copied().flatten(), cv.get(1).copied().flatten()) {
             let folded = self.builder.constant(a + b);
             self.do_merge(id, folded);
         }
@@ -536,7 +536,7 @@ impl<'b> EGraph<'b> {
 
         // 0 - x = neg(x)
         if cv
-            .get(0)
+            .first()
             .copied()
             .flatten()
             .is_some_and(|v| self.is_identity_zero(v))
@@ -546,7 +546,7 @@ impl<'b> EGraph<'b> {
         }
 
         // Constant folding
-        if let (Some(a), Some(b)) = (cv.get(0).copied().flatten(), cv.get(1).copied().flatten()) {
+        if let (Some(a), Some(b)) = (cv.first().copied().flatten(), cv.get(1).copied().flatten()) {
             let folded = self.builder.constant(a - b);
             self.do_merge(id, folded);
         }
@@ -559,7 +559,7 @@ impl<'b> EGraph<'b> {
         let (lhs, rhs) = (ch[0], ch[1]);
 
         // x * 1 = x, 1 * x = x
-        if cv.get(0) == Some(&Some(1.0)) {
+        if cv.first() == Some(&Some(1.0)) {
             self.do_merge(id, rhs);
         }
         if cv.get(1) == Some(&Some(1.0)) {
@@ -571,30 +571,28 @@ impl<'b> EGraph<'b> {
         // (so neither can be runtime NaN). Also guard with is_identity_zero to avoid
         // the signed-zero pitfall: (-0.0) * 1.0 = -0.0, not 0.0, in strict mode.
         if cv
-            .get(0)
+            .first()
             .copied()
             .flatten()
             .is_some_and(|v| self.is_identity_zero(v))
+            && cv.get(1).copied().flatten().is_some_and(|v| !v.is_nan())
         {
-            if cv.get(1).copied().flatten().is_some_and(|v| !v.is_nan()) {
-                let zero = self.builder.constant(0.0);
-                self.do_merge(id, zero);
-            }
+            let zero = self.builder.constant(0.0);
+            self.do_merge(id, zero);
         }
         if cv
             .get(1)
             .copied()
             .flatten()
             .is_some_and(|v| self.is_identity_zero(v))
+            && cv.first().copied().flatten().is_some_and(|v| !v.is_nan())
         {
-            if cv.get(0).copied().flatten().is_some_and(|v| !v.is_nan()) {
-                let zero = self.builder.constant(0.0);
-                self.do_merge(id, zero);
-            }
+            let zero = self.builder.constant(0.0);
+            self.do_merge(id, zero);
         }
 
         // Constant folding
-        if let (Some(a), Some(b)) = (cv.get(0).copied().flatten(), cv.get(1).copied().flatten()) {
+        if let (Some(a), Some(b)) = (cv.first().copied().flatten(), cv.get(1).copied().flatten()) {
             let folded = self.builder.constant(a * b);
             self.do_merge(id, folded);
         }
@@ -626,40 +624,41 @@ impl<'b> EGraph<'b> {
 
         // 0 / x = 0 (only when rhs is a nonzero constant — avoids 0/0=NaN)
         if cv
-            .get(0)
+            .first()
             .copied()
             .flatten()
             .is_some_and(|v| self.is_identity_zero(v))
+            && let Some(Some(r)) = cv.get(1)
+            && *r != 0.0
+            && !r.is_nan()
         {
-            if let Some(Some(r)) = cv.get(1) {
-                if *r != 0.0 && !r.is_nan() {
-                    let zero = self.builder.constant(0.0);
-                    self.do_merge(id, zero);
-                }
-            }
+            let zero = self.builder.constant(0.0);
+            self.do_merge(id, zero);
         }
 
         // x / x = 1 (only when rhs is a nonzero constant — avoids div-by-zero)
-        if lhs == rhs || self.uf.same(lhs.0, rhs.0) {
-            if let Some(Some(r)) = cv.get(1) {
-                if *r != 0.0 && !r.is_nan() {
-                    let one = self.builder.constant(1.0);
-                    self.do_merge(id, one);
-                }
-            }
+        if (lhs == rhs || self.uf.same(lhs.0, rhs.0))
+            && let Some(Some(r)) = cv.get(1)
+            && *r != 0.0
+            && !r.is_nan()
+        {
+            let one = self.builder.constant(1.0);
+            self.do_merge(id, one);
         }
 
         // x / c = x * (1/c) for constant c ≠ 0
-        if let Some(Some(c)) = cv.get(1) {
-            if *c != 0.0 && !c.is_nan() && !c.is_infinite() {
-                let recip = self.builder.constant(1.0 / c);
-                let alt = self.builder.mul(lhs, recip);
-                self.do_merge(id, alt);
-            }
+        if let Some(Some(c)) = cv.get(1)
+            && *c != 0.0
+            && !c.is_nan()
+            && !c.is_infinite()
+        {
+            let recip = self.builder.constant(1.0 / c);
+            let alt = self.builder.mul(lhs, recip);
+            self.do_merge(id, alt);
         }
 
         // Constant folding
-        if let (Some(a), Some(b)) = (cv.get(0).copied().flatten(), cv.get(1).copied().flatten()) {
+        if let (Some(a), Some(b)) = (cv.first().copied().flatten(), cv.get(1).copied().flatten()) {
             let folded = self.builder.constant(a / b);
             self.do_merge(id, folded);
         }
@@ -683,24 +682,22 @@ impl<'b> EGraph<'b> {
         }
 
         // 1^x = 1
-        if cv.get(0) == Some(&Some(1.0)) {
+        if cv.first() == Some(&Some(1.0)) {
             let one = self.builder.constant(1.0);
             self.do_merge(id, one);
         }
 
         // 0^x = 0 when x > 0 constant (IEEE: 0^0 is handled by the x^0=1 rule above)
         if cv
-            .get(0)
+            .first()
             .copied()
             .flatten()
             .is_some_and(|v| self.is_identity_zero(v))
+            && let Some(Some(e)) = cv.get(1)
+            && *e > 0.0
         {
-            if let Some(Some(e)) = cv.get(1) {
-                if *e > 0.0 {
-                    let zero = self.builder.constant(0.0);
-                    self.do_merge(id, zero);
-                }
-            }
+            let zero = self.builder.constant(0.0);
+            self.do_merge(id, zero);
         }
 
         // x^2 = x*x — provide the cheaper mul-chain equivalent
@@ -716,7 +713,7 @@ impl<'b> EGraph<'b> {
 
         // Constant folding for small exact cases.
         if let (Some(b_val), Some(e_val)) =
-            (cv.get(0).copied().flatten(), cv.get(1).copied().flatten())
+            (cv.first().copied().flatten(), cv.get(1).copied().flatten())
         {
             // Only fold when the result is finite and representable.
             let result = b_val.powf(e_val);
@@ -753,10 +750,8 @@ impl<'b> EGraph<'b> {
         };
 
         // --x = x
-        if is_neg {
-            if let Some(di) = double_inner {
-                self.do_merge(id, di);
-            }
+        if is_neg && let Some(di) = double_inner {
+            self.do_merge(id, di);
         }
 
         // neg(c) = -c for constants

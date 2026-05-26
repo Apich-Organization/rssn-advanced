@@ -87,7 +87,7 @@ impl FnId {
     ///
     /// Returns `None` for user-defined function IDs (≥ 7).
     #[must_use]
-    pub fn to_op(self) -> Option<OpKind> {
+    pub const fn to_op(self) -> Option<OpKind> {
         match self.0 {
             0 => Some(OpKind::Add),
             1 => Some(OpKind::Sub),
@@ -191,7 +191,7 @@ pub struct SymbolRegistry {
     /// O(1) lookup from name to existing `SymbolId`.
     /// `Arc<str>: Borrow<str>` so `HashMap::get(name: &str)` works without
     /// allocating a temporary key. rapidhash `GlobalState` is used as the
-    /// hasher since string keys benefit from its throughput over SipHash.
+    /// hasher since string keys benefit from its throughput over `SipHash`.
     lookup: std::collections::HashMap<Arc<str>, SymbolId, rapidhash::fast::GlobalState>,
 }
 
@@ -227,7 +227,9 @@ impl SymbolRegistry {
     /// Returns `None` if the ID is out of range.
     #[must_use]
     pub fn name(&self, id: SymbolId) -> Option<&str> {
-        self.names.get(id.0 as usize).map(|s| s.as_ref())
+        self.names
+            .get(id.0 as usize)
+            .map(std::convert::AsRef::as_ref)
     }
 
     /// Looks up an existing `SymbolId` for `name` without interning.

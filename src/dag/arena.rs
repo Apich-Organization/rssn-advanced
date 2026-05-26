@@ -18,7 +18,7 @@ pub struct DagArena {
 impl DagArena {
     /// Creates a new, empty arena.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { nodes: Vec::new() }
     }
 
@@ -53,13 +53,13 @@ impl DagArena {
 
     /// Returns the total number of nodes allocated in this arena.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.nodes.len()
     }
 
     /// Returns `true` if no nodes have been allocated in this arena.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 

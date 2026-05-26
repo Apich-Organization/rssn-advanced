@@ -221,12 +221,12 @@ static POOL_HEAD: AtomicU64 = AtomicU64::new(0);
 fn pack(ptr: *mut PoolNode, tag: u16) -> u64 {
     let bits = ptr as u64;
     debug_assert_eq!(bits >> 48, 0, "pool ptr exceeds 48 bits — LA57 unsupported");
-    bits | ((tag as u64) << 48)
+    bits | (u64::from(tag) << 48)
 }
 
 /// Unpacks a `u64` CAS word into a `(pointer, generation)` pair.
 #[inline(always)]
-fn unpack(val: u64) -> (*mut PoolNode, u16) {
+const fn unpack(val: u64) -> (*mut PoolNode, u16) {
     let ptr = (val & 0x0000_FFFF_FFFF_FFFF) as *mut PoolNode;
     let tag = (val >> 48) as u16;
     (ptr, tag)
@@ -385,7 +385,7 @@ impl TaskHandle {
     ///
     /// Used by the async FFI bridge to stash the handle in a C-visible struct.
     #[must_use]
-    pub fn raw_id(self) -> u64 {
+    pub const fn raw_id(self) -> u64 {
         self.0.0
     }
 
@@ -393,7 +393,7 @@ impl TaskHandle {
     /// [`Self::raw_id`].  The caller must ensure the id is still valid (i.e.,
     /// the fiber has not been joined yet).
     #[must_use]
-    pub fn from_raw(id: u64) -> Self {
+    pub const fn from_raw(id: u64) -> Self {
         Self(dtact_handle_t(id))
     }
 }

@@ -1,7 +1,7 @@
 //! `div_f64x4` — packed `f64x4` division.
 //!
-//! * x86_64 + AVX2: single `vdivpd ymm` (256-bit, 4 lanes at once).
-//! * AArch64: two `fdiv v.2d` NEON ops (128-bit each; NEON is mandatory).
+//! * `x86_64` + AVX2: single `vdivpd ymm` (256-bit, 4 lanes at once).
+//! * `AArch64`: two `fdiv v.2d` NEON ops (128-bit each; NEON is mandatory).
 //! * riscv64 + RVV: `vfdiv.vv` with `vsetvli` for 4×f64.
 //! * fallback: scalar loop.
 

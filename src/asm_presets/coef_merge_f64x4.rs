@@ -4,8 +4,8 @@
 //! `f64` inputs in a single pass — the kernel the JIT calls when fusing
 //! nested products `(c1*x)*(c2*y)` (`jit_review §1`, `plan.md §3.1`).
 //!
-//! * x86_64 + AVX2: three `vmulpd ymm` ops (256-bit each).
-//! * AArch64: three `fmul v.2d` NEON ops × 2 128-bit rounds (NEON mandatory).
+//! * `x86_64` + AVX2: three `vmulpd ymm` ops (256-bit each).
+//! * `AArch64`: three `fmul v.2d` NEON ops × 2 128-bit rounds (NEON mandatory).
 //! * riscv64 + RVV: three `vfmul.vv` ops with `vsetvli` for 4×f64.
 //! * fallback: scalar loop.
 

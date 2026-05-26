@@ -1,7 +1,7 @@
 //! `mul_f64x4` — packed `f64x4` multiplication.
 //!
-//! * x86_64 + AVX2: `vmulpd ymm` (256-bit, 4 lanes).
-//! * AArch64: two `fmul v.2d` NEON ops (NEON mandatory).
+//! * `x86_64` + AVX2: `vmulpd ymm` (256-bit, 4 lanes).
+//! * `AArch64`: two `fmul v.2d` NEON ops (NEON mandatory).
 //! * riscv64 + RVV: `vfmul.vv` with `vsetvli` for 4×f64.
 //! * fallback: scalar loop.
 

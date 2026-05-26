@@ -4,8 +4,8 @@
 //! merging hot paths; the scalar fallback uses `f64::mul_add` so the
 //! semantics match on both branches.
 //!
-//! * x86_64 + AVX2 + FMA: `vfmadd231pd ymm` (256-bit, single rounding).
-//! * AArch64: two `fmla v.2d` NEON ops (`Vd += Va * Vb`, NEON mandatory).
+//! * `x86_64` + AVX2 + FMA: `vfmadd231pd ymm` (256-bit, single rounding).
+//! * `AArch64`: two `fmla v.2d` NEON ops (`Vd += Va * Vb`, NEON mandatory).
 //! * riscv64 + RVV: `vfmacc.vv` (`vd += vs1 * vs2`).
 //! * fallback: `f64::mul_add` scalar loop.
 
