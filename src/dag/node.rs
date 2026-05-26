@@ -195,7 +195,7 @@ impl DagNode {
 
     /// Returns `true` if this is a leaf node (no children).
     #[must_use]
-    pub fn is_leaf(&self) -> bool {
+    pub const fn is_leaf(&self) -> bool {
         self.children.is_empty()
     }
 }

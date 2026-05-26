@@ -218,9 +218,13 @@
 // -------------------------------------------------------------------------
 #![allow(
     unsafe_code,
-    inline_always,
+    clippy::inline_always,
     clippy::restriction,
     clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::items_after_statements,
+    clippy::too_long_first_doc_paragraph,
+    clippy::non_send_fields_in_send_ty,
     unused_doc_comments,
     clippy::empty_line_after_outer_attr,
     clippy::empty_line_after_doc_comments

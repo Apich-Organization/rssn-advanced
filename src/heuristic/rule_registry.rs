@@ -176,7 +176,7 @@ impl RuleRegistry {
         self.rules.push(PrioritizedRule {
             func: Box::new(rule),
             priority,
-            kind_filter: kind_filter,
+            kind_filter,
             name,
         });
 

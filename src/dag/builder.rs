@@ -228,13 +228,13 @@ impl DagBuilder {
 
     /// Returns the number of nodes currently in the arena.
     #[must_use]
-    pub fn node_count(&self) -> usize {
+    pub const fn node_count(&self) -> usize {
         self.arena.len()
     }
 
     /// Returns `true` if the arena contains no nodes.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.arena.is_empty()
     }
 

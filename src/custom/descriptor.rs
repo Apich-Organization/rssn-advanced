@@ -207,7 +207,7 @@ impl CustomOpDescriptor {
 
     /// Returns the arity of the underlying evaluation function.
     #[must_use]
-    pub fn arity(&self) -> u8 {
+    pub const fn arity(&self) -> u8 {
         self.eval_fn.arity()
     }
 }
