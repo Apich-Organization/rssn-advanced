@@ -131,23 +131,27 @@ pub extern "C" fn rssn_dag_compile_with_ctx(
 // Non-JIT stubs
 // =========================================================================
 
+/// Opaque persistent JIT context. Dummy definition for non-JIT builds.
+#[cfg(not(feature = "cranelift-jit"))]
+pub struct RssnJitContext;
+
 /// Stub for non-JIT builds: always returns NULL.
 #[cfg(not(feature = "cranelift-jit"))]
 #[unsafe(no_mangle)]
-pub extern "C" fn rssn_jit_context_new() -> *mut c_void {
+pub extern "C" fn rssn_jit_context_new() -> *mut RssnJitContext {
     std::ptr::null_mut()
 }
 
 /// Stub for non-JIT builds: no-op.
 #[cfg(not(feature = "cranelift-jit"))]
 #[unsafe(no_mangle)]
-pub extern "C" fn rssn_jit_context_free(_ctx: *mut c_void) {}
+pub extern "C" fn rssn_jit_context_free(_ctx: *mut RssnJitContext) {}
 
 /// Stub for non-JIT builds: always returns `CompilationError`.
 #[cfg(not(feature = "cranelift-jit"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_compile_with_ctx(
-    _ctx: *mut c_void,
+    _ctx: *mut RssnJitContext,
     _builder: *mut DagBuilder,
     _root: u32,
     _out_fn: *mut *mut c_void,

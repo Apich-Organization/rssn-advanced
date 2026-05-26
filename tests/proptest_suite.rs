@@ -401,10 +401,13 @@ mod jit_props {
         /// as scalar JIT for all vectorizable expressions.
         #[test]
         fn jit_batch_matches_scalar(
-            xs in prop::collection::vec(-10.0f64..10.0, 4..=8),
-            ys in prop::collection::vec(-10.0f64..10.0, 4..=8),
+            (xs, ys) in (4usize..=8).prop_flat_map(|n| {
+                (
+                    prop::collection::vec(-10.0f64..10.0, n),
+                    prop::collection::vec(-10.0f64..10.0, n),
+                )
+            })
         ) {
-            prop_assume!(xs.len() == ys.len());
             let n = xs.len();
 
             let mut b = DagBuilder::new();

@@ -642,7 +642,7 @@ pub extern "C" fn rssn_dag_compile_v2(
 pub extern "C" fn rssn_dag_compile_v2(
     _builder: *mut DagBuilder,
     _root: u32,
-    _out_fn: *mut *mut *mut c_void,
+    _out_fn: *mut *mut c_void,
 ) -> RssnStatus {
     RssnStatus::CompilationError
 }
@@ -1189,7 +1189,7 @@ pub type RssnCustomFn3 = extern "C" fn(f64, f64, f64) -> f64;
 pub extern "C" fn rssn_jit_register_fn_1(
     ctx: *mut super::jit_context::RssnJitContext,
     fn_id: u32,
-    func: Option<RssnCustomFn1>,
+    func: Option<extern "C" fn(f64) -> f64>,
 ) -> RssnStatus {
     if ctx.is_null() {
         return RssnStatus::NullPointer;
@@ -1211,7 +1211,7 @@ pub extern "C" fn rssn_jit_register_fn_1(
 #[cfg(not(feature = "cranelift-jit"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_jit_register_fn_1(
-    _ctx: *mut c_void,
+    _ctx: *mut super::jit_context::RssnJitContext,
     _fn_id: u32,
     _func: Option<extern "C" fn(f64) -> f64>,
 ) -> RssnStatus {
@@ -1228,7 +1228,7 @@ pub extern "C" fn rssn_jit_register_fn_1(
 pub extern "C" fn rssn_jit_register_fn_2(
     ctx: *mut super::jit_context::RssnJitContext,
     fn_id: u32,
-    func: Option<RssnCustomFn2>,
+    func: Option<extern "C" fn(f64, f64) -> f64>,
 ) -> RssnStatus {
     if ctx.is_null() {
         return RssnStatus::NullPointer;
@@ -1250,7 +1250,7 @@ pub extern "C" fn rssn_jit_register_fn_2(
 #[cfg(not(feature = "cranelift-jit"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_jit_register_fn_2(
-    _ctx: *mut c_void,
+    _ctx: *mut super::jit_context::RssnJitContext,
     _fn_id: u32,
     _func: Option<extern "C" fn(f64, f64) -> f64>,
 ) -> RssnStatus {
@@ -1267,7 +1267,7 @@ pub extern "C" fn rssn_jit_register_fn_2(
 pub extern "C" fn rssn_jit_register_fn_3(
     ctx: *mut super::jit_context::RssnJitContext,
     fn_id: u32,
-    func: Option<RssnCustomFn3>,
+    func: Option<extern "C" fn(f64, f64, f64) -> f64>,
 ) -> RssnStatus {
     if ctx.is_null() {
         return RssnStatus::NullPointer;
@@ -1289,7 +1289,7 @@ pub extern "C" fn rssn_jit_register_fn_3(
 #[cfg(not(feature = "cranelift-jit"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_jit_register_fn_3(
-    _ctx: *mut c_void,
+    _ctx: *mut super::jit_context::RssnJitContext,
     _fn_id: u32,
     _func: Option<extern "C" fn(f64, f64, f64) -> f64>,
 ) -> RssnStatus {
@@ -1319,6 +1319,11 @@ pub struct RssnOptConfig {
     /// Non-zero to reuse SSA values for repeated DAG sub-expressions (default: 1).
     pub enable_cse: u32,
 }
+
+/// Dummy C-compatible JIT optimisation configuration for non-JIT builds.
+#[cfg(not(feature = "cranelift-jit"))]
+#[repr(C)]
+pub struct RssnOptConfig;
 
 /// Compiles a DAG expression with explicit optimisation knobs.
 ///
@@ -1380,10 +1385,10 @@ pub extern "C" fn rssn_dag_compile_with_opts(
 #[cfg(not(feature = "cranelift-jit"))]
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_dag_compile_with_opts(
-    _ctx: *mut c_void,
+    _ctx: *mut super::jit_context::RssnJitContext,
     _builder: *mut DagBuilder,
     _root: u32,
-    _opts: *const c_void,
+    _opts: *const RssnOptConfig,
     _out_fn: *mut *mut c_void,
 ) -> RssnStatus {
     RssnStatus::CompilationError
@@ -1928,7 +1933,7 @@ pub type RssnEGraphRuleCallback = unsafe extern "C" fn(
 /// uint32_t best = rssn_dag_egraph_saturate_extract(
 ///     builder, expr_id,
 ///     (RssnEGraphConfig){ .max_rounds = 4, .max_merges = 256, .max_new_nodes = 512 },
-///     NULL, 0,   /* no user rules */
+///     NULL, 0,   // no user rules
 ///     NULL
 /// );
 /// ```
@@ -2640,9 +2645,7 @@ mod batch_build_tests {
 //
 //   rssn_custom_op_registry_free(reg);
 
-use crate::custom::descriptor::{
-    CustomOpDescriptor, CustomOpRegistry, EvalFn, EvalFn1, EvalFn2, EvalFn3,
-};
+use crate::custom::descriptor::{CustomOpDescriptor, CustomOpRegistry, EvalFn};
 use std::sync::Arc;
 
 /// Opaque handle to a [`CustomOpRegistry`].
@@ -2716,7 +2719,7 @@ pub extern "C" fn rssn_custom_op_register_fn1(
     reg: *mut RssnCustomOpRegistry,
     fn_id: u32,
     name: *const c_char,
-    eval_fn: Option<EvalFn1>,
+    eval_fn: Option<extern "C" fn(f64) -> f64>,
     vectorizable: u8,
 ) -> RssnStatus {
     if reg.is_null() || name.is_null() {
@@ -2762,7 +2765,7 @@ pub extern "C" fn rssn_custom_op_register_fn2(
     reg: *mut RssnCustomOpRegistry,
     fn_id: u32,
     name: *const c_char,
-    eval_fn: Option<EvalFn2>,
+    eval_fn: Option<extern "C" fn(f64, f64) -> f64>,
     vectorizable: u8,
 ) -> RssnStatus {
     if reg.is_null() || name.is_null() {
@@ -2808,7 +2811,7 @@ pub extern "C" fn rssn_custom_op_register_fn3(
     reg: *mut RssnCustomOpRegistry,
     fn_id: u32,
     name: *const c_char,
-    eval_fn: Option<EvalFn3>,
+    eval_fn: Option<extern "C" fn(f64, f64, f64) -> f64>,
     vectorizable: u8,
 ) -> RssnStatus {
     if reg.is_null() || name.is_null() {

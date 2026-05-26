@@ -1187,7 +1187,7 @@ dependencies = [
 
 [[package]]
 name = "rssn-advanced"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "arbitrary",
  "assert_approx_eq",

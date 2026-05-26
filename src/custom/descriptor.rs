@@ -6,18 +6,19 @@
 //!
 //! # Quick start
 //!
-//! ```rust,ignore
+//! ```rust
 //! use rssn_advanced::custom::descriptor::{CustomOpDescriptor, CustomOpRegistry, EvalFn};
-//! use rssn_advanced::dag::symbol::{FnId, SymbolKind, OpKind};
+//! use rssn_advanced::dag::builder::DagBuilder;
 //!
 //! extern "C" fn my_relu(x: f64) -> f64 { x.max(0.0) }
 //!
-//! let desc = CustomOpDescriptor::builder(FnId(42), "relu", EvalFn::Arity1(my_relu))
+//! let mut builder = DagBuilder::new();
+//! // intern_function is the public API for obtaining a FnId from outside the crate
+//! let fn_id = builder.intern_function("relu");
+//!
+//! let desc = CustomOpDescriptor::builder(fn_id, "relu", EvalFn::Arity1(my_relu))
 //!     .vectorizable()      // pure → safe to duplicate in ILP batch path
-//!     .simplify_rule("relu(0) → 0", 10, |builder, kind, children| {
-//!         // fire when kind == Add and child is our function … (pattern match here)
-//!         None
-//!     })
+//!     .simplify_rule("relu(0) → 0", 10, |_b, _kind, _children| None)
 //!     .cost(1.5)
 //!     .build();
 //!
@@ -113,6 +114,16 @@ pub struct SimplifyRule {
     pub rule: SimplifyRuleArc,
 }
 
+impl Clone for SimplifyRule {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            priority: self.priority,
+            rule: Arc::clone(&self.rule),
+        }
+    }
+}
+
 /// An e-graph rewrite rule attached to a [`CustomOpDescriptor`].
 pub struct EGraphRule {
     /// When `true` the rule runs *after* built-in algebraic rules each
@@ -120,6 +131,15 @@ pub struct EGraphRule {
     pub after_builtins: bool,
     /// The rule closure.
     pub rule: EGraphRuleArc,
+}
+
+impl Clone for EGraphRule {
+    fn clone(&self) -> Self {
+        Self {
+            after_builtins: self.after_builtins,
+            rule: Arc::clone(&self.rule),
+        }
+    }
 }
 
 // ── CustomOpDescriptor ────────────────────────────────────────────────────
@@ -147,11 +167,32 @@ pub struct CustomOpDescriptor {
     pub cost: f64,
 }
 
+impl Clone for CustomOpDescriptor {
+    fn clone(&self) -> Self {
+        Self {
+            fn_id: self.fn_id,
+            name: self.name.clone(),
+            eval_fn: self.eval_fn,
+            vectorizable: self.vectorizable,
+            simplify_rules: self.simplify_rules.clone(),
+            egraph_rules: self.egraph_rules.clone(),
+            cost: self.cost,
+        }
+    }
+}
+
 impl CustomOpDescriptor {
     /// Start building a descriptor with fluent API.
     ///
-    /// ```rust,ignore
-    /// let desc = CustomOpDescriptor::builder(FnId(1), "sin", EvalFn::Arity1(libm_sin))
+    /// ```rust
+    /// use rssn_advanced::custom::descriptor::{CustomOpDescriptor, EvalFn};
+    /// use rssn_advanced::dag::builder::DagBuilder;
+    ///
+    /// extern "C" fn sin_approx(x: f64) -> f64 { x.sin() }
+    ///
+    /// let mut builder = DagBuilder::new();
+    /// let fn_id = builder.intern_function("sin");
+    /// let _desc = CustomOpDescriptor::builder(fn_id, "sin", EvalFn::Arity1(sin_approx))
     ///     .vectorizable()
     ///     .build();
     /// ```
@@ -301,18 +342,38 @@ impl std::error::Error for CustomOpError {}
 /// Create one registry per compilation unit (or share via `Arc`), register
 /// your operators, then feed it to each pipeline step:
 ///
-/// ```rust,ignore
+/// ```rust
+/// # // cfg guard: skip when cranelift-jit feature is absent
+/// # #[cfg(not(feature = "cranelift-jit"))] fn main() {}
+/// # #[cfg(feature = "cranelift-jit")] fn main() {
+/// use std::sync::Arc;
+/// use rssn_advanced::custom::descriptor::{CustomOpDescriptor, CustomOpRegistry, EvalFn};
+/// use rssn_advanced::dag::builder::DagBuilder;
+/// use rssn_advanced::egraph::egraph::{EGraph, EGraphConfig};
+/// use rssn_advanced::jit::compiler::JitCompiler;
+///
+/// extern "C" fn double_it(x: f64) -> f64 { x * 2.0 }
+///
+/// let mut builder = DagBuilder::new();
+/// let fn_id = builder.intern_function("double");
+/// let desc = CustomOpDescriptor::builder(fn_id, "double", EvalFn::Arity1(double_it)).build();
+///
 /// let mut registry = CustomOpRegistry::new();
-/// registry.register(desc)?;
+/// registry.register(desc).unwrap();
+/// let registry = Arc::new(registry);
 ///
 /// // JIT: register eval_fn pointers + enable batch vectorisation
-/// registry.apply_to_jit(&mut compiler);
+/// registry.apply_to_jit(&mut JitCompiler::try_new().unwrap());
 ///
 /// // Simplifier: generate a RuleRegistry from all simplify_rules
-/// let rule_reg = registry.build_rule_registry();
+/// let _rule_reg = registry.build_rule_registry();
 ///
 /// // E-graph: inject all egraph_rules into an EGraph instance
-/// registry.apply_to_egraph(&mut egraph);
+/// {
+///     let mut egraph = EGraph::new(&mut builder, EGraphConfig::default());
+///     registry.apply_to_egraph(&mut egraph);
+/// }
+/// # }
 /// ```
 pub struct CustomOpRegistry {
     /// Descriptors keyed by numeric `FnId`.

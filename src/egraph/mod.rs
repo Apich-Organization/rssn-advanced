@@ -30,7 +30,7 @@
 //! standalone optimizer for expressions that need algebraic equivalence
 //! reasoning (commutativity, constant folding, x^2=x*x, etc.).
 //!
-//! ```rust,ignore
+//! ```rust
 //! use rssn_advanced::dag::builder::DagBuilder;
 //! use rssn_advanced::egraph::{EGraph, EGraphConfig};
 //!

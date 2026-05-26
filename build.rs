@@ -30,8 +30,8 @@ fn generate_headers() -> Result<(), Box<dyn std::error::Error>> {
     // Generate C header using cbindgen.toml
     match cbindgen::generate(&crate_dir) {
         Ok(bindings) => {
-            bindings.write_to_file("dtact.h");
-            println!("cargo:warning=Generated dtact.h");
+            bindings.write_to_file("rssn-advanced.h");
+            println!("cargo:warning=Generated rssn-advanced.h");
         }
         Err(e) => {
             println!(
@@ -47,7 +47,7 @@ fn generate_headers() -> Result<(), Box<dyn std::error::Error>> {
     // Generate C++ header with custom config
     let cpp_config = cbindgen::Config {
         language: cbindgen::Language::Cxx,
-        namespace: Some("dtact".to_string()),
+        namespace: Some("rssn_advanced".to_string()),
         ..cbindgen::Config::from_file("cbindgen.toml").unwrap_or_default()
     };
 
@@ -57,9 +57,9 @@ fn generate_headers() -> Result<(), Box<dyn std::error::Error>> {
         .generate()
     {
         Ok(bindings) => {
-            bindings.write_to_file("dtact.hpp");
+            bindings.write_to_file("rssn-advanced.hpp");
 
-            println!("cargo:warning=Generated dtact.hpp");
+            println!("cargo:warning=Generated rssn-advanced.hpp");
         }
         Err(e) => {
             println!(

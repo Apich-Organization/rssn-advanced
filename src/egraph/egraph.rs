@@ -51,7 +51,12 @@ use crate::egraph::union_find::UnionFind;
 /// Rules are applied **before** the built-in algebraic rules each round.
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust
+/// # use rssn_advanced::dag::builder::DagBuilder;
+/// # use rssn_advanced::dag::symbol::{SymbolKind, OpKind};
+/// # use rssn_advanced::egraph::egraph::{EGraph, EGraphConfig};
+/// # let mut builder = DagBuilder::new();
+/// # let mut eg = EGraph::new(&mut builder, EGraphConfig::default());
 /// // Rule: x * x → x^2
 /// eg.add_rule(|builder, kind, children| {
 ///     if matches!(kind, SymbolKind::Operator(OpKind::Mul))
@@ -167,7 +172,12 @@ impl<'b> EGraph<'b> {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```rust
+    /// # use rssn_advanced::dag::builder::DagBuilder;
+    /// # use rssn_advanced::dag::symbol::{SymbolKind, OpKind};
+    /// # use rssn_advanced::egraph::egraph::{EGraph, EGraphConfig};
+    /// # let mut builder = DagBuilder::new();
+    /// # let mut eg = EGraph::new(&mut builder, EGraphConfig::default());
     /// // Teach the E-graph that x - y ≅ x + (-y).
     /// eg.add_rule(|builder, kind, children| {
     ///     if matches!(kind, SymbolKind::Operator(OpKind::Sub))
