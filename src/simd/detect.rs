@@ -35,7 +35,7 @@ pub fn has_sse42() -> bool {
 /// On aarch64, NEON is mandatory per ARMv8-A spec, so this always returns
 /// `true` on that target. On other architectures it returns `false`.
 #[must_use]
-pub const fn has_neon() -> bool {
+pub fn has_neon() -> bool {
     #[cfg(target_arch = "aarch64")]
     {
         std::arch::is_aarch64_feature_detected!("neon")
