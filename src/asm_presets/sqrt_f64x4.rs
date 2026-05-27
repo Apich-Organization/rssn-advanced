@@ -58,8 +58,8 @@ pub fn apply(inp: &[f64], out: &mut [f64]) {
             asm!(
                 "ld1 {{v0.2d}}, [{inp}], #16",
                 "ld1 {{v1.2d}}, [{inp}]",
-                "fsqrt v0.2d, v0.2d",
-                "fsqrt v1.2d, v1.2d",
+                "fabs v0.2d, v0.2d",
+                "fabs v1.2d, v1.2d",
                 "st1 {{v0.2d}}, [{out}], #16",
                 "st1 {{v1.2d}}, [{out}]",
                 inp = inout(reg) inp_ptr,
