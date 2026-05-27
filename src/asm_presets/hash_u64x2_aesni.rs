@@ -87,13 +87,15 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
         const RK_LO: u64 = 0xcbf2_9ce4_8422_2325;
         const RK_HI: u64 = 0x1000_0000_01b3_0000;
 
-        let state = [lhs, rhs];
-        let rkey = [RK_LO, RK_HI];
-        let out: [u64; 2];
+        unsafe {
+            use core::arch::aarch64::{uint64x2_t, vcombine_u64, vcreate_u64};
+            use core::arch::asm;
 
-        if has_aes {
-            unsafe {
-                use core::arch::asm;
+            let state: uint64x2_t = vcombine_u64(vcreate_u64(lhs), vcreate_u64(rhs));
+            let rkey: uint64x2_t = vcombine_u64(vcreate_u64(RK_LO), vcreate_u64(RK_HI));
+            let out: uint64x2_t;
+
+            if has_aes {
                 asm!(
                     "aese {v_state}.16b, {v_rkey}.16b",
                     "aesmc {v_state}.16b, {v_state}.16b",
@@ -101,11 +103,7 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
                     v_rkey = in(vreg) rkey,
                     options(nostack, pure, nomem, preserves_flags),
                 );
-            }
-            return (out[0], out[1]);
-        } else {
-            unsafe {
-                use core::arch::asm;
+            } else {
                 asm!(
                     "eor {v_state}.16b, {v_state}.16b, {v_rkey}.16b",
                     "rev64 {v_tmp}.16b, {v_state}.16b",
@@ -117,7 +115,10 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
                     options(nostack, pure, nomem, preserves_flags),
                 );
             }
-            return (out[0], out[1]);
+
+            // Unpack lanes back into standard scalar return values safely
+            let res = core::mem::transmute::<uint64x2_t, [u64; 2]>(out);
+            return (res[0], res[1]);
         }
     }
 
