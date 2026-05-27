@@ -62,7 +62,7 @@ pub fn apply(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
                 "ld1 {{v0.2d}}, [{lhs}, #16]",
                 "ld1 {{v1.2d}}, [{rhs}, #16]",
                 "fdiv v0.2d, v0.2d, v1.2d",
-                "st1 {{v0.2d}}, [{out}, #16]",
+                "str {{v0.2d}}, [{out}, #16]",
                 lhs = in(reg) lhs.as_ptr(),
                 rhs = in(reg) rhs.as_ptr(),
                 out = in(reg) out.as_mut_ptr(),

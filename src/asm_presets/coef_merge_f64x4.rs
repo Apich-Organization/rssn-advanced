@@ -87,7 +87,7 @@ pub fn apply(c1: &[f64], c2: &[f64], x: &[f64], y: &[f64], out: &mut [f64]) {
                 "fmul v0.2d, v0.2d, v1.2d",
                 "fmul v2.2d, v2.2d, v3.2d",
                 "fmul v0.2d, v0.2d, v2.2d",
-                "st1 {{v0.2d}}, [{out}, #16]",
+                "str {{v0.2d}}, [{out}, #16]",
                 c1 = in(reg) c1.as_ptr(),
                 c2 = in(reg) c2.as_ptr(),
                 xs = in(reg) x.as_ptr(),
