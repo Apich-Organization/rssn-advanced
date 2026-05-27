@@ -75,25 +75,28 @@ pub fn apply(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) {
         let m3: u64;
         unsafe {
             use core::arch::asm;
+            let mut lhs_ptr = lhs.as_ptr();
+            let mut rhs_ptr = rhs.as_ptr();
+
             asm!(
-                "ld1 {{v0.2d}}, [{lhs}]",
-                "ld1 {{v1.2d}}, [{rhs}]",
+                "ld1 {{v0.2d}}, [{lhs}], #16",
+                "ld1 {{v1.2d}}, [{rhs}], #16",
+                "ld1 {{v2.2d}}, [{lhs}]",
+                "ld1 {{v3.2d}}, [{rhs}]",
                 "fcmeq v0.2d, v0.2d, v1.2d",
+                "fcmeq v2.2d, v2.2d, v3.2d",
                 "umov {m0}, v0.d[0]",
                 "umov {m1}, v0.d[1]",
-                "ld1 {{v0.2d}}, [{lhs}, #16]",
-                "ld1 {{v1.2d}}, [{rhs}, #16]",
-                "fcmeq v0.2d, v0.2d, v1.2d",
-                "umov {m2}, v0.d[0]",
-                "umov {m3}, v0.d[1]",
-                lhs = in(reg) lhs.as_ptr(),
-                rhs = in(reg) rhs.as_ptr(),
+                "umov {m2}, v2.d[0]",
+                "umov {m3}, v2.d[1]",
+                lhs = inout(reg) lhs_ptr,
+                rhs = inout(reg) rhs_ptr,
                 m0 = out(reg) m0,
                 m1 = out(reg) m1,
                 m2 = out(reg) m2,
                 m3 = out(reg) m3,
-                out("v0") _,
-                out("v1") _,
+                out("v0") _, out("v1") _,
+                out("v2") _, out("v3") _,
                 options(nostack, readonly),
             );
         }
