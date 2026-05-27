@@ -87,12 +87,11 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
         const RK_LO: u64 = 0xcbf2_9ce4_8422_2325;
         const RK_HI: u64 = 0x1000_0000_01b3_0000;
 
-        let state: u128 = (lhs as u128) | ((rhs as u128) << 64);
-        let rkey: u128 = (RK_LO as u128) | ((RK_HI as u128) << 64);
-        let out: u128;
+        let state = [lhs, rhs];
+        let rkey = [RK_LO, RK_HI];
+        let out: [u64; 2];
 
         if has_aes {
-            // SAFETY: AES extension guaranteed (Apple) or detected (other AArch64).
             unsafe {
                 use core::arch::asm;
                 asm!(
@@ -103,11 +102,8 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
                     options(nostack, pure, nomem, preserves_flags),
                 );
             }
-            return (out as u64, (out >> 64) as u64);
+            return (out[0], out[1]);
         } else {
-            // FALLBACK: Highly optimized NEON inline assembly.
-            // Bypasses the GPR pipeline entirely to process the 128-bit state
-            // inside vector execution units, maximizing IPC on older/low-end cores.
             unsafe {
                 use core::arch::asm;
                 asm!(
@@ -121,7 +117,7 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
                     options(nostack, pure, nomem, preserves_flags),
                 );
             }
-            return (out as u64, (out >> 64) as u64);
+            return (out[0], out[1]);
         }
     }
 
