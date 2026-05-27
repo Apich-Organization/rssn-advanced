@@ -97,18 +97,18 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
 
             if has_aes {
                 asm!(
-                    "aese {v_state}.16b, {v_rkey}.16b",
-                    "aesmc {v_state}.16b, {v_state}.16b",
+                    "aese {v_state:v}.16b, {v_rkey:v}.16b",
+                    "aesmc {v_state:v}.16b, {v_state:v}.16b",
                     v_state = inout(vreg) state => out,
                     v_rkey = in(vreg) rkey,
                     options(nostack, pure, nomem, preserves_flags),
                 );
             } else {
                 asm!(
-                    "eor {v_state}.16b, {v_state}.16b, {v_rkey}.16b",
-                    "rev64 {v_tmp}.16b, {v_state}.16b",
-                    "ext {v_state}.16b, {v_state}.16b, {v_state}.16b, #8",
-                    "eor {v_state}.16b, {v_state}.16b, {v_tmp}.16b",
+                    "eor {v_state:v}.16b, {v_state:v}.16b, {v_rkey:v}.16b",
+                    "rev64 {v_tmp:v}.16b, {v_state:v}.16b",
+                    "ext {v_state:v}.16b, {v_state:v}.16b, {v_state:v}.16b, #8",
+                    "eor {v_state:v}.16b, {v_state:v}.16b, {v_tmp:v}.16b",
                     v_state = inout(vreg) state => out,
                     v_rkey = in(vreg) rkey,
                     v_tmp = out(vreg) _,
@@ -116,7 +116,6 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
                 );
             }
 
-            // Unpack lanes back into standard scalar return values safely
             let res = core::mem::transmute::<uint64x2_t, [u64; 2]>(out);
             return (res[0], res[1]);
         }
