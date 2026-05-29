@@ -87,9 +87,9 @@ pub fn apply(lhs: &[f64; 2], rhs: &[f64; 2], out: &mut [f64; 2]) {
 #[target_feature(enable = "neon")]
 pub unsafe fn apply_neon(lhs: &[f64; 2], rhs: &[f64; 2], out: &mut [f64; 2]) {
     use std::arch::aarch64::*;
-    let a = vld1q_f64(lhs.as_ptr());
-    let b = vld1q_f64(rhs.as_ptr());
-    vst1q_f64(out.as_mut_ptr(), vsubq_f64(a, b));
+    let a = unsafe { vld1q_f64(lhs.as_ptr()) };
+    let b = unsafe { vld1q_f64(rhs.as_ptr()) };
+    unsafe { vst1q_f64(out.as_mut_ptr(), vsubq_f64(a, b)) };
 }
 
 #[cfg(test)]
