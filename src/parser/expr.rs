@@ -349,7 +349,7 @@ fn parse_atom_with_table<'a>(
     {
         let trimmed = input.trim_start();
         let mut candidates: Vec<(&str, &SymbolKind)> = table.unary_ops().collect();
-        candidates.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
         for (prefix, kind) in candidates {
             if let Some(after) = trimmed.strip_prefix(prefix) {
                 // For single-char prefixes accept any position; for

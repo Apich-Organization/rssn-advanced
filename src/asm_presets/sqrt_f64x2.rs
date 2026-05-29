@@ -40,8 +40,8 @@ pub fn apply(inp: &[f64; 2], out: &mut [f64; 2]) {
                 "ld1 {{v0.2d}}, [{inp}]",
                 "fsqrt v0.2d, v0.2d",
                 "st1 {{v0.2d}}, [{out}]",
-                inp = in(reg) inp.as_ptr(),
-                out = in(reg) out.as_mut_ptr(),
+                inp = inout(reg) inp.as_ptr() => _,
+                out = inout(reg) out.as_mut_ptr() => _,
                 out("v0") _,
                 options(nostack, preserves_flags),
             );
