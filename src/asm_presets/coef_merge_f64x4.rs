@@ -68,36 +68,39 @@ pub fn apply(c1: &[f64], c2: &[f64], x: &[f64], y: &[f64], out: &mut [f64]) {
     #[cfg(target_arch = "aarch64")]
     {
         // SAFETY: lengths checked above; NEON is mandatory on AArch64.
-        // Operands xs/ys alias the x/y parameters to avoid shadowing issues.
         unsafe {
             use core::arch::asm;
+            let mut c1_ptr = c1.as_ptr();
+            let mut c2_ptr = c2.as_ptr();
+            let mut xs_ptr = x.as_ptr();
+            let mut ys_ptr = y.as_ptr();
+            let mut out_ptr = out.as_mut_ptr();
+
             asm!(
-                "ld1 {{v0.2d}}, [{c1}]",
-                "ld1 {{v1.2d}}, [{c2}]",
-                "ld1 {{v2.2d}}, [{xs}]",
-                "ld1 {{v3.2d}}, [{ys}]",
+                "ld1 {{v0.2d}}, [{c1}], #16",
+                "ld1 {{v1.2d}}, [{c2}], #16",
+                "ld1 {{v2.2d}}, [{xs}], #16",
+                "ld1 {{v3.2d}}, [{ys}], #16",
+                "ld1 {{v4.2d}}, [{c1}]",
+                "ld1 {{v5.2d}}, [{c2}]",
+                "ld1 {{v6.2d}}, [{xs}]",
+                "ld1 {{v7.2d}}, [{ys}]",
                 "fmul v0.2d, v0.2d, v1.2d",
                 "fmul v2.2d, v2.2d, v3.2d",
+                "fmul v4.2d, v4.2d, v5.2d",
+                "fmul v6.2d, v6.2d, v7.2d",
                 "fmul v0.2d, v0.2d, v2.2d",
-                "st1 {{v0.2d}}, [{out}]",
-                "ld1 {{v0.2d}}, [{c1}, #16]",
-                "ld1 {{v1.2d}}, [{c2}, #16]",
-                "ld1 {{v2.2d}}, [{xs}, #16]",
-                "ld1 {{v3.2d}}, [{ys}, #16]",
-                "fmul v0.2d, v0.2d, v1.2d",
-                "fmul v2.2d, v2.2d, v3.2d",
-                "fmul v0.2d, v0.2d, v2.2d",
-                "st1 {{v0.2d}}, [{out}, #16]",
-                c1 = in(reg) c1.as_ptr(),
-                c2 = in(reg) c2.as_ptr(),
-                xs = in(reg) x.as_ptr(),
-                ys = in(reg) y.as_ptr(),
-                out = in(reg) out.as_mut_ptr(),
-                out("v0") _,
-                out("v1") _,
-                out("v2") _,
-                out("v3") _,
-                options(nostack),
+                "fmul v4.2d, v4.2d, v6.2d",
+                "st1 {{v0.2d}}, [{out}], #16",
+                "st1 {{v4.2d}}, [{out}]",
+                c1 = inout(reg) c1_ptr,
+                c2 = inout(reg) c2_ptr,
+                xs = inout(reg) xs_ptr,
+                ys = inout(reg) ys_ptr,
+                out = inout(reg) out_ptr,
+                out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+                out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+                options(nostack, preserves_flags),
             );
         }
         return;

@@ -84,39 +84,40 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
         #[cfg(not(target_vendor = "apple"))]
         let has_aes = std::arch::is_aarch64_feature_detected!("aes");
 
-        if has_aes {
-            // Same FNV-derived round key as the x86 path.
-            const RK_LO: u64 = 0xcbf2_9ce4_8422_2325;
-            const RK_HI: u64 = 0x1000_0000_01b3_0000;
-            let lo: u64;
-            let hi: u64;
-            // SAFETY: AES extension guaranteed (Apple) or detected (other AArch64).
-            // `fmov Dd, Xn` is a GP→NEON bitwise move (no float conversion).
-            // `ins Vd.D[i], Xn` inserts a GP register into a vector lane.
-            // `aese` + `aesmc` together form one full AES-128 round.
-            unsafe {
-                use core::arch::asm;
+        const RK_LO: u64 = 0xcbf2_9ce4_8422_2325;
+        const RK_HI: u64 = 0x1000_0000_01b3_0000;
+
+        unsafe {
+            use core::arch::aarch64::{uint64x2_t, vcombine_u64, vcreate_u64};
+            use core::arch::asm;
+
+            let state: uint64x2_t = vcombine_u64(vcreate_u64(lhs), vcreate_u64(rhs));
+            let rkey: uint64x2_t = vcombine_u64(vcreate_u64(RK_LO), vcreate_u64(RK_HI));
+            let out: uint64x2_t;
+
+            if has_aes {
                 asm!(
-                    "fmov d0, {lhs}",
-                    "ins v0.d[1], {rhs}",
-                    "fmov d1, {rk_lo}",
-                    "ins v1.d[1], {rk_hi}",
-                    "aese v0.16b, v1.16b",
-                    "aesmc v0.16b, v0.16b",
-                    "umov {lo}, v0.d[0]",
-                    "umov {hi}, v0.d[1]",
-                    lhs = in(reg) lhs,
-                    rhs = in(reg) rhs,
-                    rk_lo = in(reg) RK_LO,
-                    rk_hi = in(reg) RK_HI,
-                    lo = out(reg) lo,
-                    hi = out(reg) hi,
-                    out("v0") _,
-                    out("v1") _,
-                    options(nostack, pure, nomem),
+                    "aese {v_state:v}.16b, {v_rkey:v}.16b",
+                    "aesmc {v_state:v}.16b, {v_state:v}.16b",
+                    v_state = inout(vreg) state => out,
+                    v_rkey = in(vreg) rkey,
+                    options(nostack, pure, nomem, preserves_flags),
+                );
+            } else {
+                asm!(
+                    "eor {v_state:v}.16b, {v_state:v}.16b, {v_rkey:v}.16b",
+                    "rev64 {v_tmp:v}.16b, {v_state:v}.16b",
+                    "ext {v_state:v}.16b, {v_state:v}.16b, {v_state:v}.16b, #8",
+                    "eor {v_state:v}.16b, {v_state:v}.16b, {v_tmp:v}.16b",
+                    v_state = inout(vreg) state => out,
+                    v_rkey = in(vreg) rkey,
+                    v_tmp = out(vreg) _,
+                    options(nostack, pure, nomem, preserves_flags),
                 );
             }
-            return (lo, hi);
+
+            let res = core::mem::transmute::<uint64x2_t, [u64; 2]>(out);
+            return (res[0], res[1]);
         }
     }
 

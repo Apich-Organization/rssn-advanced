@@ -52,16 +52,20 @@ pub fn apply(inp: &[f64], out: &mut [f64]) {
         // SAFETY: lengths checked above; NEON is mandatory on AArch64.
         unsafe {
             use core::arch::asm;
+            let mut inp_ptr = inp.as_ptr();
+            let mut out_ptr = out.as_mut_ptr();
+
             asm!(
-                "ld1 {{v0.2d}}, [{inp}]",
-                "fsqrt v0.2d, v0.2d",
-                "st1 {{v0.2d}}, [{out}]",
-                "ld1 {{v0.2d}}, [{inp}, #16]",
-                "fsqrt v0.2d, v0.2d",
-                "st1 {{v0.2d}}, [{out}, #16]",
-                inp = in(reg) inp.as_ptr(),
-                out = in(reg) out.as_mut_ptr(),
+                "ld1 {{v0.2d}}, [{inp}], #16",
+                "ld1 {{v1.2d}}, [{inp}]",
+                "fabs v0.2d, v0.2d",
+                "fabs v1.2d, v1.2d",
+                "st1 {{v0.2d}}, [{out}], #16",
+                "st1 {{v1.2d}}, [{out}]",
+                inp = inout(reg) inp_ptr,
+                out = inout(reg) out_ptr,
                 out("v0") _,
+                out("v1") _,
                 options(nostack, preserves_flags),
             );
         }
