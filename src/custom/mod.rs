@@ -5,9 +5,9 @@
 //!
 //! | Pipeline | Integration method |
 //! |---|---|
-//! | **JIT compilation** | [`CustomOpRegistry::apply_to_jit`] — registers `eval_fn` pointers; enables `compile_batch_f64x2` for pure operators |
-//! | **Heuristic simplifier** | [`CustomOpRegistry::build_rule_registry`] — produces a [`RuleRegistry`] from attached [`SimplifyRule`]s |
-//! | **E-graph saturation** | [`CustomOpRegistry::apply_to_egraph`] — injects [`EGraphRule`]s into an [`EGraph`][crate::egraph::egraph::EGraph] |
+//! | **JIT compilation** | [`CustomOpRegistry::apply_to_jit`](crate::custom::descriptor::CustomOpRegistry::apply_to_jit) — registers `eval_fn` pointers; enables `compile_batch_f64x2` for pure operators |
+//! | **Heuristic simplifier** | [`CustomOpRegistry::build_rule_registry`](crate::custom::descriptor::CustomOpRegistry::build_rule_registry) — produces a [`RuleRegistry`](crate::heuristic::RuleRegistry) from attached [`SimplifyRule`](crate::custom::descriptor::SimplifyRule)s |
+//! | **E-graph saturation** | [`CustomOpRegistry::apply_to_egraph`](crate::custom::descriptor::CustomOpRegistry::apply_to_egraph) — injects [`EGraphRule`](crate::custom::descriptor::EGraphRule)s into an [`EGraph`][crate::egraph::egraph::EGraph] |
 //!
 //! ## Previous fragmented API vs. this module
 //!

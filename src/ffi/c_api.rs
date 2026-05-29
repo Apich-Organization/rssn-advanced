@@ -1326,7 +1326,7 @@ pub struct RssnOptConfig;
 ///
 /// # Safety
 ///
-/// - `ctx` must be a valid, non-null pointer from [`rssn_jit_context_new`].
+/// - `ctx` must be a valid, non-null pointer from [`rssn_jit_context_new`](crate::ffi::jit_context::rssn_jit_context_new).
 /// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
 /// - `out_fn` must be a valid, non-null writable pointer.
 /// - If `opts` is non-null it must point to a valid [`RssnOptConfig`].

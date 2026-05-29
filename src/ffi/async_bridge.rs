@@ -37,7 +37,7 @@ use crate::runtime::{TaskHandle, ensure_runtime, join, spawn_task};
 // =========================================================================
 
 /// Opaque async simplification handle. Returned by
-/// [`rssn_dag_simplify_async_v2`]; pass to [`rssn_async_join`] to block
+/// [`rssn_dag_simplify_async`]; pass to [`rssn_async_join`] to block
 /// until the fiber completes and obtain the result.
 ///
 /// The handle stores the `TaskHandle` value as a `u64` for C ABI
@@ -123,7 +123,7 @@ pub extern "C" fn rssn_dag_simplify_async(
 ///
 /// # Safety
 ///
-/// `handle` must have been obtained from [`rssn_dag_simplify_async_v2`] and
+/// `handle` must have been obtained from [`rssn_dag_simplify_async`] and
 /// must not be used after this call.
 #[unsafe(no_mangle)]
 #[allow(clippy::not_unsafe_ptr_arg_deref)]

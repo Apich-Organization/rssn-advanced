@@ -71,7 +71,7 @@ impl fmt::Display for DagNodeId {
 /// (binary ops = 2, ternary = 3, quaternary = 4).
 const INLINE_CHILDREN: usize = 4;
 
-/// A compact child list that stores up to [`INLINE_CHILDREN`] IDs inline.
+/// A compact child list that stores up to `INLINE_CHILDREN` IDs inline.
 ///
 /// For nodes with more children (e.g. variadic `+` or `*` chains),
 /// the list spills to a heap-allocated `Vec`.
@@ -87,7 +87,7 @@ pub enum ChildList {
     Three([DagNodeId; 3]),
     /// Four children (inline limit).
     Four([DagNodeId; 4]),
-    /// More than [`INLINE_CHILDREN`] children (heap-allocated).
+    /// More than `INLINE_CHILDREN` children (heap-allocated).
     Many(Vec<DagNodeId>),
 }
 

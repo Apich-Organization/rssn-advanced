@@ -7,7 +7,7 @@
 //!
 //! Each wrapper:
 //!
-//! 1. Checks AVX2 availability once per process via [`HAS_AVX2`].
+//! 1. Checks AVX2 availability once per process via `HAS_AVX2`.
 //! 2. Splits the input into 4-element chunks aligned to the kernel width.
 //! 3. Calls the kernel per chunk.
 //! 4. Processes the trailing 0..3 elements with the scalar fallback,

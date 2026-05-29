@@ -297,7 +297,7 @@ impl JitCompiler {
     ///    from every descriptor's [`EvalFn`][crate::custom::descriptor::EvalFn],
     ///    so the JIT linker resolves `rssn_custom_fn_N` symbols correctly.
     /// 2. Stores the `Arc` reference so [`Self::compile_batch_f64x2`] can query
-    ///    [`CustomOpRegistry::is_vectorizable`] per `Function` node, enabling the
+    ///    [`CustomOpRegistry::is_vectorizable`](crate::custom::descriptor::CustomOpRegistry::is_vectorizable) per `Function` node, enabling the
     ///    ILP batch path for operators flagged `vectorizable`.
     ///
     /// Prefer calling this over the individual `register_custom_function_N`

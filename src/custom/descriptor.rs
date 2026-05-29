@@ -452,7 +452,7 @@ impl CustomOpRegistry {
 
     /// Iterate over all registered descriptors.
     ///
-    /// Used internally by [`JitCompiler::set_custom_op_registry`] to populate
+    /// Used internally by [`JitCompiler::set_custom_op_registry`](crate::jit::compiler::JitCompiler::set_custom_op_registry) to populate
     /// the JIT's function-pointer table.
     pub fn ops_iter(&self) -> impl Iterator<Item = &CustomOpDescriptor> {
         self.ops.values()
@@ -470,7 +470,7 @@ impl CustomOpRegistry {
 
     // ── Pipeline integrations ─────────────────────────────────────────────
 
-    /// Feed all custom operator evaluation functions into a [`JitCompiler`].
+    /// Feed all custom operator evaluation functions into a [`JitCompiler`](crate::jit::compiler::JitCompiler).
     ///
     /// This populates the compiler's internal custom-function registry (so
     /// the JIT can emit `call rssn_custom_fn_N` instructions) and stores the
