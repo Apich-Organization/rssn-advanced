@@ -262,8 +262,8 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                 let pow_expansion = exp_val.map_or(PowExpansion::None, classify_exponent);
 
                 // Compute sign/bound properties based on exponent.
-                let (lower_bound, upper_bound, is_nonnegative, is_positive, no_nan) =
-                    exp_val.map_or((None, None, false, false, false), |exp| {
+                let (lower_bound, upper_bound, is_nonnegative, is_positive, no_nan) = exp_val
+                    .map_or((None, None, false, false, false), |exp| {
                         let n = exp as i32;
                         let is_even_int =
                             n >= 2 && (f64::from(n) - exp).abs() < f64::EPSILON && n % 2 == 0;
@@ -298,9 +298,16 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                             // x^(-n): nonzero if base nonzero; sign follows base if n is even
                             let neg_n = (-exp) as u32;
                             let is_even_neg = neg_n.is_multiple_of(2);
-                            let is_nonneg = if is_even_neg { true } else { base.is_nonnegative };
-                            let is_pos =
-                                if is_even_neg { base.is_nonzero() } else { base.is_positive };
+                            let is_nonneg = if is_even_neg {
+                                true
+                            } else {
+                                base.is_nonnegative
+                            };
+                            let is_pos = if is_even_neg {
+                                base.is_nonzero()
+                            } else {
+                                base.is_positive
+                            };
                             (
                                 None,
                                 None,
@@ -322,7 +329,6 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                     pow_expansion,
                 }
             }
-
         };
 
         results[idx] = an;

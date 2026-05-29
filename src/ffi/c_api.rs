@@ -1066,7 +1066,9 @@ pub extern "C" fn rssn_dag_intern_function(builder: *mut DagBuilder, name: *cons
     catch_unwind(|| {
         let b = unsafe { &mut *builder };
         let c_str = unsafe { CStr::from_ptr(name) };
-        let Ok(s) = c_str.to_str() else { return u32::MAX };
+        let Ok(s) = c_str.to_str() else {
+            return u32::MAX;
+        };
         b.intern_function(s).0
     })
     .unwrap_or(u32::MAX)

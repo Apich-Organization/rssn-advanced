@@ -675,9 +675,13 @@ impl JitCompiler {
             .ins()
             .icmp(IntCC::UnsignedGreaterThanOrEqual, i_scheck, n_rows_val);
         let i_scheck_ba = BlockArg::Value(i_scheck);
-        func_builder
-            .ins()
-            .brif(done, ret_block, &[] as &[BlockArg], scalar_body, &[i_scheck_ba]);
+        func_builder.ins().brif(
+            done,
+            ret_block,
+            &[] as &[BlockArg],
+            scalar_body,
+            &[i_scheck_ba],
+        );
         // scalar_check has a back-edge from scalar_body — seal after.
 
         // ── scalar_body(i) ────────────────────────────────────────────────
@@ -1310,7 +1314,10 @@ fn emit_operator(
                             return Ok(passes::emit_sqrt(builder, child_vals[0]));
                         }
                         let n = exp as u32;
-                        if exp.to_bits() == f64::from(n).to_bits() && n >= 2 && n <= opts.max_int_pow {
+                        if exp.to_bits() == f64::from(n).to_bits()
+                            && n >= 2
+                            && n <= opts.max_int_pow
+                        {
                             return Ok(passes::emit_int_pow(builder, child_vals[0], n));
                         }
                     }
