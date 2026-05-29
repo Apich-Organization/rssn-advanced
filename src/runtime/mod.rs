@@ -235,7 +235,13 @@ const fn unpack(val: u64) -> (*mut PoolNode, u16) {
 /// Allocates a fresh [`PoolNode`] via the global allocator.
 ///
 /// Cold path: called only when the pool is empty.
+///
+/// The `Box` is intentional: callers immediately call `Box::into_raw` to
+/// produce a `*mut PoolNode` that the C trampoline owns; `Box::from_raw`
+/// reconstructs it after the fiber completes. A plain `PoolNode` return
+/// would force callers to perform their own `Box::new` anyway.
 #[cold]
+#[allow(clippy::unnecessary_box_returns)]
 fn alloc_pool_node() -> Box<PoolNode> {
     Box::new(PoolNode {
         word0: 0,
@@ -249,7 +255,14 @@ fn alloc_pool_node() -> Box<PoolNode> {
 /// Uses a `compare_exchange_weak` loop on the tagged `POOL_HEAD`.  The
 /// 16-bit tag in bits 63..48 is incremented on every successful CAS, so a
 /// stale load (ABA) always causes the CAS to fail and retry.
+///
+/// The `Box` return is intentional: `spawn_task` immediately calls
+/// `Box::into_raw` to hand the raw pointer to `dtact_fiber_launch`; the
+/// C trampoline later reconstructs it with `Box::from_raw` in
+/// `invoke_and_drop_pooled`. A plain `PoolNode` return would only push
+/// the `Box::new` call into the caller.
 #[inline]
+#[allow(clippy::unnecessary_box_returns)]
 fn pool_acquire() -> Box<PoolNode> {
     let mut head_val = POOL_HEAD.load(Ordering::Acquire);
     loop {

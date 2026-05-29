@@ -21,14 +21,10 @@ pub fn collect_commutative_add_leaves(
         if node.kind == SymbolKind::Operator(OpKind::Add) {
             // Check if all variables in this node's children are commutative
             let is_comm = node.children.iter().all(|child_id| {
-                if let Some(child_node) = arena.get(child_id) {
-                    match child_node.kind {
-                        SymbolKind::Variable(sym_id) => permissions.is_commutative(sym_id),
-                        _ => true,
-                    }
-                } else {
-                    true
-                }
+                arena.get(child_id).is_none_or(|child_node| match child_node.kind {
+                    SymbolKind::Variable(sym_id) => permissions.is_commutative(sym_id),
+                    _ => true,
+                })
             });
 
             if is_comm {

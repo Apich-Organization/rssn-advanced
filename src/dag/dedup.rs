@@ -9,8 +9,6 @@ use super::metadata::NodeHash;
 use super::node::{ChildList, DagNode, DagNodeId};
 use super::symbol::SymbolKind;
 
-/// Load factor threshold: rehash when len/cap exceeds this.
-const MAX_LOAD: f64 = 0.7;
 /// Initial capacity (must be power of two).
 const INIT_CAP: usize = 64;
 
@@ -50,7 +48,7 @@ impl std::fmt::Debug for DedupMap {
         f.debug_struct("DedupMap")
             .field("len", &self.len)
             .field("cap", &self.cap)
-            .finish()
+            .finish_non_exhaustive() // `slots` is an internal hash table — not useful to display
     }
 }
 
@@ -140,8 +138,9 @@ impl DedupMap {
         coefficient: f64,
         flags: super::metadata::NodeFlags,
     ) -> DagNodeId {
-        // Rehash if at load limit.
-        if self.len + 1 > (self.cap as f64 * MAX_LOAD) as usize {
+        // Rehash if at load limit (>70%). Use integer arithmetic to avoid
+        // the usize→f64 precision-loss cast that `cap as f64 * 0.7` would incur.
+        if self.len + 1 > self.cap * 7 / 10 {
             self.grow();
         }
 

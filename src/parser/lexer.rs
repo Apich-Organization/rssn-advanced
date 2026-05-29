@@ -25,6 +25,11 @@ where
 }
 
 /// Parses a numeric constant as an `f64`.
+///
+/// # Errors
+///
+/// Returns `nom::Err::Error` if the input does not start with a valid
+/// floating-point literal.
 pub fn parse_constant(input: &str) -> IResult<&str, f64, nom::error::Error<&str>> {
     double.parse(input)
 }
@@ -35,6 +40,11 @@ pub fn parse_char(c: char) -> impl Fn(&str) -> IResult<&str, char, nom::error::E
 }
 
 /// Parses an identifier (starts with an alphabetic character or `_`, followed by alphanumeric or `_`).
+///
+/// # Errors
+///
+/// Returns `nom::Err::Error` if the input does not start with a valid
+/// identifier character (`[a-zA-Z_][a-zA-Z0-9_]*`).
 pub fn parse_identifier(input: &str) -> IResult<&str, &str, nom::error::Error<&str>> {
     recognize(pair(
         alt((alpha1, tag("_"))),
@@ -44,6 +54,11 @@ pub fn parse_identifier(input: &str) -> IResult<&str, &str, nom::error::Error<&s
 }
 
 /// Parses a variable node.
+///
+/// # Errors
+///
+/// Returns `nom::Err::Error` if the input does not start with a valid
+/// identifier (delegates to [`parse_identifier`]).
 pub fn parse_variable(input: &str) -> IResult<&str, &str, nom::error::Error<&str>> {
     parse_identifier(input)
 }

@@ -27,9 +27,9 @@ pub fn simplify_add(lhs: f64, rhs: f64) -> Option<f64> {
 pub fn simplify_mul(lhs: f64, rhs: f64) -> Option<f64> {
     if lhs == 0.0 || rhs == 0.0 {
         Some(0.0)
-    } else if lhs == 1.0 {
+    } else if lhs.to_bits() == 1.0_f64.to_bits() {
         Some(rhs)
-    } else if rhs == 1.0 {
+    } else if rhs.to_bits() == 1.0_f64.to_bits() {
         Some(lhs)
     } else {
         Some(lhs * rhs)

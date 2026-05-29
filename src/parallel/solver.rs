@@ -170,11 +170,9 @@ fn reduce_frame_with_overrides(
         }
         SymbolKind::Operator(op) => {
             let split_at = values.len().saturating_sub(arity);
-            let result = if let Some(override_fn) = op_registry.get(op) {
-                override_fn(&values[split_at..])
-            } else {
-                apply_op(op, &values[split_at..])
-            };
+            let result = op_registry
+                .get(op)
+                .map_or_else(|| apply_op(op, &values[split_at..]), |override_fn| override_fn(&values[split_at..]));
             values.truncate(split_at);
             result
         }

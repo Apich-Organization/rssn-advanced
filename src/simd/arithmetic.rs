@@ -193,10 +193,13 @@ pub fn batch_add(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
     }
     // 2-lane NEON path for aarch64 when AVX2 is not available.
     while chunk_idx + 2 <= n && !use_avx2 && use_neon {
-        let o2: &mut [f64; 2] = (&mut result[chunk_idx..chunk_idx + 2]).try_into().unwrap();
-        let l2: &[f64; 2] = (&lhs[chunk_idx..chunk_idx + 2]).try_into().unwrap();
-        let r2: &[f64; 2] = (&rhs[chunk_idx..chunk_idx + 2]).try_into().unwrap();
-        add_f64x2::apply(l2, r2, o2);
+        if let (Ok(o2), Ok(l2), Ok(r2)) = (
+            <&mut [f64; 2]>::try_from(&mut result[chunk_idx..chunk_idx + 2]),
+            <&[f64; 2]>::try_from(&lhs[chunk_idx..chunk_idx + 2]),
+            <&[f64; 2]>::try_from(&rhs[chunk_idx..chunk_idx + 2]),
+        ) {
+            add_f64x2::apply(l2, r2, o2);
+        }
         chunk_idx += 2;
     }
     while chunk_idx < n {
@@ -251,10 +254,13 @@ pub fn batch_mul(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
     }
     // 2-lane NEON path for aarch64 when AVX2 is not available.
     while i + 2 <= n && !use_avx2 && use_neon {
-        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
-        let l2: &[f64; 2] = (&lhs[i..i + 2]).try_into().unwrap();
-        let r2: &[f64; 2] = (&rhs[i..i + 2]).try_into().unwrap();
-        mul_f64x2::apply(l2, r2, o2);
+        if let (Ok(o2), Ok(l2), Ok(r2)) = (
+            <&mut [f64; 2]>::try_from(&mut result[i..i + 2]),
+            <&[f64; 2]>::try_from(&lhs[i..i + 2]),
+            <&[f64; 2]>::try_from(&rhs[i..i + 2]),
+        ) {
+            mul_f64x2::apply(l2, r2, o2);
+        }
         i += 2;
     }
     while i < n {
@@ -360,10 +366,13 @@ pub fn batch_sub(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
         i += LANES;
     }
     while i + 2 <= n && !use_avx2 && use_neon {
-        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
-        let l2: &[f64; 2] = (&lhs[i..i + 2]).try_into().unwrap();
-        let r2: &[f64; 2] = (&rhs[i..i + 2]).try_into().unwrap();
-        sub_f64x2::apply(l2, r2, o2);
+        if let (Ok(o2), Ok(l2), Ok(r2)) = (
+            <&mut [f64; 2]>::try_from(&mut result[i..i + 2]),
+            <&[f64; 2]>::try_from(&lhs[i..i + 2]),
+            <&[f64; 2]>::try_from(&rhs[i..i + 2]),
+        ) {
+            sub_f64x2::apply(l2, r2, o2);
+        }
         i += 2;
     }
     while i < n {
@@ -419,10 +428,13 @@ pub fn batch_div(lhs: &[f64], rhs: &[f64], result: &mut [f64]) -> Result<(), Bat
         i += LANES;
     }
     while i + 2 <= n && !use_avx2 && use_neon {
-        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
-        let l2: &[f64; 2] = (&lhs[i..i + 2]).try_into().unwrap();
-        let r2: &[f64; 2] = (&rhs[i..i + 2]).try_into().unwrap();
-        div_f64x2::apply(l2, r2, o2);
+        if let (Ok(o2), Ok(l2), Ok(r2)) = (
+            <&mut [f64; 2]>::try_from(&mut result[i..i + 2]),
+            <&[f64; 2]>::try_from(&lhs[i..i + 2]),
+            <&[f64; 2]>::try_from(&rhs[i..i + 2]),
+        ) {
+            div_f64x2::apply(l2, r2, o2);
+        }
         i += 2;
     }
     while i < n {
@@ -474,9 +486,12 @@ pub fn batch_sqrt(inp: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
         i += LANES;
     }
     while i + 2 <= n && !use_avx2 && use_neon {
-        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
-        let l2: &[f64; 2] = (&inp[i..i + 2]).try_into().unwrap();
-        sqrt_f64x2::apply(l2, o2);
+        if let (Ok(o2), Ok(l2)) = (
+            <&mut [f64; 2]>::try_from(&mut result[i..i + 2]),
+            <&[f64; 2]>::try_from(&inp[i..i + 2]),
+        ) {
+            sqrt_f64x2::apply(l2, o2);
+        }
         i += 2;
     }
     while i < n {
@@ -522,9 +537,12 @@ pub fn batch_neg(inp: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
         i += LANES;
     }
     while i + 2 <= n && !use_avx2 && use_neon {
-        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
-        let l2: &[f64; 2] = (&inp[i..i + 2]).try_into().unwrap();
-        neg_f64x2::apply(l2, o2);
+        if let (Ok(o2), Ok(l2)) = (
+            <&mut [f64; 2]>::try_from(&mut result[i..i + 2]),
+            <&[f64; 2]>::try_from(&inp[i..i + 2]),
+        ) {
+            neg_f64x2::apply(l2, o2);
+        }
         i += 2;
     }
     while i < n {
@@ -570,9 +588,12 @@ pub fn batch_abs(inp: &[f64], result: &mut [f64]) -> Result<(), BatchError> {
         i += LANES;
     }
     while i + 2 <= n && !use_avx2 && use_neon {
-        let o2: &mut [f64; 2] = (&mut result[i..i + 2]).try_into().unwrap();
-        let l2: &[f64; 2] = (&inp[i..i + 2]).try_into().unwrap();
-        abs_f64x2::apply(l2, o2);
+        if let (Ok(o2), Ok(l2)) = (
+            <&mut [f64; 2]>::try_from(&mut result[i..i + 2]),
+            <&[f64; 2]>::try_from(&inp[i..i + 2]),
+        ) {
+            abs_f64x2::apply(l2, o2);
+        }
         i += 2;
     }
     while i < n {

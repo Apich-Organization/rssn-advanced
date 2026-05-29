@@ -215,7 +215,7 @@ impl<T> RelPtr<T, i32> {
     /// instead of clamping to null.
     #[must_use]
     pub fn from_indices_checked(source: usize, target: usize) -> Option<Self> {
-        let diff = (target as isize) - (source as isize);
+        let diff = target.cast_signed() - source.cast_signed();
         let offset = i32::try_from(diff).ok()?;
         // Guard against accidentally encoding the null sentinel as a real
         // pointer (would require a 2^31-element distance — unreachable in
@@ -237,7 +237,7 @@ impl<T> RelPtr<T, i32> {
         if self.is_null() {
             return None;
         }
-        let target = (source as isize) + (self.offset as isize);
+        let target = source.cast_signed() + (self.offset as isize);
         if target < 0 {
             None
         } else {

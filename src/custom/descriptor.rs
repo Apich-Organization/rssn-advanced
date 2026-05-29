@@ -255,6 +255,7 @@ impl CustomOpDescriptorBuilder {
     /// The `rule` closure receives `(builder, kind, children)` for every DAG
     /// node visited by the simplifier.  Return `Some(replacement_id)` to
     /// rewrite, `None` to pass.
+    #[must_use]
     pub fn simplify_rule<F>(mut self, name: impl Into<String>, priority: i32, rule: F) -> Self
     where
         F: Fn(&mut DagBuilder, SymbolKind, &[DagNodeId]) -> Option<DagNodeId>
@@ -274,6 +275,7 @@ impl CustomOpDescriptorBuilder {
     ///
     /// `after_builtins = false` runs the rule before built-in algebraic rules
     /// each saturation round; `true` runs it after.
+    #[must_use]
     pub fn egraph_rule<F>(mut self, after_builtins: bool, rule: F) -> Self
     where
         F: Fn(&mut DagBuilder, &SymbolKind, &[DagNodeId]) -> Option<DagNodeId>

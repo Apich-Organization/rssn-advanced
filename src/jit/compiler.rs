@@ -68,6 +68,9 @@ pub type CompiledBatchFn =
 
 /// Configuration for JIT optimization passes.
 #[derive(Debug, Clone)]
+// Four independent bool toggles for four orthogonal optimization passes;
+// a state machine or two-variant enum would be strictly worse here.
+#[allow(clippy::struct_excessive_bools)]
 pub struct OptConfig {
     /// Maximum integer exponent for power expansion without `powf`.
     /// `x^n` for integer n in `2..=max_int_pow` is replaced by repeated fmul.
@@ -615,7 +618,7 @@ impl JitCompiler {
 
         // Byte offset of row i: i * 8
         let byte_off_vec = func_builder.ins().ishl_imm(i_vb, 3);
-        let ptr_size = i64::try_from(ptr_type.bytes()).unwrap_or(8);
+        let ptr_size = i64::from(ptr_type.bytes());
 
         // Load F64X2 values for each variable: reads f64[i] and f64[i+1] in one load.
         let mut var_vals_vec: HashMap<u32, Value> = HashMap::new();
@@ -667,21 +670,21 @@ impl JitCompiler {
 
         // ── scalar_check(i) ────────────────────────────────────────────────
         func_builder.switch_to_block(scalar_check);
-        let i_sc = func_builder.block_params(scalar_check)[0];
+        let i_scheck = func_builder.block_params(scalar_check)[0];
         let done = func_builder
             .ins()
-            .icmp(IntCC::UnsignedGreaterThanOrEqual, i_sc, n_rows_val);
-        let i_sc_ba = BlockArg::Value(i_sc);
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, i_scheck, n_rows_val);
+        let i_scheck_ba = BlockArg::Value(i_scheck);
         func_builder
             .ins()
-            .brif(done, ret_block, &[] as &[BlockArg], scalar_body, &[i_sc_ba]);
+            .brif(done, ret_block, &[] as &[BlockArg], scalar_body, &[i_scheck_ba]);
         // scalar_check has a back-edge from scalar_body — seal after.
 
         // ── scalar_body(i) ────────────────────────────────────────────────
         func_builder.switch_to_block(scalar_body);
-        let i_sb = func_builder.block_params(scalar_body)[0];
+        let i_sbody = func_builder.block_params(scalar_body)[0];
 
-        let byte_off_sb = func_builder.ins().ishl_imm(i_sb, 3);
+        let byte_off_sb = func_builder.ins().ishl_imm(i_sbody, 3);
         let mut var_vals_sb: HashMap<u32, Value> = HashMap::new();
         for &sid in &sym_ids {
             let col_offset = func_builder
@@ -698,7 +701,7 @@ impl JitCompiler {
             var_vals_sb.insert(sid, v);
         }
 
-        let powf_func_ref_sb = self
+        let powf_ref_sbody = self
             .module
             .declare_func_in_func(powf_name, func_builder.func);
 
@@ -710,7 +713,7 @@ impl JitCompiler {
             &opts,
             &mut func_builder,
             &var_vals_sb,
-            powf_func_ref_sb,
+            powf_ref_sbody,
             &HashMap::new(),
             &mut work_stack_sb,
             &mut work_vals_sb,
@@ -721,9 +724,9 @@ impl JitCompiler {
             .ins()
             .store(MemFlags::new(), res_sb, out_addr_sb, 0);
 
-        let i_sb_next = func_builder.ins().iadd_imm(i_sb, 1);
-        let i_sb_next_ba = BlockArg::Value(i_sb_next);
-        func_builder.ins().jump(scalar_check, &[i_sb_next_ba]);
+        let i_sbody_next = func_builder.ins().iadd_imm(i_sbody, 1);
+        let i_sbody_next_ba = BlockArg::Value(i_sbody_next);
+        func_builder.ins().jump(scalar_check, &[i_sbody_next_ba]);
 
         func_builder.seal_block(scalar_check);
         func_builder.seal_block(scalar_body);
@@ -796,6 +799,7 @@ struct Frame {
     cursor: usize,
 }
 
+#[allow(clippy::too_many_arguments)] // internal codegen workhorse — parameters are a fixed, well-documented set
 fn compile_ast_iterative(
     ast: &AstProjection,
     analysis: &[NodeAnalysis],
@@ -1306,7 +1310,7 @@ fn emit_operator(
                             return Ok(passes::emit_sqrt(builder, child_vals[0]));
                         }
                         let n = exp as u32;
-                        if exp == f64::from(n) && n >= 2 && n <= opts.max_int_pow {
+                        if exp.to_bits() == f64::from(n).to_bits() && n >= 2 && n <= opts.max_int_pow {
                             return Ok(passes::emit_int_pow(builder, child_vals[0], n));
                         }
                     }

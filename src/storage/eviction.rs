@@ -198,6 +198,7 @@ impl RecencyWeightedPolicy {
 }
 
 impl EvictionPolicy for RecencyWeightedPolicy {
+    #[allow(clippy::cast_precision_loss)]
     fn is_hot(
         &self,
         hotspots: &super::hotspot::DynamicHotspotTable,
@@ -272,7 +273,7 @@ pub fn evict_cold_nodes(
     hotspots: &DynamicHotspotTable,
     keep_threshold: u64,
 ) -> EvictionResult {
-    evict_nodes_with_policy(arena, hotspots, FrequencyPolicy::new(keep_threshold))
+    evict_nodes_with_policy(arena, hotspots, &FrequencyPolicy::new(keep_threshold))
 }
 
 /// Compacts `arena` using a caller-supplied eviction policy.
@@ -285,7 +286,7 @@ pub fn evict_cold_nodes(
 pub fn evict_nodes_with_policy<P: EvictionPolicy>(
     arena: &DagArena,
     hotspots: &DynamicHotspotTable,
-    policy: P,
+    policy: &P,
 ) -> EvictionResult {
     evict_nodes_budgeted_with_policy(arena, hotspots, policy, usize::MAX)
 }
@@ -304,18 +305,19 @@ pub fn evict_cold_nodes_budgeted(
     evict_nodes_budgeted_with_policy(
         arena,
         hotspots,
-        FrequencyPolicy::new(keep_threshold),
+        &FrequencyPolicy::new(keep_threshold),
         budget,
     )
 }
 
-/// Like [`evict_nodes_with_policy`] but limits the sweep to at most `budget` protected nodes.
-/// The mark phase always runs fully; only the sweep is bounded.
+/// Evicts cold nodes from the DAG arena using the given policy, capping the eviction work to `budget` steps.
+///
+/// Returns an [`EvictionResult`] detailing the number of nodes evicted and any errors encountered.
 #[must_use]
 pub fn evict_nodes_budgeted_with_policy<P: EvictionPolicy>(
     arena: &DagArena,
     hotspots: &DynamicHotspotTable,
-    policy: P,
+    policy: &P,
     budget: usize,
 ) -> EvictionResult {
     let total = arena.len();
@@ -562,7 +564,7 @@ mod tests {
 
         // min_freq=5, min_ratio=0.5 → only sum qualifies (ratio 0.9 >= 0.5).
         let policy = RecencyWeightedPolicy::new(5, 0.5);
-        let result = evict_nodes_with_policy(b.arena(), &hot, policy);
+        let result = evict_nodes_with_policy(b.arena(), &hot, &policy);
         // sum + its children (x, y) must survive.
         assert_eq!(result.arena.len(), 3);
         assert!(result.translate(sum).is_some());
@@ -583,7 +585,7 @@ mod tests {
         // AND: freq >= 5 AND ratio >= 0.05. sum satisfies both; x/y have freq=0.
         let policy =
             CompositePolicy::and(FrequencyPolicy::new(5), RecencyWeightedPolicy::new(1, 0.05));
-        let result = evict_nodes_with_policy(b.arena(), &hot, policy);
+        let result = evict_nodes_with_policy(b.arena(), &hot, &policy);
         assert!(result.translate(sum).is_some());
         // x and y have 0 accesses so they're cold in the AND policy,
         // but they're transitively reachable from sum, so they survive.

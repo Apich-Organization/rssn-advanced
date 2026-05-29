@@ -49,6 +49,7 @@
 //! [`DagNodeId`]: crate::dag::node::DagNodeId
 
 pub mod cost;
+#[allow(clippy::module_inception)]
 pub mod egraph;
 pub mod union_find;
 

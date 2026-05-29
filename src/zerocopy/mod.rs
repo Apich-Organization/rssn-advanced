@@ -197,15 +197,13 @@ impl AlignedBytes {
         None // Indicate copy is needed; use from_vec below for the real logic
     }
 
-    /// Constructs from a `Vec<u8>`, copying into an aligned allocation.
+    /// Constructs from a byte slice, copying into an aligned allocation.
     ///
-    /// This is slightly cheaper than `from_slice` when the Vec's capacity
-    /// is large (avoids a second allocation), but a copy is always needed
-    /// unless the source is already aligned. For the true zero-copy path,
-    /// use [`AlignedBytesWriter`] directly.
+    /// A copy is always needed unless the source is already aligned.
+    /// For the true zero-copy path, use [`AlignedBytesWriter`] directly.
     #[must_use]
-    pub fn from_vec(v: Vec<u8>) -> Self {
-        Self::from_slice(&v)
+    pub fn from_vec(v: &[u8]) -> Self {
+        Self::from_slice(v)
     }
 
     /// Number of meaningful bytes.

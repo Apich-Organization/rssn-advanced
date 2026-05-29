@@ -100,8 +100,10 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                 }
             }
 
-            // ── Variable ──────────────────────────────────────────────────
-            SymbolKind::Variable(_) => NodeAnalysis::unknown(),
+            // ── Variable / Mod / Function — no useful bounds known ─────────
+            SymbolKind::Variable(_)
+            | SymbolKind::Operator(OpKind::Mod)
+            | SymbolKind::Function(_) => NodeAnalysis::unknown(),
 
             // ── Neg ───────────────────────────────────────────────────────
             SymbolKind::Operator(OpKind::Neg) => {
@@ -230,9 +232,6 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                 }
             }
 
-            // ── Mod ───────────────────────────────────────────────────────
-            SymbolKind::Operator(OpKind::Mod) => NodeAnalysis::unknown(),
-
             // ── Pow ───────────────────────────────────────────────────────
             SymbolKind::Operator(OpKind::Pow) => {
                 let base = child_analysis(&results, children, idx, 0);
@@ -262,10 +261,9 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
 
                 let pow_expansion = exp_val.map_or(PowExpansion::None, classify_exponent);
 
-                // Compute sign/bound properties based on exponent
-                let (lower_bound, upper_bound, is_nonnegative, is_positive, no_nan) = match exp_val
-                {
-                    Some(exp) => {
+                // Compute sign/bound properties based on exponent.
+                let (lower_bound, upper_bound, is_nonnegative, is_positive, no_nan) =
+                    exp_val.map_or((None, None, false, false, false), |exp| {
                         let n = exp as i32;
                         let is_even_int =
                             n >= 2 && (f64::from(n) - exp).abs() < f64::EPSILON && n % 2 == 0;
@@ -300,16 +298,9 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                             // x^(-n): nonzero if base nonzero; sign follows base if n is even
                             let neg_n = (-exp) as u32;
                             let is_even_neg = neg_n.is_multiple_of(2);
-                            let is_nonneg = if is_even_neg {
-                                true
-                            } else {
-                                base.is_nonnegative
-                            };
-                            let is_pos = if is_even_neg {
-                                base.is_nonzero()
-                            } else {
-                                base.is_positive
-                            };
+                            let is_nonneg = if is_even_neg { true } else { base.is_nonnegative };
+                            let is_pos =
+                                if is_even_neg { base.is_nonzero() } else { base.is_positive };
                             (
                                 None,
                                 None,
@@ -320,9 +311,7 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                         } else {
                             (None, None, false, false, false)
                         }
-                    }
-                    None => (None, None, false, false, false),
-                };
+                    });
 
                 NodeAnalysis {
                     lower_bound,
@@ -334,8 +323,6 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                 }
             }
 
-            // ── Function ──────────────────────────────────────────────────
-            SymbolKind::Function(_) => NodeAnalysis::unknown(),
         };
 
         results[idx] = an;
@@ -377,7 +364,9 @@ fn child_analysis<'a>(
 #[must_use]
 pub fn classify_exponent(exp: f64) -> PowExpansion {
     // x^0 → 1 and x^1 → x are handled by cheaper constant peepholes.
-    if exp == 0.0 || exp == 1.0 {
+    // Use bit-pattern comparison: these are exact sentinel values, not
+    // results of arithmetic — an epsilon margin would be incorrect here.
+    if exp.to_bits() == 0.0_f64.to_bits() || exp.to_bits() == 1.0_f64.to_bits() {
         return PowExpansion::None;
     }
     // sqrt: x^0.5 → sqrt(x)

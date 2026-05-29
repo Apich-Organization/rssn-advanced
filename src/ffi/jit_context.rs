@@ -116,13 +116,13 @@ pub extern "C" fn rssn_dag_compile_with_ctx(
         let builder_ref = unsafe { &mut *builder };
         let root_id = crate::dag::node::DagNodeId::new(root);
         let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
-        match ctx_ref.compiler_mut().compile(&ast) {
-            Ok(compiled_fn) => {
+        ctx_ref
+            .compiler_mut()
+            .compile(&ast)
+            .map_or(RssnStatus::CompilationError, |compiled_fn| {
                 unsafe { *out_fn = compiled_fn as *mut c_void };
                 RssnStatus::Success
-            }
-            Err(_) => RssnStatus::CompilationError,
-        }
+            })
     }));
     result.unwrap_or(RssnStatus::Panic)
 }
