@@ -119,14 +119,16 @@ impl DynamicHotspotTable {
 
         // Slow path: new key — acquire write lock and insert. Re-check under
         // write lock so two concurrent slow-path callers don't double-insert.
-        let mut guard = shard
-            .frequencies
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard
-            .entry(id)
-            .or_insert_with(|| AtomicU64::new(0))
-            .fetch_add(1, Ordering::Relaxed);
+        {
+            let mut guard = shard
+                .frequencies
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard
+                .entry(id)
+                .or_insert_with(|| AtomicU64::new(0))
+                .fetch_add(1, Ordering::Relaxed);
+        }
         shard.total_accesses.fetch_add(1, Ordering::Release);
     }
 

@@ -75,9 +75,6 @@ pub fn apply(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) {
         let m3: u64;
         unsafe {
             use core::arch::asm;
-            let mut lhs_ptr = lhs.as_ptr();
-            let mut rhs_ptr = rhs.as_ptr();
-
             asm!(
                 "ld1 {{v0.2d}}, [{lhs}], #16",
                 "ld1 {{v1.2d}}, [{rhs}], #16",
@@ -89,8 +86,8 @@ pub fn apply(lhs: &[f64], rhs: &[f64], mask: &mut [u8]) {
                 "umov {m1}, v0.d[1]",
                 "umov {m2}, v2.d[0]",
                 "umov {m3}, v2.d[1]",
-                lhs = inout(reg) lhs_ptr,
-                rhs = inout(reg) rhs_ptr,
+                lhs = inout(reg) lhs.as_ptr() => _,
+                rhs = inout(reg) rhs.as_ptr() => _,
                 m0 = out(reg) m0,
                 m1 = out(reg) m1,
                 m2 = out(reg) m2,

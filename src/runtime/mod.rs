@@ -5,9 +5,9 @@
 //! heavyweight `std::thread::spawn`. This module funnels all task dispatch
 //! through `dtact`'s lock-free fiber pool, exposing three primitives:
 //!
-//! * [`ensure_runtime`] — idempotent one-shot init of the global fiber pool.
-//! * [`spawn_task`]     — fire-and-forget fiber for a `FnOnce() + Send`.
-//! * [`parallel_for_each`] — fan-out / fan-in over an iterator of closures.
+//! * [`ensure_runtime`](crate::runtime::ensure_runtime) — idempotent one-shot init of the global fiber pool.
+//! * [`spawn_task`](crate::runtime::spawn_task)     — fire-and-forget fiber for a `FnOnce() + Send`.
+//! * [`parallel_for_each`](crate::runtime::parallel_for_each) — fan-out / fan-in over an iterator of closures.
 //!
 //! ## Task-envelope memory strategy
 //!
@@ -19,9 +19,9 @@
 //!
 //! ### Lock-free pool (fast path)
 //!
-//! When a closure fits in [`POOL_INLINE_CAPACITY`] bytes and has alignment ≤
-//! 16, the closure is written into a pre-allocated [`PoolNode`] drawn from a
-//! global **ABA-safe Treiber stack** ([`POOL_HEAD`]).  The worker returns the
+//! When a closure fits in `POOL_INLINE_CAPACITY` bytes and has alignment ≤
+//! 16, the closure is written into a pre-allocated `PoolNode` drawn from a
+//! global **ABA-safe Treiber stack** (`POOL_HEAD`).  The worker returns the
 //! node to the stack after moving the closure out — one `LOCK CMPXCHG8B`
 //! instead of a malloc + free.
 //!
@@ -31,7 +31,7 @@
 //! used for a task that completes and returns the node, all before the
 //! original thread's CAS fires, the stale `next` pointer silently wins and
 //! can corrupt the list.  We prevent this with a **tagged pointer**:
-//! [`POOL_HEAD`] is an `AtomicU64` whose top 16 bits hold a 16-bit generation
+//! `POOL_HEAD` is an `AtomicU64` whose top 16 bits hold a 16-bit generation
 //! tag (bottom 48 bits = pointer, always ≤ 48 bits on x86-64 without LA57).
 //! Each successful CAS increments the tag; a stale observer always sees a
 //! different tag and retries.  `AtomicU64::new(0)` is a stable `const fn`
@@ -39,8 +39,8 @@
 //!
 //! ### TaskEnvelope fallback (large / over-aligned closures)
 //!
-//! Closures that exceed [`POOL_INLINE_CAPACITY`] or require alignment > 16
-//! fall back to the monomorphised [`TaskEnvelope<F>`] + `Box::into_raw` path.
+//! Closures that exceed `POOL_INLINE_CAPACITY` or require alignment > 16
+//! fall back to the monomorphised `TaskEnvelope<F>` + `Box::into_raw` path.
 //! These are rare in practice (typical captures: a few `Arc` / `usize` values,
 //! all ≤ 8-byte aligned).
 //!
@@ -65,7 +65,7 @@ use dtact::dtact_await;
 use crate::error::{FfiError, cold_ffi_error_runtime_uninitialized};
 
 /// Marker returned by [`ensure_runtime`] so callers can prove the pool is
-/// alive without re-checking. Stored once in [`RUNTIME_GATE`] and copied
+/// alive without re-checking. Stored once in `RUNTIME_GATE` and copied
 /// freely thereafter.
 #[derive(Clone, Copy)]
 pub struct RuntimeGate {
@@ -235,7 +235,13 @@ const fn unpack(val: u64) -> (*mut PoolNode, u16) {
 /// Allocates a fresh [`PoolNode`] via the global allocator.
 ///
 /// Cold path: called only when the pool is empty.
+///
+/// The `Box` is intentional: callers immediately call `Box::into_raw` to
+/// produce a `*mut PoolNode` that the C trampoline owns; `Box::from_raw`
+/// reconstructs it after the fiber completes. A plain `PoolNode` return
+/// would force callers to perform their own `Box::new` anyway.
 #[cold]
+#[allow(clippy::unnecessary_box_returns)]
 fn alloc_pool_node() -> Box<PoolNode> {
     Box::new(PoolNode {
         word0: 0,
@@ -249,7 +255,14 @@ fn alloc_pool_node() -> Box<PoolNode> {
 /// Uses a `compare_exchange_weak` loop on the tagged `POOL_HEAD`.  The
 /// 16-bit tag in bits 63..48 is incremented on every successful CAS, so a
 /// stale load (ABA) always causes the CAS to fail and retry.
+///
+/// The `Box` return is intentional: `spawn_task` immediately calls
+/// `Box::into_raw` to hand the raw pointer to `dtact_fiber_launch`; the
+/// C trampoline later reconstructs it with `Box::from_raw` in
+/// `invoke_and_drop_pooled`. A plain `PoolNode` return would only push
+/// the `Box::new` call into the caller.
 #[inline]
+#[allow(clippy::unnecessary_box_returns)]
 fn pool_acquire() -> Box<PoolNode> {
     let mut head_val = POOL_HEAD.load(Ordering::Acquire);
     loop {
@@ -400,8 +413,8 @@ impl TaskHandle {
 
 /// Spawns `f` onto the fiber pool and returns a joinable [`TaskHandle`].
 ///
-/// **Fast path** — closures ≤ [`POOL_INLINE_CAPACITY`] bytes and ≤ 16-byte
-/// alignment: drawn from the lock-free [`POOL_HEAD`] pool (one `LOCK CMPXCHG8B`
+/// **Fast path** — closures ≤ `POOL_INLINE_CAPACITY` bytes and ≤ 16-byte
+/// alignment: drawn from the lock-free `POOL_HEAD` pool (one `LOCK CMPXCHG8B`
 /// pair, no malloc).
 ///
 /// **Fallback path** — larger or over-aligned closures: one `Box` allocation

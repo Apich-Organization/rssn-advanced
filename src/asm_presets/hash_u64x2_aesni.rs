@@ -97,6 +97,7 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
 
             if has_aes {
                 asm!(
+                    ".arch_extension aes",
                     "aese {v_state:v}.16b, {v_rkey:v}.16b",
                     "aesmc {v_state:v}.16b, {v_state:v}.16b",
                     v_state = inout(vreg) state => out,

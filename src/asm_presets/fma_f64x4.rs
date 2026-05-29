@@ -65,10 +65,6 @@ pub fn apply(a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]) {
         // `fmla Vd.2d, Vn.2d, Vm.2d` computes Vd += Vn * Vm (single rounding).
         unsafe {
             use core::arch::asm;
-            let mut a_ptr = a.as_ptr();
-            let mut b_ptr = b.as_ptr();
-            let mut c_ptr = c.as_ptr();
-            let mut out_ptr = out.as_mut_ptr();
             asm!(
                 "ld1 {{v0.2d}}, [{a}], #16",
                 "ld1 {{v1.2d}}, [{b}], #16",
@@ -80,10 +76,10 @@ pub fn apply(a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]) {
                 "fmla v5.2d, v3.2d, v4.2d",
                 "st1 {{v2.2d}}, [{out}], #16",
                 "st1 {{v5.2d}}, [{out}]",
-                a = inout(reg) a_ptr,
-                b = inout(reg) b_ptr,
-                c = inout(reg) c_ptr,
-                out = inout(reg) out_ptr,
+                a = inout(reg) a.as_ptr() => _,
+                b = inout(reg) b.as_ptr() => _,
+                c = inout(reg) c.as_ptr() => _,
+                out = inout(reg) out.as_mut_ptr() => _,
                 out("v0") _, out("v1") _, out("v2") _,
                 out("v3") _, out("v4") _, out("v5") _,
                 options(nostack),

@@ -9,7 +9,7 @@
 //!
 //! ## Why not `egg`?
 //!
-//! The [`egg`] crate is a general-purpose E-graph library. It is too heavy
+//! The `egg` crate is a general-purpose E-graph library. It is too heavy
 //! for our use case: it owns its own AST representation, does not compose
 //! with hash-consed DAGs, and imposes heavy dependencies. Instead, we build
 //! a lightweight E-graph that:
@@ -25,7 +25,7 @@
 //!
 //! ## Integration with the heuristic engine
 //!
-//! Call [`EGraph::new`] → [`EGraph::saturate`] → [`EGraph::extract`] as a
+//! Call [`EGraph::new`](crate::egraph::EGraph::new) → [`EGraph::saturate`](crate::egraph::egraph::EGraph::saturate) → [`EGraph::extract`](crate::egraph::egraph::EGraph::extract) as a
 //! post-pass after [`crate::heuristic::HeuristicEngine::simplify`], or as a
 //! standalone optimizer for expressions that need algebraic equivalence
 //! reasoning (commutativity, constant folding, x^2=x*x, etc.).
@@ -49,6 +49,7 @@
 //! [`DagNodeId`]: crate::dag::node::DagNodeId
 
 pub mod cost;
+#[allow(clippy::module_inception)]
 pub mod egraph;
 pub mod union_find;
 

@@ -75,10 +75,11 @@ impl Default for CostWeights {
 /// OOO pipeline; supply custom weights to reflect a specific target
 /// (e.g. lower `div` for AVX-512 throughput).
 #[must_use]
-pub fn node_cost(
+#[allow(clippy::cast_precision_loss)]
+pub fn node_cost<S: ::std::hash::BuildHasher>(
     builder: &DagBuilder,
     id: DagNodeId,
-    child_costs: &std::collections::HashMap<u32, f64>,
+    child_costs: &std::collections::HashMap<u32, f64, S>,
     weights: &CostWeights,
 ) -> f64 {
     let Some(node) = builder.arena().get(id) else {
@@ -95,8 +96,7 @@ pub fn node_cost(
     let own = match &node.kind {
         SymbolKind::Variable(_) | SymbolKind::Constant(_) => weights.terminal,
         SymbolKind::Operator(op) => match op {
-            OpKind::Add => weights.add_sub,
-            OpKind::Sub => weights.add_sub,
+            OpKind::Add | OpKind::Sub => weights.add_sub,
             OpKind::Mul => weights.mul,
             OpKind::Div => weights.div,
             OpKind::Neg => weights.neg,

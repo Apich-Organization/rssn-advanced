@@ -6,6 +6,7 @@
 
 /// Detects if AVX2 is available on the host CPU.
 #[must_use]
+#[allow(clippy::missing_const_for_fn)]
 pub fn has_avx2() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
@@ -19,6 +20,7 @@ pub fn has_avx2() -> bool {
 
 /// Detects if SSE4.2 is available on the host CPU.
 #[must_use]
+#[allow(clippy::missing_const_for_fn)]
 pub fn has_sse42() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
@@ -35,6 +37,7 @@ pub fn has_sse42() -> bool {
 /// On aarch64, NEON is mandatory per ARMv8-A spec, so this always returns
 /// `true` on that target. On other architectures it returns `false`.
 #[must_use]
+#[allow(clippy::missing_const_for_fn)]
 pub fn has_neon() -> bool {
     #[cfg(target_arch = "aarch64")]
     {

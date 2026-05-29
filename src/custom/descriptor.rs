@@ -255,6 +255,7 @@ impl CustomOpDescriptorBuilder {
     /// The `rule` closure receives `(builder, kind, children)` for every DAG
     /// node visited by the simplifier.  Return `Some(replacement_id)` to
     /// rewrite, `None` to pass.
+    #[must_use]
     pub fn simplify_rule<F>(mut self, name: impl Into<String>, priority: i32, rule: F) -> Self
     where
         F: Fn(&mut DagBuilder, SymbolKind, &[DagNodeId]) -> Option<DagNodeId>
@@ -274,6 +275,7 @@ impl CustomOpDescriptorBuilder {
     ///
     /// `after_builtins = false` runs the rule before built-in algebraic rules
     /// each saturation round; `true` runs it after.
+    #[must_use]
     pub fn egraph_rule<F>(mut self, after_builtins: bool, rule: F) -> Self
     where
         F: Fn(&mut DagBuilder, &SymbolKind, &[DagNodeId]) -> Option<DagNodeId>
@@ -450,7 +452,7 @@ impl CustomOpRegistry {
 
     /// Iterate over all registered descriptors.
     ///
-    /// Used internally by [`JitCompiler::set_custom_op_registry`] to populate
+    /// Used internally by [`JitCompiler::set_custom_op_registry`](crate::jit::compiler::JitCompiler::set_custom_op_registry) to populate
     /// the JIT's function-pointer table.
     pub fn ops_iter(&self) -> impl Iterator<Item = &CustomOpDescriptor> {
         self.ops.values()
@@ -468,7 +470,7 @@ impl CustomOpRegistry {
 
     // ── Pipeline integrations ─────────────────────────────────────────────
 
-    /// Feed all custom operator evaluation functions into a [`JitCompiler`].
+    /// Feed all custom operator evaluation functions into a [`JitCompiler`](crate::jit::compiler::JitCompiler).
     ///
     /// This populates the compiler's internal custom-function registry (so
     /// the JIT can emit `call rssn_custom_fn_N` instructions) and stores the

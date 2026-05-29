@@ -40,8 +40,8 @@ pub fn apply(inp: &[f64; 2], out: &mut [f64; 2]) {
                 "ld1 {{v0.2d}}, [{inp}]",
                 "fsqrt v0.2d, v0.2d",
                 "st1 {{v0.2d}}, [{out}]",
-                inp = in(reg) inp.as_ptr(),
-                out = in(reg) out.as_mut_ptr(),
+                inp = inout(reg) inp.as_ptr() => _,
+                out = inout(reg) out.as_mut_ptr() => _,
                 out("v0") _,
                 options(nostack, preserves_flags),
             );
@@ -80,8 +80,8 @@ pub fn apply(inp: &[f64; 2], out: &mut [f64; 2]) {
 #[target_feature(enable = "neon")]
 pub unsafe fn apply_neon(inp: &[f64; 2], out: &mut [f64; 2]) {
     use std::arch::aarch64::*;
-    let a = vld1q_f64(inp.as_ptr());
-    vst1q_f64(out.as_mut_ptr(), vsqrtq_f64(a));
+    let a = unsafe { vld1q_f64(inp.as_ptr()) };
+    unsafe { vst1q_f64(out.as_mut_ptr(), vsqrtq_f64(a)) };
 }
 
 #[cfg(test)]

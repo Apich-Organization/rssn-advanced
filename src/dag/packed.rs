@@ -199,7 +199,7 @@ impl PackedDagNode {
 /// Built by [`PackedArenaImage::from_arena`]. The owned `Vec`s here are
 /// what get encoded; the decoded counterpart is [`BorrowedArenaView`].
 ///
-/// The `rule_fingerprint` field captures the [`RuleRegistry::rule_set_fingerprint`]
+/// The `rule_fingerprint` field captures the [`RuleRegistry::rule_set_fingerprint`](crate::heuristic::rule_registry::RuleRegistry::rule_set_fingerprint)
 /// at serialisation time. On load, if the fingerprint differs from the current
 /// registry's fingerprint, CANONICAL bits must be cleared — they were computed
 /// under a different rewrite set. A fingerprint of `0` means "no registry was

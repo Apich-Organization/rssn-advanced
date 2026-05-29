@@ -175,20 +175,20 @@ impl SimdKernel for Avx2Kernel {
     fn batch_fma(&self, a: &[f64], b: &[f64], c: &[f64], out: &mut [f64]) {
         use crate::asm_presets::fma_f64x4;
         const LANES: usize = 4;
-        let n = out.len();
-        let mut i = 0;
-        while i + LANES <= n {
+        let len = out.len();
+        let mut idx = 0;
+        while idx + LANES <= len {
             fma_f64x4::apply(
-                &a[i..i + LANES],
-                &b[i..i + LANES],
-                &c[i..i + LANES],
-                &mut out[i..i + LANES],
+                &a[idx..idx + LANES],
+                &b[idx..idx + LANES],
+                &c[idx..idx + LANES],
+                &mut out[idx..idx + LANES],
             );
-            i += LANES;
+            idx += LANES;
         }
-        while i < n {
-            out[i] = a[i].mul_add(b[i], c[i]);
-            i += 1;
+        while idx < len {
+            out[idx] = a[idx].mul_add(b[idx], c[idx]);
+            idx += 1;
         }
     }
 

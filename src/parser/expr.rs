@@ -125,7 +125,6 @@ impl PrecedenceTable {
     ///
     /// Used by the infix parser to attempt named-operator matching before
     /// falling back to single-character operators.
-    #[must_use]
     pub fn named_ops(&self) -> impl Iterator<Item = &str> {
         self.entries
             .keys()
@@ -350,7 +349,7 @@ fn parse_atom_with_table<'a>(
     {
         let trimmed = input.trim_start();
         let mut candidates: Vec<(&str, &SymbolKind)> = table.unary_ops().collect();
-        candidates.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
         for (prefix, kind) in candidates {
             if let Some(after) = trimmed.strip_prefix(prefix) {
                 // For single-char prefixes accept any position; for
@@ -444,7 +443,7 @@ fn parse_expr_climbing_with_table<'a>(
         let mut named_match: Option<(&str, u8, bool, &str)> = None; // (op_name, prec, ra, rem_after)
         {
             let mut candidates: Vec<&str> = table.named_ops().collect();
-            candidates.sort_by(|a, b| b.len().cmp(&a.len()));
+            candidates.sort_by_key(|b| std::cmp::Reverse(b.len()));
             for named_op in candidates {
                 if let Some(after) = trimmed.strip_prefix(named_op) {
                     // Ensure the match is a complete identifier token (not a prefix of a longer word).

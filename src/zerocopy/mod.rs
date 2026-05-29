@@ -5,30 +5,30 @@
 //! review findings in `storage_review §1` / `dag_review §3` /
 //! `ast_review §3`. This module introduces:
 //!
-//! * [`Pod`] — narrow safety marker for types whose bit-pattern may be
+//! * [`Pod`](crate::zerocopy::Pod) — narrow safety marker for types whose bit-pattern may be
 //!   reinterpreted directly from a borrowed byte slice. Implemented manually
 //!   per type; never derive it on enums or types with padding.
 //!
-//! * [`BorrowedSlice<'a, T>`] — a `&'a [T]` newtype that decodes by simply
+//! * [`BorrowedSlice<'a, T>`](crate::zerocopy::BorrowedSlice) — a `&'a [T]` newtype that decodes by simply
 //!   taking N bytes off the input buffer (`take_bytes`) without allocation.
 //!
-//! * [`BorrowedArena<'a, T>`] — single-pool arena view backed by
-//!   [`BorrowedSlice`]. DAG/AST will adopt this in T1.1 / T1.4.
+//! * [`BorrowedArena<'a, T>`](crate::zerocopy::BorrowedArena) — single-pool arena view backed by
+//!   [`BorrowedSlice`](crate::zerocopy::BorrowedSlice). DAG/AST will adopt this in T1.1 / T1.4.
 //!
-//! * [`AlignedBytes`] — a `Box<[u64]>`-backed buffer wrapping bytes whose
+//! * [`AlignedBytes`](crate::zerocopy::AlignedBytes) — a `Box<[u64]>`-backed buffer wrapping bytes whose
 //!   start is guaranteed 8-byte aligned. Use this anywhere you would
 //!   normally hand a `Vec<u8>` to `borrow_decode_from_slice`.
 //!
-//! * [`MmapBuffer`] — file-backed bytes (mmap on Linux/Windows when feature
+//! * [`MmapBuffer`](crate::zerocopy::MmapBuffer) — file-backed bytes (mmap on Linux/Windows when feature
 //!   is enabled, `std::fs::read` fallback otherwise). Exposes its bytes via
-//!   [`MmapBuffer::with_view`] so borrows cannot outlive the mapping.
+//!   [`MmapBuffer::with_view`](crate::zerocopy::MmapBuffer::with_view) so borrows cannot outlive the mapping.
 //!
 //! ## Wire format
 //!
-//! [`zerocopy_config`] forces fixed-width integer encoding so the data
+//! [`zerocopy_config`](crate::zerocopy::zerocopy_config) forces fixed-width integer encoding so the data
 //! payload starts at a known offset (`size_of::<u64>() = 8` from the start
-//! of the [`BorrowedSlice`] image). Combined with an 8-byte aligned start
-//! ([`AlignedBytes`] / mmap), this means every primitive `T: Pod` with
+//! of the [`BorrowedSlice`](crate::zerocopy::BorrowedSlice) image). Combined with an 8-byte aligned start
+//! ([`AlignedBytes`](crate::zerocopy::AlignedBytes) / mmap), this means every primitive `T: Pod` with
 //! `align_of::<T>() <= 8` is naturally aligned in the buffer.
 
 #![allow(unsafe_code)]
@@ -111,6 +111,9 @@ unsafe impl Pod for f64 {}
 ///
 /// Internally `Box<[u64]>`; we expose only its byte view. The trailing
 /// bytes (if `len % 8 != 0`) are zero-padded.
+///
+/// This is no longer used internally; it was replaced by [`AlignedBytesWriter`]
+/// when that struct became available.
 pub struct AlignedBytes {
     storage: Box<[u64]>,
     len: usize,
@@ -197,15 +200,13 @@ impl AlignedBytes {
         None // Indicate copy is needed; use from_vec below for the real logic
     }
 
-    /// Constructs from a `Vec<u8>`, copying into an aligned allocation.
+    /// Constructs from a byte slice, copying into an aligned allocation.
     ///
-    /// This is slightly cheaper than `from_slice` when the Vec's capacity
-    /// is large (avoids a second allocation), but a copy is always needed
-    /// unless the source is already aligned. For the true zero-copy path,
-    /// use [`AlignedBytesWriter`] directly.
+    /// A copy is always needed unless the source is already aligned.
+    /// For the true zero-copy path, use [`AlignedBytesWriter`] directly.
     #[must_use]
-    pub fn from_vec(v: Vec<u8>) -> Self {
-        Self::from_slice(&v)
+    pub fn from_vec(v: &[u8]) -> Self {
+        Self::from_slice(v)
     }
 
     /// Number of meaningful bytes.

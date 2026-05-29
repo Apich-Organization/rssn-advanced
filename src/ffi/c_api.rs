@@ -165,14 +165,13 @@ pub extern "C" fn rssn_dag_compile(
         let mut ctx = ctx_mutex
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match ctx.compiler_mut().compile(&ast) {
-            Ok(compiled_fn) => {
+        ctx.compiler_mut()
+            .compile(&ast)
+            .map_or(RssnStatus::CompilationError, |compiled_fn| {
                 let ptr = compiled_fn as *mut c_void;
                 unsafe { *out_fn = ptr };
                 RssnStatus::Success
-            }
-            Err(_) => RssnStatus::CompilationError,
-        }
+            })
     });
 
     result.unwrap_or(RssnStatus::Panic)
@@ -345,13 +344,10 @@ pub extern "C" fn rssn_dag_execute_v2(
             unsafe { std::mem::transmute(func) };
         compiled_fn(variables)
     });
-    match result {
-        Ok(val) => {
-            unsafe { *out_val = val };
-            RssnStatus::Success
-        }
-        Err(_) => RssnStatus::Panic,
-    }
+    result.map_or(RssnStatus::Panic, |val| {
+        unsafe { *out_val = val };
+        RssnStatus::Success
+    })
 }
 
 /// Executes a previously compiled JIT function (stub for non-JIT builds).
@@ -430,19 +426,19 @@ pub extern "C" fn rssn_dag_execute_bulk(
         // Avoids heap allocation inside the hot loop.
         if nv <= 8 {
             let mut buf = [0.0f64; 8];
-            for row in 0..n_rows {
+            for (row, out_val) in out_slice.iter_mut().enumerate() {
                 for (vi, &col) in cols.iter().enumerate() {
                     buf[vi] = unsafe { *col.add(row) };
                 }
-                out_slice[row] = compiled_fn(buf.as_ptr());
+                *out_val = compiled_fn(buf.as_ptr());
             }
         } else {
             let mut buf = vec![0.0f64; nv];
-            for row in 0..n_rows {
+            for (row, out_val) in out_slice.iter_mut().enumerate() {
                 for (vi, &col) in cols.iter().enumerate() {
                     buf[vi] = unsafe { *col.add(row) };
                 }
-                out_slice[row] = compiled_fn(buf.as_ptr());
+                *out_val = compiled_fn(buf.as_ptr());
             }
         }
         RssnStatus::Success
@@ -628,13 +624,12 @@ pub extern "C" fn rssn_dag_compile_v2(
         let mut ctx = ctx_mutex
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match ctx.compiler_mut().compile(&ast) {
-            Ok(compiled_fn) => {
+        ctx.compiler_mut()
+            .compile(&ast)
+            .map_or(RssnStatus::CompilationError, |compiled_fn| {
                 unsafe { *out_fn = compiled_fn as *mut c_void };
                 RssnStatus::Success
-            }
-            Err(_) => RssnStatus::CompilationError,
-        }
+            })
     });
     result.unwrap_or(RssnStatus::Panic)
 }
@@ -1036,17 +1031,13 @@ pub extern "C" fn rssn_dag_parse(
     let result = catch_unwind(|| -> RssnStatus {
         let b = unsafe { &mut *builder };
         let c_str = unsafe { CStr::from_ptr(expr) };
-        let s = match c_str.to_str() {
-            Ok(s) => s,
-            Err(_) => return RssnStatus::InvalidUtf8,
+        let Ok(s) = c_str.to_str() else {
+            return RssnStatus::InvalidUtf8;
         };
-        match crate::parser::expr::parse_expression(s, b) {
-            Ok(root_id) => {
-                unsafe { *out_id = root_id.value() };
-                RssnStatus::Success
-            }
-            Err(_) => RssnStatus::ParseError,
-        }
+        crate::parser::expr::parse_expression(s, b).map_or(RssnStatus::ParseError, |root_id| {
+            unsafe { *out_id = root_id.value() };
+            RssnStatus::Success
+        })
     });
     result.unwrap_or(RssnStatus::Panic)
 }
@@ -1075,9 +1066,8 @@ pub extern "C" fn rssn_dag_intern_function(builder: *mut DagBuilder, name: *cons
     catch_unwind(|| {
         let b = unsafe { &mut *builder };
         let c_str = unsafe { CStr::from_ptr(name) };
-        let s = match c_str.to_str() {
-            Ok(s) => s,
-            Err(_) => return u32::MAX,
+        let Ok(s) = c_str.to_str() else {
+            return u32::MAX;
         };
         b.intern_function(s).0
     })
@@ -1338,7 +1328,7 @@ pub struct RssnOptConfig;
 ///
 /// # Safety
 ///
-/// - `ctx` must be a valid, non-null pointer from [`rssn_jit_context_new`].
+/// - `ctx` must be a valid, non-null pointer from [`rssn_jit_context_new`](crate::ffi::jit_context::rssn_jit_context_new).
 /// - `builder` must be a valid, non-null pointer from [`rssn_dag_new`].
 /// - `out_fn` must be a valid, non-null writable pointer.
 /// - If `opts` is non-null it must point to a valid [`RssnOptConfig`].
@@ -1376,13 +1366,13 @@ pub extern "C" fn rssn_dag_compile_with_opts(
             }
         };
 
-        match ctx_ref.compiler_mut().compile_with_opts(&ast, &jit_opts) {
-            Ok(compiled_fn) => {
+        ctx_ref
+            .compiler_mut()
+            .compile_with_opts(&ast, &jit_opts)
+            .map_or(RssnStatus::CompilationError, |compiled_fn| {
                 unsafe { *out_fn = compiled_fn as *mut c_void };
                 RssnStatus::Success
-            }
-            Err(_) => RssnStatus::CompilationError,
-        }
+            })
     }));
     result.unwrap_or(RssnStatus::Panic)
 }
@@ -3056,13 +3046,12 @@ pub extern "C" fn rssn_dag_compile_with_custom_ops(
         ctx.compiler_mut()
             .set_custom_op_registry(Arc::clone(&reg_ref.0));
 
-        match ctx.compiler_mut().compile(&ast) {
-            Ok(f) => {
+        ctx.compiler_mut()
+            .compile(&ast)
+            .map_or(RssnStatus::CompilationError, |f| {
                 unsafe { *out_fn = f as *mut c_void };
                 RssnStatus::Success
-            }
-            Err(_) => RssnStatus::CompilationError,
-        }
+            })
     }));
     result.unwrap_or(RssnStatus::Panic)
 }
