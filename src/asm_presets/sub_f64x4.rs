@@ -52,9 +52,6 @@ pub fn apply(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
         // SAFETY: lengths checked above; NEON is mandatory on AArch64.
         unsafe {
             use core::arch::asm;
-            let mut lhs_ptr = lhs.as_ptr();
-            let mut rhs_ptr = rhs.as_ptr();
-            let mut out_ptr = out.as_mut_ptr();
             asm!(
                 "ld1 {{v0.2d}}, [{lhs}], #16",
                 "ld1 {{v1.2d}}, [{rhs}], #16",
@@ -64,9 +61,9 @@ pub fn apply(lhs: &[f64], rhs: &[f64], out: &mut [f64]) {
                 "fsub v2.2d, v2.2d, v3.2d",
                 "st1 {{v0.2d}}, [{out}], #16",
                 "st1 {{v2.2d}}, [{out}]",
-                lhs = inout(reg) lhs_ptr,
-                rhs = inout(reg) rhs_ptr,
-                out = inout(reg) out_ptr,
+                lhs = in(reg) lhs.as_ptr(),
+                rhs = in(reg) rhs.as_ptr(),
+                out = in(reg) out.as_mut_ptr(),
                 out("v0") _, out("v1") _,
                 out("v2") _, out("v3") _,
                 options(nostack, preserves_flags),
