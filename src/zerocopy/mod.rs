@@ -111,6 +111,9 @@ unsafe impl Pod for f64 {}
 ///
 /// Internally `Box<[u64]>`; we expose only its byte view. The trailing
 /// bytes (if `len % 8 != 0`) are zero-padded.
+///
+/// This is no longer used internally; it was replaced by [`AlignedBytesWriter`]
+/// when that struct became available.
 pub struct AlignedBytes {
     storage: Box<[u64]>,
     len: usize,

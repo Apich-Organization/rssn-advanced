@@ -96,35 +96,15 @@ pub fn apply(lhs: u64, rhs: u64) -> (u64, u64) {
             let out: uint64x2_t;
 
             if has_aes {
-                #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
                 asm!(
+                    ".arch_extension aes",
                     "aese {v_state:v}.16b, {v_rkey:v}.16b",
                     "aesmc {v_state:v}.16b, {v_state:v}.16b",
                     v_state = inout(vreg) state => out,
                     v_rkey = in(vreg) rkey,
-                    options(nostack, pure, nomem, preserves_flags),
-                );
-                #[cfg(all(target_arch = "aarch64", not(target_feature = "aes")))]
-                asm!(
-                    "eor {v_state:v}.16b, {v_state:v}.16b, {v_rkey:v}.16b",
-                    "rev64 {v_tmp:v}.16b, {v_state:v}.16b",
-                    "ext {v_state:v}.16b, {v_state:v}.16b, {v_state:v}.16b, #8",
-                    "eor {v_state:v}.16b, {v_state:v}.16b, {v_tmp:v}.16b",
-                    v_state = inout(vreg) state => out,
-                    v_rkey = in(vreg) rkey,
-                    v_tmp = out(vreg) _,
                     options(nostack, pure, nomem, preserves_flags),
                 );
             } else {
-                #[cfg(all(target_arch = "aarch64", target_feature = "aes"))]
-                asm!(
-                    "aese {v_state:v}.16b, {v_rkey:v}.16b",
-                    "aesmc {v_state:v}.16b, {v_state:v}.16b",
-                    v_state = inout(vreg) state => out,
-                    v_rkey = in(vreg) rkey,
-                    options(nostack, pure, nomem, preserves_flags),
-                );
-                #[cfg(all(target_arch = "aarch64", not(target_feature = "aes")))]
                 asm!(
                     "eor {v_state:v}.16b, {v_state:v}.16b, {v_rkey:v}.16b",
                     "rev64 {v_tmp:v}.16b, {v_state:v}.16b",
