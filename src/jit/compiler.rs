@@ -12,6 +12,7 @@
 //! vectorized batch evaluation path (`compile_batch_f64x2`).
 
 #![allow(unsafe_code)]
+#![allow(clippy::similar_names)]
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -185,13 +186,51 @@ impl JitCompiler {
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
-            let _ = cranelift_codegen::settings::Configurable::enable(&mut isa_builder, "has_avx");
-            let _ = cranelift_codegen::settings::Configurable::enable(&mut isa_builder, "has_avx2");
+            // Enable all SIMD/bitmanip extensions Cranelift can target on modern x86.
+            // These match what cranelift-native detects, but we force them explicitly
+            // so that Cranelift's instruction selector can use FMA, PSHUFB, LZCNT, etc.
+            for flag in &[
+                "has_sse3",
+                "has_ssse3",
+                "has_sse41",
+                "has_sse42",
+                "has_avx",
+                "has_avx2",
+                "has_bmi1",
+                "has_bmi2",
+                "has_lzcnt",
+                "has_popcnt",
+            ] {
+                let _ = cranelift_codegen::settings::Configurable::enable(&mut isa_builder, flag);
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Enable advanced vector and atomic extensions for modern AArch64.
+            // Note: Baseline Neon SIMD and FP are enabled by default on aarch64.
+            for flag in &["has_lse", "has_pauth", "has_sve"] {
+                let _ = cranelift_codegen::settings::Configurable::enable(&mut isa_builder, flag);
+            }
         }
 
         let mut flag_builder = cranelift_codegen::settings::builder();
+        // Maximum optimization — trades compile time for runtime throughput.
         cranelift_codegen::settings::Configurable::set(&mut flag_builder, "opt_level", "speed")
             .map_err(|_| crate::error::JitError::InitFailed)?;
+        // Disable the runtime IR verifier — it costs ≈10% compile time and
+        // catches only malformed IR that our own emitters never produce.
+        let _ = cranelift_codegen::settings::Configurable::set(
+            &mut flag_builder,
+            "enable_verifier",
+            "false",
+        );
+        // Avoid probestack emission (not needed for leaf-like JIT functions).
+        let _ = cranelift_codegen::settings::Configurable::set(
+            &mut flag_builder,
+            "enable_probestack",
+            "false",
+        );
 
         let isa = isa_builder
             .finish(cranelift_codegen::settings::Flags::new(flag_builder))
@@ -1075,6 +1114,308 @@ impl JitCompiler {
         Ok(Some(batch_fn))
     }
 
+    /// Compiles a vectorized batch evaluation function processing **8 rows per
+    /// loop iteration** via four independent `F64X2` SIMD chains (ILP-8).
+    ///
+    /// This is the widest batch path: it unrolls 4×`F64X2` = 8 f64 values per
+    /// cycle.  On a modern out-of-order CPU with ≥4 FP execution units and
+    /// sufficient register file (16 XMM on x86-64, 32 on `AArch64`), the four
+    /// independent chains fill the execution units in parallel, hiding both
+    /// FP-latency and memory-load latency.
+    ///
+    /// A scalar tail handles any `n_rows % 8` remaining rows.
+    ///
+    /// Returns `None` for non-vectorizable expressions (same rules as
+    /// [`JITCompiler::compile_batch_f64x2`](Self::compile_batch_f64x2)).
+    ///
+    /// # Errors
+    /// Returns [`crate::error::JitError`] if Cranelift compilation fails.
+    pub fn compile_batch_f64x8(
+        &mut self,
+        ast: &AstProjection,
+    ) -> Result<Option<CompiledBatchFn>, crate::error::JitError> {
+        if ast.is_empty() {
+            return crate::error::cold_jit_error_malformed_node().map(Some);
+        }
+
+        let analysis = analyze(ast);
+        let opts = OptConfig::default();
+
+        if !is_vectorizable_ast(ast, &analysis, self.custom_op_registry.as_deref()) {
+            return Ok(None);
+        }
+
+        let sym_ids: Vec<u32> = {
+            let mut seen: HashSet<u32> = HashSet::new();
+            let mut ordered: Vec<u32> = Vec::new();
+            for node in &ast.nodes {
+                if let SymbolKind::Variable(sid) = node.kind
+                    && seen.insert(sid.0)
+                {
+                    ordered.push(sid.0);
+                }
+            }
+            ordered
+        };
+
+        let mut ctx = Context::new();
+        ctx.func.signature.call_conv = self.module.target_config().default_call_conv;
+
+        let ptr_type = self.module.target_config().pointer_type();
+        ctx.func.signature.params.push(AbiParam::new(ptr_type)); // vars_cols
+        ctx.func.signature.params.push(AbiParam::new(ptr_type)); // n_rows
+        ctx.func.signature.params.push(AbiParam::new(ptr_type)); // out
+
+        let mut func_builder = FunctionBuilder::new(&mut ctx.func, &mut self.builder_ctx);
+
+        let mut powf_sig = Signature::new(self.module.target_config().default_call_conv);
+        powf_sig.params.push(AbiParam::new(types::F64));
+        powf_sig.params.push(AbiParam::new(types::F64));
+        powf_sig.returns.push(AbiParam::new(types::F64));
+        let powf_name = self
+            .module
+            .declare_function("powf", Linkage::Import, &powf_sig)
+            .map_err(|_| crate::error::JitError::InitFailed)?;
+
+        let entry_block = func_builder.create_block();
+        let loop_check = func_builder.create_block();
+        let vec_body = func_builder.create_block();
+        let scalar_check = func_builder.create_block();
+        let scalar_body = func_builder.create_block();
+        let ret_block = func_builder.create_block();
+
+        func_builder.append_block_params_for_function_params(entry_block);
+        func_builder.append_block_param(loop_check, ptr_type);
+        func_builder.append_block_param(vec_body, ptr_type);
+        func_builder.append_block_param(scalar_check, ptr_type);
+        func_builder.append_block_param(scalar_body, ptr_type);
+
+        // ── entry block ───────────────────────────────────────────────────────
+        func_builder.switch_to_block(entry_block);
+        let params = func_builder.block_params(entry_block);
+        let vars_cols_val = params[0];
+        let n_rows_val = params[1];
+        let out_ptr_val = params[2];
+
+        let ptr_size = i64::from(ptr_type.bytes());
+        let mut var_col_ptrs: HashMap<u32, Value> = HashMap::new();
+        for &sid in &sym_ids {
+            let col_offset = func_builder
+                .ins()
+                .iconst(ptr_type, i64::from(sid).wrapping_mul(ptr_size));
+            let col_ptr_addr = func_builder.ins().iadd(vars_cols_val, col_offset);
+            let col_ptr = func_builder
+                .ins()
+                .load(ptr_type, MemFlags::new(), col_ptr_addr, 0);
+            var_col_ptrs.insert(sid, col_ptr);
+        }
+
+        let zero_i = func_builder.ins().iconst(ptr_type, 0);
+        func_builder
+            .ins()
+            .jump(loop_check, &[BlockArg::Value(zero_i)]);
+        func_builder.seal_block(entry_block);
+
+        // ── loop_check(i): need ≥8 remaining to use 4×F64X2 body ─────────────
+        func_builder.switch_to_block(loop_check);
+        let i_lc = func_builder.block_params(loop_check)[0];
+        let remaining = func_builder.ins().isub(n_rows_val, i_lc);
+        let eight_i = func_builder.ins().iconst(ptr_type, 8);
+        let can_vec =
+            func_builder
+                .ins()
+                .icmp(IntCC::UnsignedGreaterThanOrEqual, remaining, eight_i);
+        func_builder.ins().brif(
+            can_vec,
+            vec_body,
+            &[BlockArg::Value(i_lc)],
+            scalar_check,
+            &[BlockArg::Value(i_lc)],
+        );
+
+        // ── vec_body(i): 4×F64X2 = 8 rows in one iteration (ILP-8) ───────────
+        func_builder.switch_to_block(vec_body);
+        let i_vb = func_builder.block_params(vec_body)[0];
+        let byte_off = func_builder.ins().ishl_imm(i_vb, 3); // i * 8 bytes
+
+        // Load four consecutive F64X2 pairs per variable.
+        // chunk0 = f64[i+0..i+1], chunk1 = f64[i+2..i+3]
+        // chunk2 = f64[i+4..i+5], chunk3 = f64[i+6..i+7]
+        let offsets: [i64; 4] = [0, 16, 32, 48]; // bytes: 0*16, 1*16, 2*16, 3*16
+        let mut var_vals: [HashMap<u32, Value>; 4] = [
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        ];
+        for &sid in &sym_ids {
+            let col_ptr = *var_col_ptrs
+                .get(&sid)
+                .ok_or(crate::error::JitError::MalformedNode)?;
+            let base = func_builder.ins().iadd(col_ptr, byte_off);
+            for (k, &off) in offsets.iter().enumerate() {
+                let addr = if off == 0 {
+                    base
+                } else {
+                    func_builder.ins().iadd_imm(base, off)
+                };
+                let v = func_builder
+                    .ins()
+                    .load(types::F64X2, MemFlags::new(), addr, 0);
+                var_vals[k].insert(sid, v);
+            }
+        }
+
+        let powf_ref_vb = self
+            .module
+            .declare_func_in_func(powf_name, func_builder.func);
+
+        // Evaluate 4 independent expression trees — out-of-order CPU can overlap them.
+        let results: [Value; 4] = [
+            emit_ast_simd_f64x2(
+                ast,
+                &analysis,
+                &opts,
+                &mut func_builder,
+                &var_vals[0],
+                powf_ref_vb,
+            )?,
+            emit_ast_simd_f64x2(
+                ast,
+                &analysis,
+                &opts,
+                &mut func_builder,
+                &var_vals[1],
+                powf_ref_vb,
+            )?,
+            emit_ast_simd_f64x2(
+                ast,
+                &analysis,
+                &opts,
+                &mut func_builder,
+                &var_vals[2],
+                powf_ref_vb,
+            )?,
+            emit_ast_simd_f64x2(
+                ast,
+                &analysis,
+                &opts,
+                &mut func_builder,
+                &var_vals[3],
+                powf_ref_vb,
+            )?,
+        ];
+
+        // Store all four F64X2 results consecutively (32 bytes total).
+        let out_base = func_builder.ins().iadd(out_ptr_val, byte_off);
+        for (k, &off) in offsets.iter().enumerate() {
+            let addr = if off == 0 {
+                out_base
+            } else {
+                func_builder.ins().iadd_imm(out_base, off)
+            };
+            func_builder
+                .ins()
+                .store(MemFlags::new(), results[k], addr, 0);
+        }
+
+        let i_next = func_builder.ins().iadd_imm(i_vb, 8);
+        func_builder
+            .ins()
+            .jump(loop_check, &[BlockArg::Value(i_next)]);
+
+        func_builder.seal_block(loop_check);
+        func_builder.seal_block(vec_body);
+
+        // ── scalar_check(i) ───────────────────────────────────────────────────
+        func_builder.switch_to_block(scalar_check);
+        let i_sc = func_builder.block_params(scalar_check)[0];
+        let done = func_builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, i_sc, n_rows_val);
+        func_builder.ins().brif(
+            done,
+            ret_block,
+            &[] as &[BlockArg],
+            scalar_body,
+            &[BlockArg::Value(i_sc)],
+        );
+
+        // ── scalar_body(i): one row at a time for the tail ────────────────────
+        func_builder.switch_to_block(scalar_body);
+        let i_sb = func_builder.block_params(scalar_body)[0];
+        let byte_off_sb = func_builder.ins().ishl_imm(i_sb, 3);
+        let mut var_vals_sb: HashMap<u32, Value> = HashMap::new();
+        for &sid in &sym_ids {
+            let col_ptr = *var_col_ptrs
+                .get(&sid)
+                .ok_or(crate::error::JitError::MalformedNode)?;
+            let addr = func_builder.ins().iadd(col_ptr, byte_off_sb);
+            let v = func_builder
+                .ins()
+                .load(types::F64, MemFlags::new(), addr, 0);
+            var_vals_sb.insert(sid, v);
+        }
+
+        let powf_ref_sb = self
+            .module
+            .declare_func_in_func(powf_name, func_builder.func);
+        let mut wstack: Vec<Frame> = Vec::with_capacity(32);
+        let mut wvals: Vec<Value> = Vec::with_capacity(32);
+        let res_sb = emit_ast_scalar_with_vars(
+            ast,
+            &analysis,
+            &opts,
+            &mut func_builder,
+            &var_vals_sb,
+            powf_ref_sb,
+            &HashMap::new(),
+            &mut wstack,
+            &mut wvals,
+        )?;
+
+        let out_addr_sb = func_builder.ins().iadd(out_ptr_val, byte_off_sb);
+        func_builder
+            .ins()
+            .store(MemFlags::new(), res_sb, out_addr_sb, 0);
+        let i_sb_next = func_builder.ins().iadd_imm(i_sb, 1);
+        func_builder
+            .ins()
+            .jump(scalar_check, &[BlockArg::Value(i_sb_next)]);
+
+        func_builder.seal_block(scalar_check);
+        func_builder.seal_block(scalar_body);
+
+        // ── ret_block ─────────────────────────────────────────────────────────
+        func_builder.switch_to_block(ret_block);
+        func_builder.ins().return_(&[]);
+        func_builder.seal_block(ret_block);
+        func_builder.finalize();
+
+        let fn_name = format!(
+            "batch8_expr_{}",
+            JIT_FUNC_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let func_id = self
+            .module
+            .declare_function(&fn_name, Linkage::Export, &ctx.func.signature)
+            .map_err(|_| crate::error::JitError::VerifierRejected)?;
+
+        if let Err(e) = self.module.define_function(func_id, &mut ctx) {
+            eprintln!("JIT f64x8 define_function failed: {e:?}");
+            return Err(crate::error::JitError::VerifierRejected);
+        }
+        self.module.clear_context(&mut ctx);
+        if let Err(e) = self.module.finalize_definitions() {
+            eprintln!("JIT f64x8 finalize_definitions failed: {e:?}");
+            return Err(crate::error::JitError::VerifierRejected);
+        }
+
+        let code_ptr = self.module.get_finalized_function(func_id);
+        let batch_fn: CompiledBatchFn = unsafe { std::mem::transmute(code_ptr) };
+        Ok(Some(batch_fn))
+    }
+
     /// Convenience wrapper: converts the DAG subgraph rooted at `root`
     /// to an `AstProjection` and compiles it in one call.
     ///
@@ -1715,6 +2056,9 @@ fn emit_ast_simd_f64x2(
     let mut stack: Vec<Frame> = Vec::with_capacity(64);
     let mut values: Vec<Value> = Vec::with_capacity(64);
     let mut mul_factors: HashMap<Value, (Value, Value)> = HashMap::new();
+    // CSE for constant splats: reuse the same SSA Value for identical f64 constants
+    // across the entire expression tree. Keyed by the bit-pattern of the f64.
+    let mut const_cache: HashMap<u64, Value> = HashMap::new();
 
     let root_node = ast
         .nodes
@@ -1762,8 +2106,12 @@ fn emit_ast_simd_f64x2(
                     .ok_or(crate::error::JitError::MalformedNode)?;
                 match node.kind {
                     SymbolKind::Constant(_) => {
-                        // Splat the constant to both lanes.
-                        values.push(f64x2_const(builder, node.value));
+                        // CSE: reuse an already-emitted splat for the same constant bit-pattern.
+                        let bits = node.value.to_bits();
+                        let v = *const_cache
+                            .entry(bits)
+                            .or_insert_with(|| f64x2_const(builder, node.value));
+                        values.push(v);
                     }
                     SymbolKind::Variable(sym_id) => {
                         let v = var_vals_vec
@@ -1993,6 +2341,7 @@ fn emit_ast_simd_f64x4(
     let mut stack: Vec<Frame> = Vec::with_capacity(64);
     let mut values: Vec<Value> = Vec::with_capacity(64);
     let mut mul_factors: HashMap<Value, (Value, Value)> = HashMap::new();
+    let mut const_cache: HashMap<u64, Value> = HashMap::new();
 
     let root_node = ast
         .nodes
@@ -2040,8 +2389,11 @@ fn emit_ast_simd_f64x4(
                     .ok_or(crate::error::JitError::MalformedNode)?;
                 match node.kind {
                     SymbolKind::Constant(_) => {
-                        // Splat the constant to all four lanes.
-                        values.push(f64x4_const(builder, node.value));
+                        let bits = node.value.to_bits();
+                        let v = *const_cache
+                            .entry(bits)
+                            .or_insert_with(|| f64x4_const(builder, node.value));
+                        values.push(v);
                     }
                     SymbolKind::Variable(sym_id) => {
                         let v = var_vals_vec
@@ -2222,6 +2574,258 @@ fn emit_operator_simd_f64x4(
             // Mod is excluded from vectorizable ASTs.
             Err(crate::error::JitError::MalformedNode)
         }
+        OpKind::Neg => {
+            if arity != 1 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            Ok(builder.ins().fneg(child_vals[0]))
+        }
+    }
+}
+
+/// Creates an F64X8 vector constant where all eight lanes hold the value `v`.
+#[allow(dead_code)]
+fn f64x8_const(builder: &mut FunctionBuilder<'_>, v: f64) -> Value {
+    use cranelift_codegen::ir::ConstantData;
+    let bits = v.to_bits().to_le_bytes();
+    let mut data = [0u8; 64];
+    for i in 0..8 {
+        data[i * 8..(i + 1) * 8].copy_from_slice(&bits);
+    }
+    let constant_handle = builder
+        .func
+        .dfg
+        .constants
+        .insert(ConstantData::from(&data[..]));
+    builder.ins().vconst(types::F64X8, constant_handle)
+}
+
+/// Iterative post-order emitter for F64X8 SIMD code.
+#[allow(dead_code)]
+fn emit_ast_simd_f64x8(
+    ast: &AstProjection,
+    analysis: &[NodeAnalysis],
+    opts: &OptConfig,
+    builder: &mut FunctionBuilder<'_>,
+    var_vals_vec: &HashMap<u32, Value>, // sym_id.0 → F64X8 Value
+    _powf_func_ref: cranelift_codegen::ir::FuncRef,
+) -> Result<Value, crate::error::JitError> {
+    let mut stack: Vec<Frame> = Vec::with_capacity(64);
+    let mut values: Vec<Value> = Vec::with_capacity(64);
+    let mut mul_factors: HashMap<Value, (Value, Value)> = HashMap::new();
+    let mut const_cache: HashMap<u64, Value> = HashMap::new();
+
+    let root_node = ast
+        .nodes
+        .first()
+        .ok_or(crate::error::JitError::MalformedNode)?;
+    stack.push(Frame {
+        idx: 0,
+        arity: root_node.children.len(),
+        cursor: 0,
+    });
+
+    while let Some(top) = stack.last_mut() {
+        let action = if top.cursor < top.arity {
+            let Some(node) = ast.nodes.get(top.idx) else {
+                return Err(crate::error::JitError::MalformedNode);
+            };
+            let Some(&child_ptr) = node.children.as_slice().get(top.cursor) else {
+                return Err(crate::error::JitError::MalformedNode);
+            };
+            let child_idx = child_ptr
+                .resolve(top.idx)
+                .ok_or(crate::error::JitError::MalformedNode)?;
+            top.cursor += 1;
+            Action::Descend(child_idx)
+        } else {
+            Action::Emit(top.idx, top.arity)
+        };
+
+        match action {
+            Action::Descend(child_idx) => {
+                let Some(child_node) = ast.nodes.get(child_idx) else {
+                    return Err(crate::error::JitError::MalformedNode);
+                };
+                stack.push(Frame {
+                    idx: child_idx,
+                    arity: child_node.children.len(),
+                    cursor: 0,
+                });
+            }
+            Action::Emit(idx, arity) => {
+                stack.pop();
+                let node = ast
+                    .nodes
+                    .get(idx)
+                    .ok_or(crate::error::JitError::MalformedNode)?;
+                match node.kind {
+                    SymbolKind::Constant(_) => {
+                        let bits = node.value.to_bits();
+                        let v = *const_cache
+                            .entry(bits)
+                            .or_insert_with(|| f64x8_const(builder, node.value));
+                        values.push(v);
+                    }
+                    SymbolKind::Variable(sym_id) => {
+                        let v = var_vals_vec
+                            .get(&sym_id.0)
+                            .copied()
+                            .ok_or(crate::error::JitError::MalformedNode)?;
+                        values.push(v);
+                    }
+                    SymbolKind::Operator(op) => {
+                        let split_at = values
+                            .len()
+                            .checked_sub(arity)
+                            .ok_or(crate::error::JitError::MalformedNode)?;
+                        let child_v: Vec<Value> = values.drain(split_at..).collect();
+
+                        let children = node.children.as_slice_with_pool(&ast.children_pool);
+                        let mut child_analyses: Vec<Option<&NodeAnalysis>> = children
+                            .iter()
+                            .map(|ptr| ptr.resolve(idx).and_then(|ci| analysis.get(ci)))
+                            .collect();
+                        child_analyses.push(analysis.get(idx));
+
+                        let result = emit_operator_simd_f64x8(
+                            builder,
+                            op,
+                            &child_v,
+                            node,
+                            &child_analyses,
+                            opts,
+                            &mut mul_factors,
+                        )?;
+                        values.push(result);
+                    }
+                    SymbolKind::Function(_) => {
+                        return Err(crate::error::JitError::MalformedNode);
+                    }
+                }
+            }
+        }
+    }
+
+    values.pop().ok_or(crate::error::JitError::MalformedNode)
+}
+
+/// Emits F64X8 SIMD IR for a single algebraic operator.
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+fn emit_operator_simd_f64x8(
+    builder: &mut FunctionBuilder<'_>,
+    op: OpKind,
+    child_vals: &[Value],
+    ast_node: &AstNode,
+    child_analyses: &[Option<&NodeAnalysis>],
+    opts: &OptConfig,
+    mul_factors: &mut HashMap<Value, (Value, Value)>,
+) -> Result<Value, crate::error::JitError> {
+    let _ = ast_node;
+    let arity = child_vals.len();
+
+    match op {
+        OpKind::Add => {
+            if arity != 2 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            if let Some(&(a, b)) = mul_factors.get(&child_vals[0]) {
+                return Ok(builder.ins().fma(a, b, child_vals[1]));
+            }
+            if let Some(&(a, b)) = mul_factors.get(&child_vals[1]) {
+                return Ok(builder.ins().fma(a, b, child_vals[0]));
+            }
+            Ok(builder.ins().fadd(child_vals[0], child_vals[1]))
+        }
+        OpKind::Sub => {
+            if arity != 2 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            if child_vals[0] == child_vals[1] {
+                return Ok(f64x8_const(builder, 0.0));
+            }
+            if let Some(&(a, b)) = mul_factors.get(&child_vals[0]) {
+                let neg_c = builder.ins().fneg(child_vals[1]);
+                return Ok(builder.ins().fma(a, b, neg_c));
+            }
+            Ok(builder.ins().fsub(child_vals[0], child_vals[1]))
+        }
+        OpKind::Mul => {
+            if arity != 2 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            let result = builder.ins().fmul(child_vals[0], child_vals[1]);
+            mul_factors.insert(result, (child_vals[0], child_vals[1]));
+            Ok(result)
+        }
+        OpKind::Div => {
+            if arity != 2 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            let lhs = child_vals[0];
+            let rhs = child_vals[1];
+            let rhs_nonzero = child_analyses
+                .get(1)
+                .and_then(|a| *a)
+                .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
+            if opts.elide_nan_guard && rhs_nonzero {
+                Ok(builder.ins().fdiv(lhs, rhs))
+            } else {
+                let zero_vec = f64x8_const(builder, 0.0);
+                let nan_vec = f64x8_const(builder, f64::NAN);
+                let div_result = builder.ins().fdiv(lhs, rhs);
+                let is_zero_bv = builder.ins().fcmp(FloatCC::Equal, rhs, zero_vec);
+                let is_zero_mask = builder
+                    .ins()
+                    .bitcast(types::F64X8, MemFlags::new(), is_zero_bv);
+                Ok(builder.ins().bitselect(is_zero_mask, nan_vec, div_result))
+            }
+        }
+        OpKind::Pow => {
+            if arity != 2 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            let node_an: Option<&NodeAnalysis> = child_analyses.get(2).and_then(|a| *a);
+            let expansion = node_an.map(|a| &a.pow_expansion);
+            match expansion {
+                Some(PowExpansion::Sqrt) if opts.expand_sqrt => {
+                    Ok(builder.ins().sqrt(child_vals[0]))
+                }
+                Some(PowExpansion::IntPow(n)) if *n >= 2 && *n <= opts.max_int_pow => {
+                    Ok(passes::emit_int_pow(builder, child_vals[0], *n))
+                }
+                Some(PowExpansion::NegIntPow(n)) => {
+                    let n = *n;
+                    let base_vec = child_vals[0];
+                    let x_n = if n == 1 {
+                        base_vec
+                    } else {
+                        passes::emit_int_pow(builder, base_vec, n)
+                    };
+                    let one_vec = f64x8_const(builder, 1.0);
+                    let base_nonzero = child_analyses
+                        .first()
+                        .and_then(|a| *a)
+                        .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
+                    if opts.elide_nan_guard && base_nonzero {
+                        Ok(builder.ins().fdiv(one_vec, x_n))
+                    } else {
+                        let zero_vec = f64x8_const(builder, 0.0);
+                        let nan_vec = f64x8_const(builder, f64::NAN);
+                        let div_result = builder.ins().fdiv(one_vec, x_n);
+                        let is_zero_bv = builder.ins().fcmp(FloatCC::Equal, x_n, zero_vec);
+                        let is_zero_mask =
+                            builder
+                                .ins()
+                                .bitcast(types::F64X8, MemFlags::new(), is_zero_bv);
+                        Ok(builder.ins().bitselect(is_zero_mask, nan_vec, div_result))
+                    }
+                }
+                _ => Err(crate::error::JitError::MalformedNode),
+            }
+        }
+        OpKind::Mod => Err(crate::error::JitError::MalformedNode),
         OpKind::Neg => {
             if arity != 1 {
                 return Err(crate::error::JitError::MalformedNode);

@@ -1093,6 +1093,36 @@ RssnStatus rssn_dag_compile_batch_f64x4(DagBuilder *aBuilder,
 
 #if defined(RSSNADV_CRANELIFT_JIT)
 /*
+ Compiles a vectorized batch evaluation function processing 8 rows per
+ loop iteration via four independent `F64X2` SIMD chains (ILP-8).
+
+ Same calling convention as [`rssn_dag_compile_batch`]; use
+ [`rssn_dag_execute_batch`] to dispatch the returned function pointer.
+
+ # Safety
+
+ Same as [`rssn_dag_compile`].
+ */
+
+RssnStatus rssn_dag_compile_batch_f64x8(DagBuilder *aBuilder,
+                                        uint32_t aRoot,
+                                        void **aOutFn)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds.
+ */
+
+RssnStatus rssn_dag_compile_batch_f64x8(DagBuilder *aBuilder,
+                                        uint32_t aRoot,
+                                        void **aOutFn)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
  JIT compiles a target expression. Status-returning variant.
 
  On `Success`, writes the compiled function pointer to `*out_fn`.
@@ -1427,6 +1457,52 @@ RssnStatus rssn_dag_execute_batch(const void *aBatchFn,
                                   const double *const *aVarsCols,
                                   size_t aNRows,
                                   double *aOut)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Dispatches a batch-compiled function over `n_rows` rows using the
+ dtact fiber runtime for multi-core parallelism.
+
+ Splits the row range into `n_workers` equal chunks (default: number of
+ logical CPUs, capped at 16) and evaluates each chunk on a separate dtact
+ fiber, then joins all fibers before returning.
+
+ **When to prefer over [`rssn_dag_execute_batch`]:**
+ - `n_rows` > ~100 000 (fiber-spawn overhead amortised)
+ - Expression is compute-heavy (many operators, not trivially vectorizable)
+ - Multiple CPU cores are available and not already saturated
+
+ **Threading model:** uses `parallel_for_each` from `src/runtime` (dtact
+ fibers, lock-free pool, ABA-safe Treiber stack — no rayon, no OS threads).
+
+ # Safety
+
+ Same as [`rssn_dag_execute_batch`]. Additionally the `vars_cols` and `out`
+ pointers must remain valid until the call returns (all fibers have joined).
+ */
+
+RssnStatus rssn_dag_execute_batch_parallel(const void *aBatchFn,
+                                           const double *const *aVarsCols,
+                                           uint32_t aNVars,
+                                           size_t aNRows,
+                                           double *aOut,
+                                           uint32_t aNWorkers)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds.
+ */
+
+RssnStatus rssn_dag_execute_batch_parallel(const void *aBatchFn,
+                                           const double *const *aVarsCols,
+                                           uint32_t aNVars,
+                                           size_t aNRows,
+                                           double *aOut,
+                                           uint32_t aNWorkers)
 ;
 #endif
 

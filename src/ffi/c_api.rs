@@ -422,11 +422,41 @@ pub extern "C" fn rssn_dag_execute_bulk(
         let cols: &[*const f64] = unsafe { std::slice::from_raw_parts(vars_cols, nv) };
         let out_slice: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(out, n_rows) };
 
+        // Prefetch distance: 16 rows × 8 bytes = 128 bytes ahead (2 cache lines).
+        // This keeps the next rows warm in L1D while computing the current one.
+        const PF: usize = 16;
+
         // Fixed stack buffer for the common case (≤ 8 variables).
         // Avoids heap allocation inside the hot loop.
         if nv <= 8 {
             let mut buf = [0.0f64; 8];
             for (row, out_val) in out_slice.iter_mut().enumerate() {
+                // Software prefetch: hint the CPU to load the column data for
+                // `row + PF` into L1D cache before we need it.
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+                    for &col in cols.iter().take(nv) {
+                        let pf_ptr = col.add(row + PF).cast::<i8>();
+                        if row + PF < n_rows {
+                            _mm_prefetch(pf_ptr, _MM_HINT_T0);
+                        }
+                    }
+                }
+                #[cfg(target_arch = "aarch64")]
+                unsafe {
+                    use std::arch::aarch64::_prefetch;
+                    use std::arch::aarch64::{_PREFETCH_LOCALITY3, _PREFETCH_READ};
+                    for &col in cols.iter().take(nv) {
+                        if row + PF < n_rows {
+                            _prefetch(
+                                col.add(row + PF) as *const i8,
+                                _PREFETCH_READ,
+                                _PREFETCH_LOCALITY3,
+                            );
+                        }
+                    }
+                }
                 for (vi, &col) in cols.iter().enumerate() {
                     buf[vi] = unsafe { *col.add(row) };
                 }
@@ -435,6 +465,15 @@ pub extern "C" fn rssn_dag_execute_bulk(
         } else {
             let mut buf = vec![0.0f64; nv];
             for (row, out_val) in out_slice.iter_mut().enumerate() {
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    use std::arch::x86_64::{_MM_HINT_T0, _mm_prefetch};
+                    for &col in cols.iter().take(nv) {
+                        if row + PF < n_rows {
+                            _mm_prefetch(col.add(row + PF).cast::<i8>(), _MM_HINT_T0);
+                        }
+                    }
+                }
                 for (vi, &col) in cols.iter().enumerate() {
                     buf[vi] = unsafe { *col.add(row) };
                 }
@@ -571,6 +610,59 @@ pub extern "C" fn rssn_dag_compile_batch_f64x4(
     RssnStatus::CompilationError
 }
 
+/// Compiles a vectorized batch evaluation function processing 8 rows per
+/// loop iteration via four independent `F64X2` SIMD chains (ILP-8).
+///
+/// Same calling convention as [`rssn_dag_compile_batch`]; use
+/// [`rssn_dag_execute_batch`] to dispatch the returned function pointer.
+///
+/// # Safety
+///
+/// Same as [`rssn_dag_compile`].
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn rssn_dag_compile_batch_f64x8(
+    builder: *mut DagBuilder,
+    root: u32,
+    out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    if builder.is_null() || out_fn.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(|| {
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+        let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
+        let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
+        let mut ctx = ctx_mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match ctx.compiler_mut().compile_batch_f64x8(&ast) {
+            Ok(Some(batch_fn)) => {
+                unsafe { *out_fn = batch_fn as *mut c_void };
+                RssnStatus::Success
+            }
+            _ => RssnStatus::CompilationError,
+        }
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Stub for non-JIT builds.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_compile_batch_f64x8(
+    _builder: *mut DagBuilder,
+    _root: u32,
+    _out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
 /// Dispatches a batch-compiled function over `n_rows` rows.
 ///
 /// `vars_cols` is an array of column pointers (one per variable, each of
@@ -610,6 +702,143 @@ pub extern "C" fn rssn_dag_execute_batch(
     _vars_cols: *const *const f64,
     _n_rows: usize,
     _out: *mut f64,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
+/// Helper wrapper to safely send raw column pointers and output pointer
+/// across fiber boundaries in the parallel evaluator.
+struct SendRaw {
+    col_ptrs: Vec<*const f64>,
+    out_ptr: *mut f64,
+}
+
+// SAFETY: The FFI caller guarantees that all pointer columns and the output
+// pointer remain valid for the duration of the call, and each worker fiber
+// writes to a disjoint sub-slice of `out_ptr`.
+unsafe impl Send for SendRaw {}
+unsafe impl Sync for SendRaw {}
+
+/// Dispatches a batch-compiled function over `n_rows` rows using the
+/// dtact fiber runtime for multi-core parallelism.
+///
+/// Splits the row range into `n_workers` equal chunks (default: number of
+/// logical CPUs, capped at 16) and evaluates each chunk on a separate dtact
+/// fiber, then joins all fibers before returning.
+///
+/// **When to prefer over [`rssn_dag_execute_batch`]:**
+/// - `n_rows` > ~100 000 (fiber-spawn overhead amortised)
+/// - Expression is compute-heavy (many operators, not trivially vectorizable)
+/// - Multiple CPU cores are available and not already saturated
+///
+/// **Threading model:** uses `parallel_for_each` from `src/runtime` (dtact
+/// fibers, lock-free pool, ABA-safe Treiber stack — no rayon, no OS threads).
+///
+/// # Safety
+///
+/// Same as [`rssn_dag_execute_batch`]. Additionally the `vars_cols` and `out`
+/// pointers must remain valid until the call returns (all fibers have joined).
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn rssn_dag_execute_batch_parallel(
+    batch_fn: *const c_void,
+    vars_cols: *const *const f64,
+    n_vars: u32,
+    n_rows: usize,
+    out: *mut f64,
+    n_workers: u32, // 0 = auto-detect (logical CPUs, capped at 16)
+) -> RssnStatus {
+    if batch_fn.is_null() || vars_cols.is_null() || out.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if n_rows == 0 {
+        return RssnStatus::Success;
+    }
+
+    let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let f: crate::jit::compiler::CompiledBatchFn = unsafe { std::mem::transmute(batch_fn) };
+        let nv = n_vars as usize;
+
+        // Number of workers: auto or caller-supplied, capped at 16.
+        let workers: usize = if n_workers == 0 {
+            std::thread::available_parallelism()
+                .map_or(4, std::num::NonZero::get)
+                .min(16)
+        } else {
+            (n_workers as usize).min(16)
+        };
+
+        // Only parallelise if the overhead is worth it (≥8 rows per worker).
+        let workers = workers.min(n_rows / 8).max(1);
+
+        // Partition row range into contiguous slices.
+        let chunk = n_rows.div_ceil(workers);
+
+        let gate = crate::runtime::ensure_runtime();
+
+        // Build tasks: each captures its own slice bounds and calls the JIT
+        // function directly on its sub-slice of vars_cols / out.
+        // SAFETY contract for the captured raw pointers:
+        //   • `vars_cols` points to `nv` column pointers, each of length
+        //     `n_rows` — slices stay within bounds.
+        //   • `out` is `n_rows` writable f64 values — each worker writes
+        //     into a unique, non-overlapping slice (row_start..row_end).
+        //   • The caller promises both live until this function returns;
+        //     all fibers are joined before we exit.
+        let tasks: Vec<_> = (0..workers)
+            .map(|w| {
+                let row_start = w * chunk;
+                let row_end = (row_start + chunk).min(n_rows);
+                let slice_len = row_end - row_start;
+
+                // Build offset column pointer array on the stack (up to 16 vars).
+                // Each pointer is advanced by row_start so the JIT function sees
+                // a 0-based sub-array of length slice_len.
+                // We heap-allocate to satisfy 'static closure requirements.
+                let col_ptrs: Vec<*const f64> = (0..nv)
+                    .map(|vi| unsafe {
+                        let col = *vars_cols.add(vi);
+                        col.add(row_start)
+                    })
+                    .collect();
+                let out_ptr: *mut f64 = unsafe { out.add(row_start) };
+
+                let data = SendRaw { col_ptrs, out_ptr };
+
+                move || {
+                    let d = data;
+                    // Mask all SSE floating point exceptions (0x1f80 sets IM, DM, ZM, OM, UM, PM mask bits)
+                    // to prevent SIGFPE traps on inexact or division-by-zero results in fibers.
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        #[allow(deprecated)]
+                        use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+                        #[allow(deprecated)]
+                        _mm_setcsr(_mm_getcsr() | 0x1f80);
+                    }
+                    let cols_ptr = d.col_ptrs.as_ptr();
+                    f(cols_ptr, slice_len, d.out_ptr);
+                }
+            })
+            .collect();
+
+        crate::runtime::parallel_for_each(gate, tasks);
+        RssnStatus::Success
+    }));
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Stub for non-JIT builds.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_execute_batch_parallel(
+    _batch_fn: *const c_void,
+    _vars_cols: *const *const f64,
+    _n_vars: u32,
+    _n_rows: usize,
+    _out: *mut f64,
+    _n_workers: u32,
 ) -> RssnStatus {
     RssnStatus::CompilationError
 }
