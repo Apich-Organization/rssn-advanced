@@ -434,7 +434,24 @@ mod jit_props {
                     let diff = (out[i] - scalar_results[i]).abs();
                     prop_assert!(
                         diff <= scalar_results[i].abs() * 1e-13 + 1e-13,
-                        "batch[{i}]={} vs scalar={}", out[i], scalar_results[i]
+                        "batch_f64x2[{i}]={} vs scalar={}", out[i], scalar_results[i]
+                    );
+                }
+            }
+
+            if let Ok(Some(batch_f)) = compiler.compile_batch_f64x4(&ast) {
+                // Column-major layout: col0 = xs, col1 = ys.
+                let x_col = xs.as_slice();
+                let y_col = ys.as_slice();
+                let col_ptrs = [x_col.as_ptr(), y_col.as_ptr()];
+                let mut out = vec![0.0f64; n];
+                batch_f(col_ptrs.as_ptr(), n, out.as_mut_ptr());
+
+                for i in 0..n {
+                    let diff = (out[i] - scalar_results[i]).abs();
+                    prop_assert!(
+                        diff <= scalar_results[i].abs() * 1e-13 + 1e-13,
+                        "batch_f64x4[{i}]={} vs scalar={}", out[i], scalar_results[i]
                     );
                 }
             }

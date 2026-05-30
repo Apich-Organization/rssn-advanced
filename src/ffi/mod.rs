@@ -66,8 +66,10 @@ pub use c_api::{
     rssn_dag_call_fn, // legacy
 
     rssn_dag_call_fn_v2,
-    rssn_dag_compile,       // legacy (still returns RssnStatus)
-    rssn_dag_compile_batch, // compiles 2-row ILP-vectorised version
+    rssn_dag_compile,             // legacy (still returns RssnStatus)
+    rssn_dag_compile_batch,       // compiles 2-row ILP-vectorised version
+    rssn_dag_compile_batch_f64x4, // compiles 4-row F64X4 vectorised version
+
     // ── JIT compile / execute (canonical) ───────────────────────────────
     rssn_dag_compile_v2,
     rssn_dag_constant,

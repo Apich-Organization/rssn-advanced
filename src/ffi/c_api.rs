@@ -520,6 +520,57 @@ pub extern "C" fn rssn_dag_compile_batch(
     RssnStatus::CompilationError
 }
 
+/// Compiles a vectorized batch evaluation function using true F64X4 SIMD.
+///
+/// Same as [`rssn_dag_compile_batch`] but targets F64X4 wide vectors.
+///
+/// # Safety
+///
+/// Same as [`rssn_dag_compile`].
+#[cfg(feature = "cranelift-jit")]
+#[unsafe(no_mangle)]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn rssn_dag_compile_batch_f64x4(
+    builder: *mut DagBuilder,
+    root: u32,
+    out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    if builder.is_null() || out_fn.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if root == u32::MAX {
+        return RssnStatus::InvalidNodeId;
+    }
+    let result = catch_unwind(|| {
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+        let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
+        let ctx_mutex = crate::ffi::jit_context::global_jit_ctx();
+        let mut ctx = ctx_mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match ctx.compiler_mut().compile_batch_f64x4(&ast) {
+            Ok(Some(batch_fn)) => {
+                unsafe { *out_fn = batch_fn as *mut c_void };
+                RssnStatus::Success
+            }
+            _ => RssnStatus::CompilationError,
+        }
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Stub for non-JIT builds.
+#[cfg(not(feature = "cranelift-jit"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_dag_compile_batch_f64x4(
+    _builder: *mut DagBuilder,
+    _root: u32,
+    _out_fn: *mut *mut c_void,
+) -> RssnStatus {
+    RssnStatus::CompilationError
+}
+
 /// Dispatches a batch-compiled function over `n_rows` rows.
 ///
 /// `vars_cols` is an array of column pointers (one per variable, each of

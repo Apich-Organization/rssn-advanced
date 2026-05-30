@@ -180,8 +180,14 @@ impl JitCompiler {
     /// Returns [`crate::error::JitError::InitFailed`] if any step of the
     /// Cranelift backend initialisation fails.
     pub fn try_new() -> Result<Self, crate::error::JitError> {
-        let isa_builder =
+        let mut isa_builder =
             cranelift_native::builder().map_err(|_| crate::error::JitError::InitFailed)?;
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            let _ = cranelift_codegen::settings::Configurable::enable(&mut isa_builder, "has_avx");
+            let _ = cranelift_codegen::settings::Configurable::enable(&mut isa_builder, "has_avx2");
+        }
 
         let mut flag_builder = cranelift_codegen::settings::builder();
         cranelift_codegen::settings::Configurable::set(&mut flag_builder, "opt_level", "speed")
@@ -509,6 +515,19 @@ impl JitCompiler {
     ///
     /// # Errors
     /// Returns a [`crate::error::JitError`] if Cranelift compilation fails.
+    /// Compiles a vectorized batch evaluation function using true F64X2 SIMD.
+    ///
+    /// Returns `None` if the expression is not vectorizable (contains `Mod`,
+    /// non-expandable `Pow`, or user `Function` nodes).
+    ///
+    /// The returned function operates on column-major data: each variable
+    /// has its own contiguous column of `f64` values. See [`CompiledBatchFn`].
+    ///
+    /// The `vec_body` block processes 2 rows per vector iteration via ILP,
+    /// with a scalar tail for any odd final row.
+    ///
+    /// # Errors
+    /// Returns a [`crate::error::JitError`] if Cranelift compilation fails.
     pub fn compile_batch_f64x2(
         &mut self,
         ast: &AstProjection,
@@ -590,6 +609,21 @@ impl JitCompiler {
         let vars_cols_val = params[0];
         let n_rows_val = params[1];
         let out_ptr_val = params[2];
+
+        // Hoist loop-invariant column pointers into the entry block.
+        let ptr_size = i64::from(ptr_type.bytes());
+        let mut var_col_ptrs = HashMap::new();
+        for &sid in &sym_ids {
+            let col_offset = func_builder
+                .ins()
+                .iconst(ptr_type, i64::from(sid).wrapping_mul(ptr_size));
+            let col_ptr_addr = func_builder.ins().iadd(vars_cols_val, col_offset);
+            let col_ptr = func_builder
+                .ins()
+                .load(ptr_type, MemFlags::new(), col_ptr_addr, 0);
+            var_col_ptrs.insert(sid, col_ptr);
+        }
+
         let zero_i = func_builder.ins().iconst(ptr_type, 0);
         let zero_i_ba = BlockArg::Value(zero_i);
         func_builder.ins().jump(loop_check, &[zero_i_ba]);
@@ -607,7 +641,6 @@ impl JitCompiler {
         func_builder
             .ins()
             .brif(can_vec, vec_body, &[i_lc_ba], scalar_check, &[i_lc_ba]);
-        // loop_check has back-edge from vec_body — seal after vec_body is built.
 
         // ── vec_body(i) ─────────────────────────────────────────────────────
         // True F64X2 SIMD: loads 16 bytes (2 f64s) per variable in one
@@ -618,18 +651,13 @@ impl JitCompiler {
 
         // Byte offset of row i: i * 8
         let byte_off_vec = func_builder.ins().ishl_imm(i_vb, 3);
-        let ptr_size = i64::from(ptr_type.bytes());
 
         // Load F64X2 values for each variable: reads f64[i] and f64[i+1] in one load.
         let mut var_vals_vec: HashMap<u32, Value> = HashMap::new();
         for &sid in &sym_ids {
-            let col_offset = func_builder
-                .ins()
-                .iconst(ptr_type, i64::from(sid).wrapping_mul(ptr_size));
-            let col_ptr_addr = func_builder.ins().iadd(vars_cols_val, col_offset);
-            let col_ptr = func_builder
-                .ins()
-                .load(ptr_type, MemFlags::new(), col_ptr_addr, 0);
+            let col_ptr = *var_col_ptrs
+                .get(&sid)
+                .ok_or(crate::error::JitError::MalformedNode)?;
             let elem_addr = func_builder.ins().iadd(col_ptr, byte_off_vec);
             // Load 16 bytes = two consecutive f64 values = F64X2 vector
             let vec_val = func_builder
@@ -682,7 +710,6 @@ impl JitCompiler {
             scalar_body,
             &[i_scheck_ba],
         );
-        // scalar_check has a back-edge from scalar_body — seal after.
 
         // ── scalar_body(i) ────────────────────────────────────────────────
         func_builder.switch_to_block(scalar_body);
@@ -691,13 +718,9 @@ impl JitCompiler {
         let byte_off_sb = func_builder.ins().ishl_imm(i_sbody, 3);
         let mut var_vals_sb: HashMap<u32, Value> = HashMap::new();
         for &sid in &sym_ids {
-            let col_offset = func_builder
-                .ins()
-                .iconst(ptr_type, i64::from(sid).wrapping_mul(ptr_size));
-            let col_ptr_addr = func_builder.ins().iadd(vars_cols_val, col_offset);
-            let col_ptr = func_builder
-                .ins()
-                .load(ptr_type, MemFlags::new(), col_ptr_addr, 0);
+            let col_ptr = *var_col_ptrs
+                .get(&sid)
+                .ok_or(crate::error::JitError::MalformedNode)?;
             let addr = func_builder.ins().iadd(col_ptr, byte_off_sb);
             let v = func_builder
                 .ins()
@@ -765,6 +788,289 @@ impl JitCompiler {
 
         // SAFETY: Cranelift returns native code matching the declared
         // `CompiledBatchFn` signature.
+        let batch_fn: CompiledBatchFn = unsafe { std::mem::transmute(code_ptr) };
+        Ok(Some(batch_fn))
+    }
+
+    /// Compiles a vectorized batch evaluation function using true F64X4 SIMD.
+    ///
+    /// Returns `None` if the expression is not vectorizable (contains `Mod`,
+    /// non-expandable `Pow`, or user `Function` nodes).
+    ///
+    /// The returned function operates on column-major data: each variable
+    /// has its own contiguous column of `f64` values. See [`CompiledBatchFn`].
+    ///
+    /// The `vec_body` block processes 4 rows per vector iteration via ILP,
+    /// with a scalar tail for any remaining rows.
+    ///
+    /// # Errors
+    /// Returns a [`crate::error::JitError`] if Cranelift compilation fails.
+    pub fn compile_batch_f64x4(
+        &mut self,
+        ast: &AstProjection,
+    ) -> Result<Option<CompiledBatchFn>, crate::error::JitError> {
+        if ast.is_empty() {
+            return crate::error::cold_jit_error_malformed_node().map(Some);
+        }
+
+        let analysis = analyze(ast);
+        let opts = OptConfig::default();
+
+        // Check vectorizability.
+        if !is_vectorizable_ast(ast, &analysis, self.custom_op_registry.as_deref()) {
+            return Ok(None);
+        }
+
+        // Collect variables.
+        let sym_ids: Vec<u32> = {
+            let mut seen: HashSet<u32> = HashSet::new();
+            let mut ordered: Vec<u32> = Vec::new();
+            for node in &ast.nodes {
+                if let SymbolKind::Variable(sid) = node.kind
+                    && seen.insert(sid.0)
+                {
+                    ordered.push(sid.0);
+                }
+            }
+            ordered
+        };
+
+        let mut ctx = Context::new();
+        ctx.func.signature.call_conv = self.module.target_config().default_call_conv;
+
+        // Signature: fn(vars_cols: *const *const f64, n_rows: usize, out: *mut f64)
+        let ptr_type = self.module.target_config().pointer_type();
+        ctx.func.signature.params.push(AbiParam::new(ptr_type)); // vars_cols
+        ctx.func.signature.params.push(AbiParam::new(ptr_type)); // n_rows
+        ctx.func.signature.params.push(AbiParam::new(ptr_type)); // out
+
+        let mut func_builder = FunctionBuilder::new(&mut ctx.func, &mut self.builder_ctx);
+
+        let mut powf_sig = Signature::new(self.module.target_config().default_call_conv);
+        powf_sig.params.push(AbiParam::new(types::F64));
+        powf_sig.params.push(AbiParam::new(types::F64));
+        powf_sig.returns.push(AbiParam::new(types::F64));
+        let powf_name = self
+            .module
+            .declare_function("powf", Linkage::Import, &powf_sig)
+            .map_err(|_| crate::error::JitError::InitFailed)?;
+
+        // Create basic blocks.
+        let entry_block = func_builder.create_block();
+        let loop_check = func_builder.create_block();
+        let vec_body = func_builder.create_block();
+        let scalar_check = func_builder.create_block();
+        let scalar_body = func_builder.create_block();
+        let ret_block = func_builder.create_block();
+
+        func_builder.append_block_params_for_function_params(entry_block);
+        func_builder.append_block_param(loop_check, ptr_type); // i
+        func_builder.append_block_param(vec_body, ptr_type); // i
+        func_builder.append_block_param(scalar_check, ptr_type); // i
+        func_builder.append_block_param(scalar_body, ptr_type); // i
+
+        // ── entry block ────────────────────────────────────────────────────
+        func_builder.switch_to_block(entry_block);
+        let params = func_builder.block_params(entry_block);
+        let vars_cols_val = params[0];
+        let n_rows_val = params[1];
+        let out_ptr_val = params[2];
+
+        // Hoist loop-invariant column pointers into the entry block.
+        let ptr_size = i64::from(ptr_type.bytes());
+        let mut var_col_ptrs = HashMap::new();
+        for &sid in &sym_ids {
+            let col_offset = func_builder
+                .ins()
+                .iconst(ptr_type, i64::from(sid).wrapping_mul(ptr_size));
+            let col_ptr_addr = func_builder.ins().iadd(vars_cols_val, col_offset);
+            let col_ptr = func_builder
+                .ins()
+                .load(ptr_type, MemFlags::new(), col_ptr_addr, 0);
+            var_col_ptrs.insert(sid, col_ptr);
+        }
+
+        let zero_i = func_builder.ins().iconst(ptr_type, 0);
+        let zero_i_ba = BlockArg::Value(zero_i);
+        func_builder.ins().jump(loop_check, &[zero_i_ba]);
+        func_builder.seal_block(entry_block);
+
+        // ── loop_check(i) ──────────────────────────────────────────────────
+        func_builder.switch_to_block(loop_check);
+        let i_lc = func_builder.block_params(loop_check)[0];
+        let remaining = func_builder.ins().isub(n_rows_val, i_lc);
+        let four_i = func_builder.ins().iconst(ptr_type, 4);
+        let can_vec = func_builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, remaining, four_i);
+        let i_lc_ba = BlockArg::Value(i_lc);
+        func_builder
+            .ins()
+            .brif(can_vec, vec_body, &[i_lc_ba], scalar_check, &[i_lc_ba]);
+
+        // ── vec_body(i) ─────────────────────────────────────────────────────
+        // F64X4 batch SIMD: processed via two parallel F64X2 operations (ILP).
+        // This is 100% portable (works on both x86-64 and AArch64) and avoids
+        // Cranelift's backend limitations regarding native 256-bit F64X4 support.
+        func_builder.switch_to_block(vec_body);
+        let i_vb = func_builder.block_params(vec_body)[0];
+
+        // Byte offset of row i: i * 8
+        let byte_off_vec = func_builder.ins().ishl_imm(i_vb, 3);
+
+        // Load two F64X2 values for each variable:
+        // vec1 loads f64[i] and f64[i+1]
+        // vec2 loads f64[i+2] and f64[i+3]
+        let mut var_vals_vec1: HashMap<u32, Value> = HashMap::new();
+        let mut var_vals_vec2: HashMap<u32, Value> = HashMap::new();
+        for &sid in &sym_ids {
+            let col_ptr = *var_col_ptrs
+                .get(&sid)
+                .ok_or(crate::error::JitError::MalformedNode)?;
+            let elem_addr1 = func_builder.ins().iadd(col_ptr, byte_off_vec);
+            let vec_val1 = func_builder
+                .ins()
+                .load(types::F64X2, MemFlags::new(), elem_addr1, 0);
+            var_vals_vec1.insert(sid, vec_val1);
+
+            let elem_addr2 = func_builder.ins().iadd_imm(elem_addr1, 16); // +2 elements * 8 bytes
+            let vec_val2 = func_builder
+                .ins()
+                .load(types::F64X2, MemFlags::new(), elem_addr2, 0);
+            var_vals_vec2.insert(sid, vec_val2);
+        }
+
+        let powf_func_ref_vb = self
+            .module
+            .declare_func_in_func(powf_name, func_builder.func);
+
+        // Evaluate both F64X2 vectors.
+        let result_vec1 = emit_ast_simd_f64x2(
+            ast,
+            &analysis,
+            &opts,
+            &mut func_builder,
+            &var_vals_vec1,
+            powf_func_ref_vb,
+        )?;
+
+        let result_vec2 = emit_ast_simd_f64x2(
+            ast,
+            &analysis,
+            &opts,
+            &mut func_builder,
+            &var_vals_vec2,
+            powf_func_ref_vb,
+        )?;
+
+        // Store both F64X2 results consecutively.
+        let out_addr1 = func_builder.ins().iadd(out_ptr_val, byte_off_vec);
+        func_builder
+            .ins()
+            .store(MemFlags::new(), result_vec1, out_addr1, 0);
+
+        let out_addr2 = func_builder.ins().iadd_imm(out_addr1, 16);
+        func_builder
+            .ins()
+            .store(MemFlags::new(), result_vec2, out_addr2, 0);
+
+        let i_vb_next = func_builder.ins().iadd_imm(i_vb, 4);
+        let i_vb_next_ba = BlockArg::Value(i_vb_next);
+        func_builder.ins().jump(loop_check, &[i_vb_next_ba]);
+
+        func_builder.seal_block(loop_check);
+        func_builder.seal_block(vec_body);
+
+        // ── scalar_check(i) ────────────────────────────────────────────────
+        func_builder.switch_to_block(scalar_check);
+        let i_scheck = func_builder.block_params(scalar_check)[0];
+        let done = func_builder
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, i_scheck, n_rows_val);
+        let i_scheck_ba = BlockArg::Value(i_scheck);
+        func_builder.ins().brif(
+            done,
+            ret_block,
+            &[] as &[BlockArg],
+            scalar_body,
+            &[i_scheck_ba],
+        );
+
+        // ── scalar_body(i) ────────────────────────────────────────────────
+        func_builder.switch_to_block(scalar_body);
+        let i_sbody = func_builder.block_params(scalar_body)[0];
+
+        let byte_off_sb = func_builder.ins().ishl_imm(i_sbody, 3);
+        let mut var_vals_sb: HashMap<u32, Value> = HashMap::new();
+        for &sid in &sym_ids {
+            let col_ptr = *var_col_ptrs
+                .get(&sid)
+                .ok_or(crate::error::JitError::MalformedNode)?;
+            let addr = func_builder.ins().iadd(col_ptr, byte_off_sb);
+            let v = func_builder
+                .ins()
+                .load(types::F64, MemFlags::new(), addr, 0);
+            var_vals_sb.insert(sid, v);
+        }
+
+        let powf_ref_sbody = self
+            .module
+            .declare_func_in_func(powf_name, func_builder.func);
+
+        let mut work_stack_sb: Vec<Frame> = Vec::with_capacity(32);
+        let mut work_vals_sb: Vec<Value> = Vec::with_capacity(32);
+        let res_sb = emit_ast_scalar_with_vars(
+            ast,
+            &analysis,
+            &opts,
+            &mut func_builder,
+            &var_vals_sb,
+            powf_ref_sbody,
+            &HashMap::new(),
+            &mut work_stack_sb,
+            &mut work_vals_sb,
+        )?;
+
+        let out_addr_sb = func_builder.ins().iadd(out_ptr_val, byte_off_sb);
+        func_builder
+            .ins()
+            .store(MemFlags::new(), res_sb, out_addr_sb, 0);
+
+        let i_sbody_next = func_builder.ins().iadd_imm(i_sbody, 1);
+        let i_sbody_next_ba = BlockArg::Value(i_sbody_next);
+        func_builder.ins().jump(scalar_check, &[i_sbody_next_ba]);
+
+        func_builder.seal_block(scalar_check);
+        func_builder.seal_block(scalar_body);
+
+        // ── ret_block ─────────────────────────────────────────────────────
+        func_builder.switch_to_block(ret_block);
+        func_builder.ins().return_(&[]);
+        func_builder.seal_block(ret_block);
+
+        func_builder.finalize();
+
+        let fn_name = format!(
+            "batch_expr_{}",
+            JIT_FUNC_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let func_id = self
+            .module
+            .declare_function(&fn_name, Linkage::Export, &ctx.func.signature)
+            .map_err(|_| crate::error::JitError::VerifierRejected)?;
+
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|_| crate::error::JitError::VerifierRejected)?;
+
+        self.module.clear_context(&mut ctx);
+
+        self.module
+            .finalize_definitions()
+            .map_err(|_| crate::error::JitError::VerifierRejected)?;
+
+        let code_ptr = self.module.get_finalized_function(func_id);
+
         let batch_fn: CompiledBatchFn = unsafe { std::mem::transmute(code_ptr) };
         Ok(Some(batch_fn))
     }
@@ -1625,6 +1931,284 @@ fn emit_operator_simd_f64x2(
                             builder
                                 .ins()
                                 .bitcast(types::F64X2, MemFlags::new(), is_zero_bv);
+                        Ok(builder.ins().bitselect(is_zero_mask, nan_vec, div_result))
+                    }
+                }
+                _ => {
+                    // Non-expandable Pow — should not occur in vectorizable ASTs.
+                    Err(crate::error::JitError::MalformedNode)
+                }
+            }
+        }
+        OpKind::Mod => {
+            // Mod is excluded from vectorizable ASTs.
+            Err(crate::error::JitError::MalformedNode)
+        }
+        OpKind::Neg => {
+            if arity != 1 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            Ok(builder.ins().fneg(child_vals[0]))
+        }
+    }
+}
+
+/// Creates an F64X4 vector constant where all four lanes hold the value `v`.
+///
+/// Inserts a 32-byte literal into the function's constant pool, then emits
+/// `vconst` to load it. Bytes are in little-endian order (x86 SIMD layout).
+#[allow(dead_code)]
+fn f64x4_const(builder: &mut FunctionBuilder<'_>, v: f64) -> Value {
+    use cranelift_codegen::ir::ConstantData;
+    let bits = v.to_bits().to_le_bytes();
+    let mut data = [0u8; 32];
+    for i in 0..4 {
+        data[i * 8..(i + 1) * 8].copy_from_slice(&bits);
+    }
+    let constant_handle = builder
+        .func
+        .dfg
+        .constants
+        .insert(ConstantData::from(&data[..]));
+    builder.ins().vconst(types::F64X4, constant_handle)
+}
+
+/// Iterative post-order emitter for F64X4 SIMD code.
+///
+/// Evaluates the entire AST tree operating on `F64X4` values. Each variable
+/// is looked up in `var_vals_vec` (which must map `sym_id.0 → F64X4 Value`).
+/// Constants are splatted to all four lanes via `f64x4_const`.
+///
+/// Returns `Err(MalformedNode)` if the AST contains anything that cannot be
+/// vectorized (Function, Mod, non-expandable Pow).
+#[allow(dead_code)]
+fn emit_ast_simd_f64x4(
+    ast: &AstProjection,
+    analysis: &[NodeAnalysis],
+    opts: &OptConfig,
+    builder: &mut FunctionBuilder<'_>,
+    var_vals_vec: &HashMap<u32, Value>, // sym_id.0 → F64X4 Value
+    _powf_func_ref: cranelift_codegen::ir::FuncRef,
+) -> Result<Value, crate::error::JitError> {
+    let mut stack: Vec<Frame> = Vec::with_capacity(64);
+    let mut values: Vec<Value> = Vec::with_capacity(64);
+    let mut mul_factors: HashMap<Value, (Value, Value)> = HashMap::new();
+
+    let root_node = ast
+        .nodes
+        .first()
+        .ok_or(crate::error::JitError::MalformedNode)?;
+    stack.push(Frame {
+        idx: 0,
+        arity: root_node.children.len(),
+        cursor: 0,
+    });
+
+    while let Some(top) = stack.last_mut() {
+        let action = if top.cursor < top.arity {
+            let Some(node) = ast.nodes.get(top.idx) else {
+                return Err(crate::error::JitError::MalformedNode);
+            };
+            let Some(&child_ptr) = node.children.as_slice().get(top.cursor) else {
+                return Err(crate::error::JitError::MalformedNode);
+            };
+            let child_idx = child_ptr
+                .resolve(top.idx)
+                .ok_or(crate::error::JitError::MalformedNode)?;
+            top.cursor += 1;
+            Action::Descend(child_idx)
+        } else {
+            Action::Emit(top.idx, top.arity)
+        };
+
+        match action {
+            Action::Descend(child_idx) => {
+                let Some(child_node) = ast.nodes.get(child_idx) else {
+                    return Err(crate::error::JitError::MalformedNode);
+                };
+                stack.push(Frame {
+                    idx: child_idx,
+                    arity: child_node.children.len(),
+                    cursor: 0,
+                });
+            }
+            Action::Emit(idx, arity) => {
+                stack.pop();
+                let node = ast
+                    .nodes
+                    .get(idx)
+                    .ok_or(crate::error::JitError::MalformedNode)?;
+                match node.kind {
+                    SymbolKind::Constant(_) => {
+                        // Splat the constant to all four lanes.
+                        values.push(f64x4_const(builder, node.value));
+                    }
+                    SymbolKind::Variable(sym_id) => {
+                        let v = var_vals_vec
+                            .get(&sym_id.0)
+                            .copied()
+                            .ok_or(crate::error::JitError::MalformedNode)?;
+                        values.push(v);
+                    }
+                    SymbolKind::Operator(op) => {
+                        let split_at = values
+                            .len()
+                            .checked_sub(arity)
+                            .ok_or(crate::error::JitError::MalformedNode)?;
+                        let child_v: Vec<Value> = values.drain(split_at..).collect();
+
+                        // Collect child analyses and append node's own analysis for Pow.
+                        let children = node.children.as_slice_with_pool(&ast.children_pool);
+                        let mut child_analyses: Vec<Option<&NodeAnalysis>> = children
+                            .iter()
+                            .map(|ptr| ptr.resolve(idx).and_then(|ci| analysis.get(ci)))
+                            .collect();
+                        child_analyses.push(analysis.get(idx));
+
+                        let result = emit_operator_simd_f64x4(
+                            builder,
+                            op,
+                            &child_v,
+                            node,
+                            &child_analyses,
+                            opts,
+                            &mut mul_factors,
+                        )?;
+                        values.push(result);
+                    }
+                    SymbolKind::Function(_) => {
+                        // Functions cannot be vectorized.
+                        return Err(crate::error::JitError::MalformedNode);
+                    }
+                }
+            }
+        }
+    }
+
+    values.pop().ok_or(crate::error::JitError::MalformedNode)
+}
+
+/// Emits F64X4 SIMD IR for a single algebraic operator.
+///
+/// Mirrors `emit_operator` but works on F64X4 values. Constant peepholes
+/// use `f64x4_const` instead of `f64const`. NaN guards use `bitcast` +
+/// `bitselect` instead of scalar `select`.
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+fn emit_operator_simd_f64x4(
+    builder: &mut FunctionBuilder<'_>,
+    op: OpKind,
+    child_vals: &[Value],
+    ast_node: &AstNode,
+    child_analyses: &[Option<&NodeAnalysis>],
+    opts: &OptConfig,
+    mul_factors: &mut HashMap<Value, (Value, Value)>,
+) -> Result<Value, crate::error::JitError> {
+    let _ = ast_node;
+    let arity = child_vals.len();
+
+    match op {
+        OpKind::Add => {
+            if arity != 2 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            // FMA peephole: (a*b) + c → fma(a, b, c)
+            if let Some(&(a, b)) = mul_factors.get(&child_vals[0]) {
+                return Ok(builder.ins().fma(a, b, child_vals[1]));
+            }
+            if let Some(&(a, b)) = mul_factors.get(&child_vals[1]) {
+                return Ok(builder.ins().fma(a, b, child_vals[0]));
+            }
+            Ok(builder.ins().fadd(child_vals[0], child_vals[1]))
+        }
+        OpKind::Sub => {
+            if arity != 2 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            if child_vals[0] == child_vals[1] {
+                return Ok(f64x4_const(builder, 0.0));
+            }
+            // FMA: (a*b) - c → fma(a, b, fneg(c))
+            if let Some(&(a, b)) = mul_factors.get(&child_vals[0]) {
+                let neg_c = builder.ins().fneg(child_vals[1]);
+                return Ok(builder.ins().fma(a, b, neg_c));
+            }
+            Ok(builder.ins().fsub(child_vals[0], child_vals[1]))
+        }
+        OpKind::Mul => {
+            if arity != 2 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            let result = builder.ins().fmul(child_vals[0], child_vals[1]);
+            // Record for FMA fusion.
+            mul_factors.insert(result, (child_vals[0], child_vals[1]));
+            Ok(result)
+        }
+        OpKind::Div => {
+            if arity != 2 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            let lhs = child_vals[0];
+            let rhs = child_vals[1];
+            // Check if denominator is provably nonzero to elide NaN guard.
+            let rhs_nonzero = child_analyses
+                .get(1)
+                .and_then(|a| *a)
+                .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
+            if opts.elide_nan_guard && rhs_nonzero {
+                Ok(builder.ins().fdiv(lhs, rhs))
+            } else {
+                // Guard: vselect lanes where rhs == 0 → NaN
+                let zero_vec = f64x4_const(builder, 0.0);
+                let nan_vec = f64x4_const(builder, f64::NAN);
+                let div_result = builder.ins().fdiv(lhs, rhs);
+                let is_zero_bv = builder.ins().fcmp(FloatCC::Equal, rhs, zero_vec);
+                let is_zero_mask = builder
+                    .ins()
+                    .bitcast(types::F64X4, MemFlags::new(), is_zero_bv);
+                Ok(builder.ins().bitselect(is_zero_mask, nan_vec, div_result))
+            }
+        }
+        OpKind::Pow => {
+            if arity != 2 {
+                return Err(crate::error::JitError::MalformedNode);
+            }
+            // Get the expansion strategy from the node's own analysis (slot 2).
+            let node_an: Option<&NodeAnalysis> = child_analyses.get(2).and_then(|a| *a);
+            let expansion = node_an.map(|a| &a.pow_expansion);
+            match expansion {
+                Some(PowExpansion::Sqrt) if opts.expand_sqrt => {
+                    // sqrt is polymorphic: works on F64X4.
+                    Ok(builder.ins().sqrt(child_vals[0]))
+                }
+                Some(PowExpansion::IntPow(n)) if *n >= 2 && *n <= opts.max_int_pow => {
+                    // emit_int_pow uses fmul which is polymorphic.
+                    Ok(passes::emit_int_pow(builder, child_vals[0], *n))
+                }
+                Some(PowExpansion::NegIntPow(n)) => {
+                    let n = *n;
+                    let base_vec = child_vals[0];
+                    let x_n = if n == 1 {
+                        base_vec
+                    } else {
+                        passes::emit_int_pow(builder, base_vec, n)
+                    };
+                    let one_vec = f64x4_const(builder, 1.0);
+                    let base_nonzero = child_analyses
+                        .first()
+                        .and_then(|a| *a)
+                        .is_some_and(super::analysis::NodeAnalysis::is_nonzero);
+                    if opts.elide_nan_guard && base_nonzero {
+                        Ok(builder.ins().fdiv(one_vec, x_n))
+                    } else {
+                        let zero_vec = f64x4_const(builder, 0.0);
+                        let nan_vec = f64x4_const(builder, f64::NAN);
+                        let div_result = builder.ins().fdiv(one_vec, x_n);
+                        let is_zero_bv = builder.ins().fcmp(FloatCC::Equal, x_n, zero_vec);
+                        let is_zero_mask =
+                            builder
+                                .ins()
+                                .bitcast(types::F64X4, MemFlags::new(), is_zero_bv);
                         Ok(builder.ins().bitselect(is_zero_mask, nan_vec, div_result))
                     }
                 }

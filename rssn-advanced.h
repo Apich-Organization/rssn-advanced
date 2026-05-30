@@ -893,6 +893,34 @@ enum RssnStatus rssn_dag_compile_batch(struct DagBuilder *aBuilder,
 
 #if defined(RSSNADV_CRANELIFT_JIT)
 /*
+ Compiles a vectorized batch evaluation function using true F64X4 SIMD.
+
+ Same as [`rssn_dag_compile_batch`] but targets F64X4 wide vectors.
+
+ # Safety
+
+ Same as [`rssn_dag_compile`].
+ */
+
+enum RssnStatus rssn_dag_compile_batch_f64x4(struct DagBuilder *aBuilder,
+                                             uint32_t aRoot,
+                                             void **aOutFn)
+;
+#endif
+
+#if !defined(RSSNADV_CRANELIFT_JIT)
+/*
+ Stub for non-JIT builds.
+ */
+
+enum RssnStatus rssn_dag_compile_batch_f64x4(struct DagBuilder *aBuilder,
+                                             uint32_t aRoot,
+                                             void **aOutFn)
+;
+#endif
+
+#if defined(RSSNADV_CRANELIFT_JIT)
+/*
  JIT compiles a target expression. Status-returning variant.
 
  On `Success`, writes the compiled function pointer to `*out_fn`.

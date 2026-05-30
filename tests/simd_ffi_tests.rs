@@ -3,9 +3,9 @@
 #[cfg(test)]
 mod simd_ffi_tests {
     use rssn_advanced::ffi::{
-        RssnStatus, rssn_async_join, rssn_dag_add, rssn_dag_compile, rssn_dag_constant,
-        rssn_dag_execute, rssn_dag_free, rssn_dag_new, rssn_dag_simplify, rssn_dag_simplify_async,
-        rssn_dag_variable,
+        RssnStatus, rssn_async_join, rssn_dag_add, rssn_dag_compile, rssn_dag_compile_batch,
+        rssn_dag_compile_batch_f64x4, rssn_dag_constant, rssn_dag_execute, rssn_dag_execute_batch,
+        rssn_dag_free, rssn_dag_new, rssn_dag_simplify, rssn_dag_simplify_async, rssn_dag_variable,
     };
     use rssn_advanced::simd::{batch_add, batch_add_scalar, batch_hash, batch_mul, has_avx2};
     use std::ffi::CString;
@@ -94,6 +94,64 @@ mod simd_ffi_tests {
 
         assert_eq!(status, RssnStatus::Success);
         assert_ne!(out_root, u32::MAX);
+
+        rssn_dag_free(builder);
+    }
+
+    #[test]
+    fn test_ffi_jit_batch_f64x4() {
+        let builder = rssn_dag_new();
+        assert!(!builder.is_null());
+
+        let x_name = CString::new("x").unwrap();
+        let y_name = CString::new("y").unwrap();
+
+        let x = rssn_dag_variable(builder, x_name.as_ptr());
+        let y = rssn_dag_variable(builder, y_name.as_ptr());
+        let c = rssn_dag_constant(builder, 10.0);
+
+        let add1 = rssn_dag_add(builder, x, y);
+        let add2 = rssn_dag_add(builder, add1, c);
+
+        assert_ne!(add2, u32::MAX);
+
+        let simplified = rssn_dag_simplify(builder, add2);
+        assert_ne!(simplified, u32::MAX);
+
+        let mut func_ptr_f64x2: *mut c_void = std::ptr::null_mut();
+        let status_f64x2 = rssn_dag_compile_batch(builder, simplified, &mut func_ptr_f64x2);
+
+        let mut func_ptr_f64x4: *mut c_void = std::ptr::null_mut();
+        let status_f64x4 = rssn_dag_compile_batch_f64x4(builder, simplified, &mut func_ptr_f64x4);
+
+        assert_eq!(status_f64x2, RssnStatus::Success);
+        assert_eq!(status_f64x4, RssnStatus::Success);
+        assert!(!func_ptr_f64x2.is_null());
+        assert!(!func_ptr_f64x4.is_null());
+
+        {
+            // Prepare 5 rows of data for x and y
+            let x_col = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+            let y_col = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+            let cols = vec![x_col.as_ptr(), y_col.as_ptr()];
+
+            // 1. Execute F64X2
+            let mut out_f64x2 = vec![0.0; 5];
+            let exec_status_f64x2 =
+                rssn_dag_execute_batch(func_ptr_f64x2, cols.as_ptr(), 5, out_f64x2.as_mut_ptr());
+            assert_eq!(exec_status_f64x2, RssnStatus::Success);
+
+            // 2. Execute F64X4
+            let mut out_f64x4 = vec![0.0; 5];
+            let exec_status_f64x4 =
+                rssn_dag_execute_batch(func_ptr_f64x4, cols.as_ptr(), 5, out_f64x4.as_mut_ptr());
+            assert_eq!(exec_status_f64x4, RssnStatus::Success);
+
+            // Expected values: (x + y) + 10.0
+            let expected = vec![21.0, 32.0, 43.0, 54.0, 65.0];
+            assert_eq!(out_f64x2, expected);
+            assert_eq!(out_f64x4, expected);
+        }
 
         rssn_dag_free(builder);
     }

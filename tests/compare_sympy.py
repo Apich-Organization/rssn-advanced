@@ -79,6 +79,7 @@ _sig(lib.rssn_dag_parse, [c_void_p, c_char_p, UInt32P], c_int)
 _sig(lib.rssn_dag_simplify, [c_void_p, c_uint32], c_uint32)
 _sig(lib.rssn_dag_compile, [c_void_p, c_uint32, VoidPP], c_int)
 _sig(lib.rssn_dag_compile_batch, [c_void_p, c_uint32, VoidPP], c_int)
+_sig(lib.rssn_dag_compile_batch_f64x4, [c_void_p, c_uint32, VoidPP], c_int)
 _sig(lib.rssn_dag_execute_bulk, [c_void_p, VoidPP, c_uint32, c_size_t, DoubleP], c_int)
 _sig(lib.rssn_dag_execute_batch, [c_void_p, VoidPP, c_size_t, DoubleP], c_int)
 
@@ -92,7 +93,7 @@ def col_ptrs(*arrays):
 
 def build_expr(expr_str: str):
     """Parse, simplify, and JIT-compile an expression string.
-    Returns (builder, simplified_id, scalar_fn_ptr, batch_fn_ptr_or_None).
+    Returns (builder, simplified_id, scalar_fn_ptr, batch_fn_ptr_or_None, batch_f64x4_ptr_or_None).
     """
     builder = lib.rssn_dag_new()
     root_id = ctypes.c_uint32(0)
@@ -111,7 +112,11 @@ def build_expr(expr_str: str):
     bst = lib.rssn_dag_compile_batch(builder, simp_id, ctypes.byref(batch_ptr))
     has_batch = bst == 0 and bool(batch_ptr.value)
 
-    return builder, simp_id, scalar_ptr, (batch_ptr if has_batch else None)
+    batch_f64x4_ptr = ctypes.c_void_p()
+    bst_f64x4 = lib.rssn_dag_compile_batch_f64x4(builder, simp_id, ctypes.byref(batch_f64x4_ptr))
+    has_batch_f64x4 = bst_f64x4 == 0 and bool(batch_f64x4_ptr.value)
+
+    return builder, simp_id, scalar_ptr, (batch_ptr if has_batch else None), (batch_f64x4_ptr if has_batch_f64x4 else None)
 
 
 def bench_fn(fn, warmup=2, repeats=5):
@@ -191,6 +196,24 @@ SUITE = [
         (x**2 + y**2) / (x**2 + y**2 + 1)
         + x * y * (x**2 - y**2) / (x**2 + y**2 + 1) ** 2,
     ),
+    (
+        "5. Complex degree-5 polynomial [3 vars]",
+        "x^5 - y^5 + z^5 - 5*x^3*y^2 + 5*x^2*y^3 - 5*y^3*z^2 + 5*y^2*z^3 - 5*z^3*x^2 + 5*z^2*x^3 + x*y*z*(x^2 + y^2 + z^2)",
+        3,
+        lambda xc, yc, zc: (
+            xc**5 - yc**5 + zc**5 - 5*xc**3 * yc**2 + 5*xc**2 * yc**3 - 5*yc**3 * zc**2 + 5*yc**2 * zc**3 - 5*zc**3 * xc**2 + 5*zc**2 * xc**3 + xc*yc*zc*(xc**2 + yc**2 + zc**2)
+        ),
+        x**5 - y**5 + z**5 - 5*x**3*y**2 + 5*x**2*y**3 - 5*y**3*z**2 + 5*y**2*z**3 - 5*z**3*x**2 + 5*z**2*x**3 + x*y*z*(x**2 + y**2 + z**2),
+    ),
+    (
+        "6. Positive Nested Sqrt [2 vars]",
+        "(x^2 + 1.0)^0.5 + (x^2 + y^2 + 1.0)^0.5 + (x^2 + y^2 + 2.0)^0.5",
+        2,
+        lambda xc, yc: (
+            np.sqrt(xc**2 + 1.0) + np.sqrt(xc**2 + yc**2 + 1.0) + np.sqrt(xc**2 + yc**2 + 2.0)
+        ),
+        (x**2 + 1.0)**0.5 + (x**2 + y**2 + 1.0)**0.5 + (x**2 + y**2 + 2.0)**0.5,
+    ),
 ]
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -199,7 +222,7 @@ N = 1_000_000
 
 
 def run_benchmark():
-    sep = "=" * 78
+    sep = "=" * 90
     print(sep)
     print("   RSSN-Advanced JIT vs NumPy — Bulk Evaluation Benchmark")
     print(f"   N = {N:,} rows per expression  |  5 repeats, best time reported")
@@ -219,16 +242,16 @@ def run_benchmark():
     cols_3 = col_ptrs(*[cols_data[v] for v in var_order])  # 3-var ptr array
     cols_2 = col_ptrs(*[cols_data[v] for v in var_order[:2]])  # 2-var ptr array
 
-    summary = []  # (expr_name, t_numpy, t_bulk, t_batch_or_None, speedup)
+    summary = []  # (expr_name, t_numpy, t_bulk, t_batch, t_batch_f64x4)
 
     for name, expr_str, n_vars, numpy_fn, sympy_expr in SUITE:
-        print(f"\n{'─' * 78}")
+        print(f"\n{'─' * 90}")
         print(f"  {name}")
         print(f"  {expr_str}")
-        print(f"{'─' * 78}")
+        print(f"{'─' * 90}")
 
         # ── build + compile ────────────────────────────────────────────────
-        builder, _, scalar_ptr, batch_ptr = build_expr(expr_str)
+        builder, _, scalar_ptr, batch_ptr, batch_f64x4_ptr = build_expr(expr_str)
         cols = cols_3 if n_vars == 3 else cols_2
         args = [cols_data[v] for v in var_order[:n_vars]]
 
@@ -242,7 +265,7 @@ def run_benchmark():
         t_bulk = bench_fn(rust_bulk)
         rust_bulk_out = out.copy()
 
-        # ── Rust JIT batch (vectorised, if available) ──────────────────────
+        # ── Rust JIT batch f64x2 (vectorised, if available) ────────────────
         t_batch = None
         if batch_ptr is not None:
 
@@ -251,6 +274,16 @@ def run_benchmark():
 
             t_batch = bench_fn(rust_batch)
             rust_batch_out = out.copy()
+
+        # ── Rust JIT batch f64x4 (vectorised, if available) ────────────────
+        t_batch_f64x4 = None
+        if batch_f64x4_ptr is not None:
+
+            def rust_batch_f64x4():
+                lib.rssn_dag_execute_batch(batch_f64x4_ptr, cols, N, out_p)
+
+            t_batch_f64x4 = bench_fn(rust_batch_f64x4)
+            rust_batch_f64x4_out = out.copy()
 
         # ── NumPy (vectorised, hand-optimised) ────────────────────────────
         def numpy_eval():
@@ -274,30 +307,42 @@ def run_benchmark():
         print_row("Rust JIT bulk  (scalar, Rust loop)", t_bulk, N)
         if t_batch is not None:
             print_row("Rust JIT batch (2-row ILP vectorised)", t_batch, N)
+        if t_batch_f64x4 is not None:
+            print_row("Rust JIT batch (4-row F64X4 vectorised)", t_batch_f64x4, N)
         print_row("NumPy (SIMD / C, hand-optimised)", t_numpy, N)
         print_row("SymPy lambdify → numpy backend", t_sympy_np, N)
 
         # Speedup relative to NumPy
         speedup_bulk = t_numpy / t_bulk
         speedup_batch = (t_numpy / t_batch) if t_batch is not None else None
+        speedup_batch_f64x4 = (t_numpy / t_batch_f64x4) if t_batch_f64x4 is not None else None
         faster = "faster" if speedup_bulk >= 1.0 else "slower"
-        print(f"\n  JIT bulk  vs NumPy: {speedup_bulk:5.2f}x {faster}")
+        print(f"\n  JIT bulk        vs NumPy: {speedup_bulk:5.2f}x {faster}")
         if speedup_batch is not None:
             fb = "faster" if speedup_batch >= 1.0 else "slower"
-            print(f"  JIT batch vs NumPy: {speedup_batch:5.2f}x {fb}")
+            print(f"  JIT batch f64x2 vs NumPy: {speedup_batch:5.2f}x {fb}")
+        if speedup_batch_f64x4 is not None:
+            fb_f64x4 = "faster" if speedup_batch_f64x4 >= 1.0 else "slower"
+            print(f"  JIT batch f64x4 vs NumPy: {speedup_batch_f64x4:5.2f}x {fb_f64x4}")
 
         # ── Accuracy ──────────────────────────────────────────────────────
         ref = numpy_out
         max_bulk = float(np.max(np.abs(rust_bulk_out - ref)))
         ok_bulk = max_bulk < 1e-9
         print(
-            f"\n  Accuracy  bulk  max|Δ|={max_bulk:.2e}  {'✔' if ok_bulk else '✗ MISMATCH'}"
+            f"\n  Accuracy  bulk        max|Δ|={max_bulk:.2e}  {'✔' if ok_bulk else '✗ MISMATCH'}"
         )
         if t_batch is not None:
             max_batch = float(np.max(np.abs(rust_batch_out - ref)))
             ok_batch = max_batch < 1e-9
             print(
-                f"            batch max|Δ|={max_batch:.2e}  {'✔' if ok_batch else '✗ MISMATCH'}"
+                f"            batch f64x2 max|Δ|={max_batch:.2e}  {'✔' if ok_batch else '✗ MISMATCH'}"
+            )
+        if t_batch_f64x4 is not None:
+            max_batch_f64x4 = float(np.max(np.abs(rust_batch_f64x4_out - ref)))
+            ok_batch_f64x4 = max_batch_f64x4 < 1e-9
+            print(
+                f"            batch f64x4 max|Δ|={max_batch_f64x4:.2e}  {'✔' if ok_batch_f64x4 else '✗ MISMATCH'}"
             )
 
         # ── Temp-array analysis ───────────────────────────────────────────
@@ -317,20 +362,22 @@ def run_benchmark():
         )
         print(f"  JIT: 0 intermediate arrays — all values kept in CPU registers")
 
-        summary.append((name, t_numpy, t_bulk, t_batch))
+        summary.append((name, t_numpy, t_bulk, t_batch, t_batch_f64x4))
         lib.rssn_dag_free(builder)
 
     # ── Summary table ──────────────────────────────────────────────────────
     print(f"\n{sep}")
     print("  SUMMARY: JIT speedup vs hand-optimised NumPy")
-    print(f"  {'Expression':<46}  {'bulk':>8}  {'batch':>8}")
-    print(f"  {'─' * 46}  {'─' * 8}  {'─' * 8}")
-    for name, t_np, t_bulk, t_batch in summary:
+    print(f"  {'Expression':<46}  {'bulk':>8}  {'f64x2':>8}  {'f64x4':>10}")
+    print(f"  {'─' * 46}  {'─' * 8}  {'─' * 8}  {'─' * 10}")
+    for name, t_np, t_bulk, t_batch, t_batch_f64x4 in summary:
         su_bulk = t_np / t_bulk
         su_batch = (t_np / t_batch) if t_batch is not None else None
+        su_batch_f64x4 = (t_np / t_batch_f64x4) if t_batch_f64x4 is not None else None
         label = name.split("  ")[0] if "  " in name else name
         batch_str = f"{su_batch:6.2f}x" if su_batch is not None else "  n/a  "
-        print(f"  {label:<46}  {su_bulk:6.2f}x  {batch_str}")
+        batch_f64x4_str = f"{su_batch_f64x4:8.2f}x" if su_batch_f64x4 is not None else "   n/a  "
+        print(f"  {label:<46}  {su_bulk:6.2f}x  {batch_str}  {batch_f64x4_str}")
 
     print(f"\n  Observation: speedup grows with expression complexity because")
     print(f"  NumPy's intermediate arrays overflow L2/L3 cache at N={N:,}.")
