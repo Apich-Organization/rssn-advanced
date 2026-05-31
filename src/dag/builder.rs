@@ -56,6 +56,12 @@ impl DagBuilder {
         &self.registry
     }
 
+    /// Accesses the underlying function symbol registry.
+    #[must_use]
+    pub const fn fn_registry(&self) -> &SymbolRegistry {
+        &self.fn_registry
+    }
+
     /// Accesses the underlying deduplication map.
     #[must_use]
     pub const fn dedup(&self) -> &DedupMap {
@@ -216,6 +222,65 @@ impl DagBuilder {
 
         self.dedup
             .get_or_insert(&mut self.arena, kind, hash, children_list, 1.0, flags)
+    }
+
+    /// Constructs a branchless value selection node: `select(cond, then_val, else_val)`.
+    ///
+    /// Compiles to a single Cranelift `select` instruction — no branches, no penalties.
+    /// The condition is an `f64`; any non-zero value (including NaN) is treated as `true`.
+    ///
+    /// This is ideal for masking operations inside SIMD kernels.
+    pub fn select(
+        &mut self,
+        cond: DagNodeId,
+        then_val: DagNodeId,
+        else_val: DagNodeId,
+    ) -> DagNodeId {
+        use super::symbol::CtrlKind;
+        let kind = SymbolKind::ControlFlow(CtrlKind::Select);
+        self.operator(kind, &[cond, then_val, else_val], NodeFlags::EMPTY)
+    }
+
+    /// Constructs an if-else control flow node.
+    ///
+    /// Compiles to two basic blocks and a merge (phi-node) block in Cranelift IR.
+    /// Unlike `select`, this correctly handles expressions with divergent branches
+    /// (e.g. early return patterns).
+    ///
+    /// - `cond`: condition (f64; non-zero = true).
+    /// - `then_expr`: value when condition is true.
+    /// - `else_expr`: value when condition is false.
+    pub fn if_else(
+        &mut self,
+        cond: DagNodeId,
+        then_expr: DagNodeId,
+        else_expr: DagNodeId,
+    ) -> DagNodeId {
+        use super::symbol::CtrlKind;
+        let kind = SymbolKind::ControlFlow(CtrlKind::IfElse);
+        self.operator(kind, &[cond, then_expr, else_expr], NodeFlags::EMPTY)
+    }
+
+    /// Constructs a counted for-loop accumulator node.
+    ///
+    /// Compiles to a loop header, loop body, and loop exit block in Cranelift IR
+    /// using SSA block parameters to carry the accumulator across iterations.
+    ///
+    /// - `init`: initial accumulator value.
+    /// - `limit`: loop runs while `loop_idx < limit` (exclusive upper bound).
+    /// - `step`: loop index is incremented by `step` each iteration.
+    /// - `body`: expression evaluated each iteration; may reference the current
+    ///    loop index and accumulator via `LoopVar`/`Acc` special variables.
+    pub fn for_loop(
+        &mut self,
+        init: DagNodeId,
+        limit: DagNodeId,
+        step: DagNodeId,
+        body: DagNodeId,
+    ) -> DagNodeId {
+        use super::symbol::CtrlKind;
+        let kind = SymbolKind::ControlFlow(CtrlKind::ForLoop);
+        self.operator(kind, &[init, limit, step, body], NodeFlags::EMPTY)
     }
 
     /// Resets the builder to a completely fresh state.

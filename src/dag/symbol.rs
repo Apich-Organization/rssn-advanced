@@ -127,13 +127,42 @@ pub enum OpKind {
     Neg = 6,
 }
 
+/// The kind of a control-flow node in the DAG/AST.
+///
+/// These are emitted as multi-basic-block Cranelift IR sequences rather
+/// than single instructions, so they live in a separate enum from `OpKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Encode, Decode)]
+pub enum CtrlKind {
+    /// Branchless value selection: `Select(cond, then_val, else_val)`.
+    ///
+    /// The condition is the first child (`f64`, 0.0 = false, non-zero = true).
+    /// Emits a Cranelift `select` or `fselect` instruction.
+    /// Children: `[cond: f64, then_val: f64, else_val: f64]`.
+    Select,
+    /// If-else block: `If(cond, then_expr, else_expr)`.
+    ///
+    /// Compiles to two basic blocks with a common merge block (phi-like).
+    /// Children: `[cond: f64, then_expr: f64, else_expr: f64]`.
+    IfElse,
+    /// Loop accumulator: `ForLoop(init, limit, step, body)`.
+    ///
+    /// Compiles to a Cranelift loop with SSA block parameters carrying the
+    /// accumulator value across iterations. Children:
+    /// - `[init: f64, limit_exclusive: f64, step: f64, body_per_iter_expr: f64]`.
+    ///
+    /// The body expression may reference the special `LoopVar` and `Acc`
+    /// function IDs exposed via `DagBuilder::loop_var_id()` and `::acc_id()`.
+    ForLoop,
+}
+
 /// Classification of a symbol node.
 ///
-/// Every node in the DAG is one of these four kinds:
+/// Every node in the DAG is one of these five kinds:
 /// - A named **variable** (e.g. `x`, `y`).
 /// - A numeric **constant** (e.g. `3.14`).
 /// - An **operator** (e.g. `+`, `*`).
 /// - A **function** call (e.g. `sin`, `log`).
+/// - A **control-flow** node (e.g. `select`, `if-else`, `for-loop`).
 #[derive(Debug, Clone, Copy, Encode, Decode)]
 pub enum SymbolKind {
     /// A named variable, identified by its `SymbolId` in the symbol table.
@@ -144,6 +173,8 @@ pub enum SymbolKind {
     Operator(OpKind),
     /// A function call, identified by its `FnId`.
     Function(FnId),
+    /// A structured control-flow node (if/else, select, for-loop).
+    ControlFlow(CtrlKind),
 }
 
 impl PartialEq for SymbolKind {
@@ -153,6 +184,7 @@ impl PartialEq for SymbolKind {
             (Self::Constant(a), Self::Constant(b)) => a.to_bits() == b.to_bits(),
             (Self::Operator(a), Self::Operator(b)) => a == b,
             (Self::Function(a), Self::Function(b)) => a == b,
+            (Self::ControlFlow(a), Self::ControlFlow(b)) => a == b,
             _ => false,
         }
     }
@@ -168,6 +200,7 @@ impl std::hash::Hash for SymbolKind {
             Self::Constant(v) => v.to_bits().hash(state),
             Self::Operator(op) => op.hash(state),
             Self::Function(fn_id) => fn_id.hash(state),
+            Self::ControlFlow(ctrl) => ctrl.hash(state),
         }
     }
 }

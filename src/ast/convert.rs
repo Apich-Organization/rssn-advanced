@@ -287,6 +287,11 @@ fn build_dag_node(
             child_ids,
             crate::dag::metadata::NodeFlags::EMPTY,
         ),
+        SymbolKind::ControlFlow(_) => builder.operator(
+            ast_node.kind,
+            child_ids,
+            crate::dag::metadata::NodeFlags::EMPTY,
+        ),
     }
 }
 

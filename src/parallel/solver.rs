@@ -177,6 +177,42 @@ fn reduce_frame_with_overrides(
             values.truncate(split_at);
             result
         }
+        SymbolKind::ControlFlow(ctrl) => {
+            use crate::dag::symbol::CtrlKind;
+            let split_at = values.len().saturating_sub(arity);
+            let child_vals = &values[split_at..];
+            let result = match ctrl {
+                CtrlKind::Select | CtrlKind::IfElse => {
+                    if child_vals.len() == 3 {
+                        let cond = child_vals[0];
+                        let then_val = child_vals[1];
+                        let else_val = child_vals[2];
+                        if cond == 0.0 { else_val } else { then_val }
+                    } else {
+                        0.0
+                    }
+                }
+                CtrlKind::ForLoop => {
+                    if child_vals.len() == 4 {
+                        let init_val = child_vals[0];
+                        let limit_val = child_vals[1];
+                        let step_val = child_vals[2];
+                        let body_val = child_vals[3];
+                        let mut acc = init_val;
+                        let mut idx = 0.0;
+                        while idx < limit_val {
+                            acc += body_val;
+                            idx += step_val;
+                        }
+                        acc
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            values.truncate(split_at);
+            result
+        }
     }
 }
 
@@ -323,6 +359,42 @@ fn reduce_frame(
             values.truncate(split_at);
             result
         }
+        SymbolKind::ControlFlow(ctrl) => {
+            use crate::dag::symbol::CtrlKind;
+            let split_at = values.len().saturating_sub(arity);
+            let child_vals = &values[split_at..];
+            let result = match ctrl {
+                CtrlKind::Select | CtrlKind::IfElse => {
+                    if child_vals.len() == 3 {
+                        let cond = child_vals[0];
+                        let then_val = child_vals[1];
+                        let else_val = child_vals[2];
+                        if cond == 0.0 { else_val } else { then_val }
+                    } else {
+                        0.0
+                    }
+                }
+                CtrlKind::ForLoop => {
+                    if child_vals.len() == 4 {
+                        let init_val = child_vals[0];
+                        let limit_val = child_vals[1];
+                        let step_val = child_vals[2];
+                        let body_val = child_vals[3];
+                        let mut acc = init_val;
+                        let mut idx = 0.0;
+                        while idx < limit_val {
+                            acc += body_val;
+                            idx += step_val;
+                        }
+                        acc
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            values.truncate(split_at);
+            result
+        }
     }
 }
 
@@ -403,6 +475,42 @@ fn reduce_frame_with_fns(
         SymbolKind::Operator(op) => {
             let split_at = values.len().saturating_sub(arity);
             let result = apply_op(op, &values[split_at..]);
+            values.truncate(split_at);
+            result
+        }
+        SymbolKind::ControlFlow(ctrl) => {
+            use crate::dag::symbol::CtrlKind;
+            let split_at = values.len().saturating_sub(arity);
+            let child_vals = &values[split_at..];
+            let result = match ctrl {
+                CtrlKind::Select | CtrlKind::IfElse => {
+                    if child_vals.len() == 3 {
+                        let cond = child_vals[0];
+                        let then_val = child_vals[1];
+                        let else_val = child_vals[2];
+                        if cond == 0.0 { else_val } else { then_val }
+                    } else {
+                        0.0
+                    }
+                }
+                CtrlKind::ForLoop => {
+                    if child_vals.len() == 4 {
+                        let init_val = child_vals[0];
+                        let limit_val = child_vals[1];
+                        let step_val = child_vals[2];
+                        let body_val = child_vals[3];
+                        let mut acc = init_val;
+                        let mut idx = 0.0;
+                        while idx < limit_val {
+                            acc += body_val;
+                            idx += step_val;
+                        }
+                        acc
+                    } else {
+                        0.0
+                    }
+                }
+            };
             values.truncate(split_at);
             result
         }

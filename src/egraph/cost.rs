@@ -120,6 +120,10 @@ pub fn node_cost<S: ::std::hash::BuildHasher>(
             }
         },
         SymbolKind::Function(_) => weights.function,
+        // Control flow nodes (select/if-else/for-loop) are treated as
+        // function-call-level cost — they involve at least one branch or
+        // block switch, which is comparable to a foreign call.
+        SymbolKind::ControlFlow(_) => weights.function,
     };
 
     // x^0.5 → vsqrtpd: reward sqrt path even when pow_general would normally win.

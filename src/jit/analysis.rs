@@ -100,10 +100,11 @@ pub fn analyze(ast: &AstProjection) -> Vec<NodeAnalysis> {
                 }
             }
 
-            // ── Variable / Mod / Function — no useful bounds known ─────────
+            // ── Variable / Mod / Function / ControlFlow — no useful bounds known ──
             SymbolKind::Variable(_)
             | SymbolKind::Operator(OpKind::Mod)
-            | SymbolKind::Function(_) => NodeAnalysis::unknown(),
+            | SymbolKind::Function(_)
+            | SymbolKind::ControlFlow(_) => NodeAnalysis::unknown(),
 
             // ── Neg ───────────────────────────────────────────────────────
             SymbolKind::Operator(OpKind::Neg) => {

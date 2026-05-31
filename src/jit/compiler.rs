@@ -1676,6 +1676,143 @@ fn emit_one_node(
                 .ok_or(crate::error::JitError::VerifierRejected)?;
             values.push(result);
         }
+        SymbolKind::ControlFlow(ctrl) => {
+            use crate::dag::symbol::CtrlKind;
+            let split_at = values
+                .len()
+                .checked_sub(arity)
+                .ok_or(crate::error::JitError::MalformedNode)?;
+            let child_vals: Vec<Value> = values.drain(split_at..).collect();
+
+            match ctrl {
+                // ── Select ──────────────────────────────────────────────────
+                // Branchless: cond != 0.0  → then_val; else → else_val.
+                // Cranelift's `select` takes an integer condition; we convert
+                // the f64 cond using `fcmp ne 0.0`.
+                CtrlKind::Select => {
+                    if child_vals.len() != 3 {
+                        return Err(crate::error::JitError::MalformedNode);
+                    }
+                    let cond_f64 = child_vals[0];
+                    let then_val = child_vals[1];
+                    let else_val = child_vals[2];
+                    let zero = builder.ins().f64const(0.0);
+                    // fcmp returns i8; cast to i32 for `select`.
+                    let cond_i8 = builder.ins().fcmp(FloatCC::NotEqual, cond_f64, zero);
+                    let result = builder.ins().select(cond_i8, then_val, else_val);
+                    values.push(result);
+                }
+
+                // ── IfElse ────────────────────────────────────────────────
+                // Generates three basic blocks:
+                //   entry → (branch on cond) → then_block  ─┐
+                //                            → else_block  ──┤
+                //                                            merge_block(phi: f64) → return val
+                CtrlKind::IfElse => {
+                    if child_vals.len() != 3 {
+                        return Err(crate::error::JitError::MalformedNode);
+                    }
+                    // The child values have already been computed by the iterative walker.
+                    // We use `select` semantics here: since child expressions are fully
+                    // evaluated before we reach this node, we emit a branchless select.
+                    // True multi-block IfElse requires lazy evaluation which requires
+                    // restructuring the walker — currently implemented as a select.
+                    let cond_f64 = child_vals[0];
+                    let then_val = child_vals[1];
+                    let else_val = child_vals[2];
+                    let zero = builder.ins().f64const(0.0);
+                    let cond_bool = builder.ins().fcmp(FloatCC::NotEqual, cond_f64, zero);
+
+                    // Create then, else, merge blocks
+                    let then_block = builder.create_block();
+                    let else_block = builder.create_block();
+                    let merge_block = builder.create_block();
+                    // merge_block carries the result as a block parameter (phi-node).
+                    builder.append_block_param(merge_block, types::F64);
+
+                    // Branch: cond_bool → then_block; else → else_block
+                    builder
+                        .ins()
+                        .brif(cond_bool, then_block, &[], else_block, &[]);
+
+                    // then_block: jump to merge with then_val
+                    builder.switch_to_block(then_block);
+                    builder.seal_block(then_block);
+                    builder.ins().jump(merge_block, &[BlockArg::from(then_val)]);
+
+                    // else_block: jump to merge with else_val
+                    builder.switch_to_block(else_block);
+                    builder.seal_block(else_block);
+                    builder.ins().jump(merge_block, &[BlockArg::from(else_val)]);
+
+                    // merge_block: read the phi-node parameter as our result
+                    builder.switch_to_block(merge_block);
+                    builder.seal_block(merge_block);
+                    let result = builder.block_params(merge_block)[0];
+                    values.push(result);
+                }
+
+                // ── ForLoop ───────────────────────────────────────────────
+                // Emits a counted loop with SSA block parameters carrying
+                // the index and accumulator.  Layout:
+                //   entry → loop_header(idx: f64, acc: f64)
+                //             │  idx >= limit → loop_exit(acc)
+                //             └→ loop_body: new_acc = acc + body_val
+                //                           jump loop_header(idx+step, new_acc)
+                CtrlKind::ForLoop => {
+                    if child_vals.len() != 4 {
+                        return Err(crate::error::JitError::MalformedNode);
+                    }
+                    let init_val = child_vals[0]; // initial accumulator
+                    let limit_val = child_vals[1]; // exclusive upper bound
+                    let step_val = child_vals[2]; // loop step per iteration
+                    let body_val = child_vals[3]; // per-iteration contribution
+
+                    // Create blocks
+                    let loop_header = builder.create_block();
+                    let loop_body = builder.create_block();
+                    let loop_exit = builder.create_block();
+
+                    // Loop header carries (idx: f64, acc: f64) as SSA params.
+                    builder.append_block_param(loop_header, types::F64); // idx
+                    builder.append_block_param(loop_header, types::F64); // acc
+                    builder.append_block_param(loop_exit, types::F64); // final acc
+
+                    // Entry: jump to loop_header(init_idx=0, acc=init_val).
+                    let zero = builder.ins().f64const(0.0);
+                    builder.ins().jump(
+                        loop_header,
+                        &[BlockArg::from(zero), BlockArg::from(init_val)],
+                    );
+
+                    // loop_header: check idx < limit
+                    builder.switch_to_block(loop_header);
+                    let idx = builder.block_params(loop_header)[0];
+                    let acc = builder.block_params(loop_header)[1];
+                    let cond = builder.ins().fcmp(FloatCC::LessThan, idx, limit_val);
+                    builder
+                        .ins()
+                        .brif(cond, loop_body, &[], loop_exit, &[BlockArg::from(acc)]);
+                    builder.seal_block(loop_header);
+
+                    // loop_body: new_acc = acc + body_val; new_idx = idx + step
+                    builder.switch_to_block(loop_body);
+                    builder.seal_block(loop_body);
+                    let new_acc = builder.ins().fadd(acc, body_val);
+                    let new_idx = builder.ins().fadd(idx, step_val);
+                    builder.ins().jump(
+                        loop_header,
+                        &[BlockArg::from(new_idx), BlockArg::from(new_acc)],
+                    );
+
+                    // loop_exit: result is the final accumulator
+                    builder.switch_to_block(loop_exit);
+                    builder.seal_block(loop_exit);
+                    let result = builder.block_params(loop_exit)[0];
+                    values.push(result);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -2146,8 +2283,8 @@ fn emit_ast_simd_f64x2(
                         )?;
                         values.push(result);
                     }
-                    SymbolKind::Function(_) => {
-                        // Functions cannot be vectorized.
+                    SymbolKind::Function(_) | SymbolKind::ControlFlow(_) => {
+                        // Functions and ControlFlow cannot be vectorized.
                         return Err(crate::error::JitError::MalformedNode);
                     }
                 }
@@ -2428,8 +2565,8 @@ fn emit_ast_simd_f64x4(
                         )?;
                         values.push(result);
                     }
-                    SymbolKind::Function(_) => {
-                        // Functions cannot be vectorized.
+                    SymbolKind::Function(_) | SymbolKind::ControlFlow(_) => {
+                        // Functions and ControlFlow cannot be vectorized.
                         return Err(crate::error::JitError::MalformedNode);
                     }
                 }
@@ -2699,7 +2836,7 @@ fn emit_ast_simd_f64x8(
                         )?;
                         values.push(result);
                     }
-                    SymbolKind::Function(_) => {
+                    SymbolKind::Function(_) | SymbolKind::ControlFlow(_) => {
                         return Err(crate::error::JitError::MalformedNode);
                     }
                 }
@@ -3015,6 +3152,9 @@ fn emit_ast_scalar_with_vars(
                             .copied()
                             .ok_or(crate::error::JitError::VerifierRejected)?;
                         values.push(result);
+                    }
+                    SymbolKind::ControlFlow(_) => {
+                        return Err(crate::error::JitError::MalformedNode);
                     }
                 }
             }

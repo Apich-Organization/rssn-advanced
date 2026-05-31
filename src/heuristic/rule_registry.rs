@@ -92,6 +92,7 @@ const fn kind_disc(k: &SymbolKind) -> u8 {
         SymbolKind::Constant(_) => 1,
         SymbolKind::Operator(op) => 2 + (*op as u8),
         SymbolKind::Function(_) => 16,
+        SymbolKind::ControlFlow(_) => 32,
     }
 }
 

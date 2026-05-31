@@ -1942,6 +1942,7 @@ const fn kind_to_discriminant(kind: &crate::dag::symbol::SymbolKind) -> u8 {
         SymbolKind::Operator(OpKind::Mod) => 7,
         SymbolKind::Operator(OpKind::Neg) => 8,
         SymbolKind::Function(_) => 9,
+        SymbolKind::ControlFlow(_) => 10,
     }
 }
 
@@ -3143,6 +3144,7 @@ const fn symbol_kind_to_u8(kind: &crate::dag::symbol::SymbolKind) -> u8 {
         SymbolKind::Operator(OpKind::Neg) => 7,
         SymbolKind::Operator(OpKind::Mod) => 8,
         SymbolKind::Function(_) => 9,
+        SymbolKind::ControlFlow(_) => 10,
     }
 }
 

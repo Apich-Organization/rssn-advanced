@@ -376,6 +376,14 @@ fn pack_one_node_ref(node: &DagNode) -> PackOne {
             packed.kind_tag = kind_tag::FUNCTION;
             packed.kind_payload = fn_id.0;
         }
+        // Control flow nodes are not yet part of the packed wire format;
+        // serialize them as Function kind so the round-trip at least
+        // preserves arity and children, restoring them as ControlFlow via
+        // the to_owned_arena path.
+        SymbolKind::ControlFlow(_) => {
+            packed.kind_tag = kind_tag::FUNCTION;
+            packed.kind_payload = u32::MAX;
+        }
     }
 
     let children = node.children.as_slice();
@@ -567,7 +575,7 @@ impl<'a> BorrowedArenaView<'a> {
             let node = match kind {
                 SymbolKind::Constant(val) => DagNode::constant(val, meta),
                 SymbolKind::Variable(_) => DagNode::variable(kind, meta),
-                SymbolKind::Operator(_) | SymbolKind::Function(_) => {
+                SymbolKind::Operator(_) | SymbolKind::Function(_) | SymbolKind::ControlFlow(_) => {
                     DagNode::operator(kind, meta, children)
                 }
             };

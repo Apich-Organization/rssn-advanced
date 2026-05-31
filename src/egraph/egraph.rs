@@ -446,7 +446,10 @@ impl<'b> EGraph<'b> {
                 OpKind::Neg => self.rules_neg(id, &canon_children),
                 OpKind::Mod => {}
             },
-            SymbolKind::Constant(_) | SymbolKind::Variable(_) | SymbolKind::Function(_) => {}
+            SymbolKind::Constant(_)
+            | SymbolKind::Variable(_)
+            | SymbolKind::Function(_)
+            | SymbolKind::ControlFlow(_) => {}
         }
 
         // --- Late user rules (run after built-ins; see add_rule_after_builtins) ---

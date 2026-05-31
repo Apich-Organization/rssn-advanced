@@ -356,6 +356,18 @@ pub mod custom;
 /// integration.
 pub mod ffi;
 
+/// GPU compilation and execution module.
+pub mod gpu;
+
+/// Multi-dimensional tensor support: Shape, Strides, TensorView, broadcasting.
+///
+/// Provides the foundational types for tensors:
+/// - [`tensor::shape::Shape`] — dimension extents and broadcasting logic.
+/// - [`tensor::shape::Strides`] — element-offset per axis and flat indexing.
+/// - [`tensor::view::TensorView`] / [`tensor::view::TensorViewMut`] — zero-copy views.
+/// - [`tensor::view::broadcast_elementwise`] — fused element-wise ops with broadcasting.
+pub mod tensor;
+
 #[cfg_attr(miri, ignore)]
 mod readme {
     #![doc = include_str!("../README.md")]

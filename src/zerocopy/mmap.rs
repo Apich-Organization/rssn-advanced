@@ -146,7 +146,7 @@ enum Backing {
 
 #[cfg(all(target_os = "linux", feature = "libc"))]
 mod linux {
-    use super::*;
+    use super::StorageError;
     use core::ffi::c_void;
     use std::os::unix::io::AsRawFd;
 

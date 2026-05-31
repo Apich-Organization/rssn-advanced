@@ -68,6 +68,10 @@ pub fn walk_projection<V: AstVisitor>(proj: &AstProjection, visitor: &mut V) {
             crate::dag::symbol::SymbolKind::Function(fn_id) => {
                 visitor.visit_function(idx, fn_id, &node.children, node.dag_id);
             }
+            crate::dag::symbol::SymbolKind::ControlFlow(_) => {
+                // Control flow nodes have no dedicated visitor method;
+                // they pass silently unless overridden by a future trait method.
+            }
         }
     }
 }
