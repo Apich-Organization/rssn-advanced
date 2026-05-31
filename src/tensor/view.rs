@@ -31,18 +31,24 @@ impl<'a> TensorView<'a> {
     /// Constructs a new `TensorView`.
     ///
     /// # Panics
-    /// Panics if the buffer is smaller than the number of elements implied by
-    /// `shape.numel()`.
+    /// Panics if the buffer is smaller than the maximum addressable index implied by
+    /// the strides and storage offset.
     #[must_use]
     pub fn new(data: &'a [f64], shape: Shape, storage_offset: usize) -> Self {
-        assert!(
-            data.len() >= storage_offset + shape.numel(),
-            "Buffer too small for shape and offset: need {} elements at offset {}, got {}",
-            shape.numel(),
-            storage_offset,
-            data.len(),
-        );
         let strides = shape.row_major_strides();
+        let max_idx = if shape.numel() > 0 {
+            strides.max_flat_index(&shape)
+        } else {
+            0
+        };
+        let required_len = storage_offset + max_idx + if shape.numel() > 0 { 1 } else { 0 };
+        assert!(
+            data.len() >= required_len,
+            "Buffer too small for contiguous shape: need {} elements, got {}",
+            required_len,
+            data.len()
+        );
+
         Self {
             data,
             shape,
@@ -60,7 +66,8 @@ impl<'a> TensorView<'a> {
     /// Constructs a view with explicit (possibly non-contiguous) strides.
     ///
     /// # Panics
-    /// Panics if `shape.rank() != strides.as_slice().len()`.
+    /// Panics if `shape.rank() != strides.as_slice().len()`, or if the backing
+    /// buffer is too small to safely access the largest flat index addressable by these strides.
     #[must_use]
     pub fn with_strides(
         data: &'a [f64],
@@ -71,17 +78,23 @@ impl<'a> TensorView<'a> {
         assert_eq!(
             shape.rank(),
             strides.as_slice().len(),
-            "Rank mismatch between shape and strides",
+            "Rank mismatch between shape and strides"
         );
+
+        let max_idx = if shape.numel() > 0 {
+            strides.max_flat_index(&shape)
+        } else {
+            0
+        };
+        let required_len = storage_offset + max_idx + if shape.numel() > 0 { 1 } else { 0 };
         assert!(
-            data.len() >= storage_offset + shape.numel(),
-            "Buffer too small for shape and offset: need {} elements at offset {}, got {}",
-            shape.numel(),
-            storage_offset,
-            data.len(),
+            data.len() >= required_len,
+            "Buffer too small for strided layout: need space for index {} (required size {}), got buffer of size {}",
+            max_idx,
+            required_len,
+            data.len()
         );
-        // Validate strides at construction time to prevent flat_index overflow.
-        strides.max_flat_index(&shape);
+
         Self {
             data,
             shape,
@@ -93,8 +106,6 @@ impl<'a> TensorView<'a> {
     /// Constructs a new `TensorView` with explicit strides and default `storage_offset` of 0.
     #[must_use]
     pub fn with_strides_default(data: &'a [f64], shape: Shape, strides: Strides) -> Self {
-        // Validate strides at construction time to prevent flat_index overflow.
-        strides.max_flat_index(&shape);
         Self::with_strides(data, shape, strides, 0)
     }
 
@@ -136,7 +147,7 @@ impl<'a> TensorView<'a> {
     pub unsafe fn get_unchecked(&self, idx: &[usize]) -> f64 {
         let flat = self.strides.flat_index(idx);
         // Explicit unsafe block for the call to get_unchecked
-        *self.data.get_unchecked(self.storage_offset + flat)
+        unsafe { *self.data.get_unchecked(self.storage_offset + flat) }
     }
 
     /// Returns the rank (number of dimensions).
@@ -157,7 +168,6 @@ impl<'a> TensorView<'a> {
         if self.shape.numel() <= 1 {
             return true;
         }
-        // A view is contiguous if its active strides match a freshly computed row-major layout
         self.strides == self.shape.row_major_strides()
     }
 
@@ -184,7 +194,7 @@ impl<'a> TensorView<'a> {
     /// Iterates over all elements in row-major order.
     ///
     /// This is the fundamental building block for element-wise operations and
-    /// vectorised kernel dispatch.
+    /// vectorized kernel dispatch.
     pub fn iter_elements(&self) -> ElementIter<'_> {
         if self.is_contiguous() {
             ElementIter::Contiguous(self.as_slice().iter())
@@ -272,19 +282,23 @@ impl<'a> TensorViewMut<'a> {
     /// Constructs a new mutable `TensorViewMut`.
     ///
     /// # Panics
-    /// Panics if the buffer is smaller than `shape.numel()`.
+    /// Panics if the buffer is smaller than the maximum addressable flat index.
     #[must_use]
     pub fn new(data: &'a mut [f64], shape: Shape, storage_offset: usize) -> Self {
+        let strides = shape.row_major_strides();
+        let max_idx = if shape.numel() > 0 {
+            strides.max_flat_index(&shape)
+        } else {
+            0
+        };
+        let required_len = storage_offset + max_idx + if shape.numel() > 0 { 1 } else { 0 };
         assert!(
-            data.len() >= storage_offset + shape.numel(),
-            "Buffer too small for shape and offset: need {} elements at offset {}, got {}",
-            shape.numel(),
-            storage_offset,
+            data.len() >= required_len,
+            "Buffer too small for shape and offset: need {} elements, got {}",
+            required_len,
             data.len(),
         );
-        let strides = shape.row_major_strides();
-        // Validate strides at construction time to prevent flat_index overflow.
-        strides.max_flat_index(&shape);
+
         Self {
             data,
             shape,
@@ -317,7 +331,6 @@ impl<'a> TensorViewMut<'a> {
         if self.shape.numel() <= 1 {
             return true;
         }
-        // A view is contiguous if its active strides match a freshly computed row-major layout
         self.strides == self.shape.row_major_strides()
     }
 
@@ -328,19 +341,12 @@ impl<'a> TensorViewMut<'a> {
         if idx.len() != self.shape.rank() {
             return None;
         }
-        // First, validate all logical dimensions
         for (&i, &d) in idx.iter().zip(self.shape.dims()) {
             if i >= d {
                 return None;
             }
         }
-        // After all logical dimensions are validated, compute the flat index once
         let flat = self.strides.flat_index(idx);
-        // Then, check if the flat index is within the bounds of the raw data
-        if self.storage_offset + flat >= self.data.len() {
-            return None;
-        }
-        // If all checks pass, safely get the mutable reference
         self.data.get_mut(self.storage_offset + flat)
     }
 
@@ -349,13 +355,11 @@ impl<'a> TensorViewMut<'a> {
     ///
     /// # Safety
     /// The caller must guarantee that `idx` is a valid multi-dimensional index
-    /// for this tensor view and that `self.storage_offset + flat_index(idx)` is
-    /// within the bounds of `self.data`.
+    /// for this tensor view.
     #[must_use]
     pub unsafe fn get_unchecked_mut(&mut self, idx: &[usize]) -> &mut f64 {
         let flat = self.strides.flat_index(idx);
-        // Explicit unsafe block for the call to get_unchecked_mut
-        self.data.get_unchecked_mut(self.storage_offset + flat)
+        unsafe { self.data.get_unchecked_mut(self.storage_offset + flat) }
     }
 
     /// Sets the element at the multi-dimensional index.
@@ -524,6 +528,11 @@ impl<'a> core::ops::IndexMut<(usize, usize, usize)> for TensorViewMut<'a> {
 /// Broadcasting is handled via the stride-zero convention: a dimension with
 /// size 1 has stride 0, so the same element is reused without copying.
 ///
+/// # Safety
+/// To prevent undefined behavior, the caller must ensure that the output buffer window
+/// does not overlap with the backing storage buffers of `a` and `b` unless an exact
+/// in-place operation is intended and safe.
+///
 /// # Errors
 /// Returns `Err(String)` if the shapes are not broadcast-compatible or the
 /// output buffer is too small for the broadcast output shape.
@@ -562,13 +571,12 @@ where
     let b_slice = b.as_raw_slice();
 
     if is_contiguous_fast_path {
-        let out_slice = out.as_slice_mut(); // Use the view's active segment
-
+        let out_slice = out.as_slice_mut();
         let len = a.numel();
 
-        let a_sub = &a_slice[a.storage_offset..a.storage_offset + len]; // Use storage_offset
-        let b_sub = &b_slice[b.storage_offset..b.storage_offset + len]; // Use storage_offset
-        let out_sub = &mut out_slice[..len]; // Define out_sub
+        let a_sub = &a_slice[a.storage_offset..a.storage_offset + len];
+        let b_sub = &b_slice[b.storage_offset..b.storage_offset + len];
+        let out_sub = &mut out_slice[..len];
 
         for i in 0..len {
             out_sub[i] = op(a_sub[i], b_sub[i]);
@@ -586,7 +594,7 @@ where
     let mut a_strides_padded = SmallVec::<[usize; 8]>::from_elem(0, rank);
     let mut b_strides_padded = SmallVec::<[usize; 8]>::from_elem(0, rank);
 
-    // If an original dimension size is 1, its broadcast stride must be 0
+    // If an original dimension size is 1, its broadcast stride is 0
     let a_dims = a.shape().dims();
     for i in a_offset..rank {
         if a_dims[i - a_offset] > 1 {
@@ -625,12 +633,11 @@ where
         0
     };
 
-    // Obtain raw pointers pointing to the actual start of the view's data
     let a_ptr = unsafe { a_slice.as_ptr().add(a.storage_offset) };
     let b_ptr = unsafe { b_slice.as_ptr().add(b.storage_offset) };
     let out_ptr = unsafe { out.as_raw_slice_mut().as_mut_ptr().add(out.storage_offset) };
 
-    // Debug assertions to catch potential aliasing in development
+    // Debug assertions to catch physical overlap/aliasing in development
     debug_assert!(
         a_ptr as *const () != out_ptr as *const (),
         "Tensor A and Output alias!"
@@ -656,7 +663,6 @@ where
     Ok(())
 }
 
-// Helper for fully contiguous case (a_step=1, b_step=1, out_step=1)
 #[inline(always)]
 unsafe fn process_row_contiguous<F>(
     a_ptr: *const f64,
@@ -671,16 +677,15 @@ unsafe fn process_row_contiguous<F>(
     F: Fn(f64, f64) -> f64,
 {
     for _ in 0..row_len {
-        let va = *a_ptr.add(current_a);
-        let vb = *b_ptr.add(current_b);
-        *out_ptr.add(current_out) = op(va, vb);
+        let va = unsafe { *a_ptr.add(current_a) };
+        let vb = unsafe { *b_ptr.add(current_b) };
+        unsafe { *out_ptr.add(current_out) = op(va, vb) };
         current_a += 1;
         current_b += 1;
         current_out += 1;
     }
 }
 
-// Helper for broadcast 'a' (a_step=0)
 #[inline(always)]
 unsafe fn process_row_broadcast_a<F>(
     a_ptr: *const f64,
@@ -696,16 +701,15 @@ unsafe fn process_row_broadcast_a<F>(
 ) where
     F: Fn(f64, f64) -> f64,
 {
-    let va = *a_ptr.add(current_a_fixed); // Load 'a' value once for the whole row
+    let va = unsafe { *a_ptr.add(current_a_fixed) };
     for _ in 0..row_len {
-        let vb = *b_ptr.add(current_b);
-        *out_ptr.add(current_out) = op(va, vb);
+        let vb = unsafe { *b_ptr.add(current_b) };
+        unsafe { *out_ptr.add(current_out) = op(va, vb) };
         current_b += b_step;
         current_out += out_step;
     }
 }
 
-// Helper for broadcast 'b' (b_step=0)
 #[inline(always)]
 unsafe fn process_row_broadcast_b<F>(
     a_ptr: *const f64,
@@ -721,16 +725,15 @@ unsafe fn process_row_broadcast_b<F>(
 ) where
     F: Fn(f64, f64) -> f64,
 {
-    let vb = *b_ptr.add(current_b_fixed); // Load 'b' value once for the whole row
+    let vb = unsafe { *b_ptr.add(current_b_fixed) };
     for _ in 0..row_len {
-        let va = *a_ptr.add(current_a);
-        *out_ptr.add(current_out) = op(va, vb);
+        let va = unsafe { *a_ptr.add(current_a) };
+        unsafe { *out_ptr.add(current_out) = op(va, vb) };
         current_a += a_step;
         current_out += out_step;
     }
 }
 
-// Helper for broadcast 'a' and 'b' (a_step=0, b_step=0)
 #[inline(always)]
 unsafe fn process_row_broadcast_ab<F>(
     a_ptr: *const f64,
@@ -745,16 +748,15 @@ unsafe fn process_row_broadcast_ab<F>(
 ) where
     F: Fn(f64, f64) -> f64,
 {
-    let va = *a_ptr.add(current_a_fixed);
-    let vb = *b_ptr.add(current_b_fixed);
-    let result = op(va, vb); // Compute result once for the whole row
+    let va = unsafe { *a_ptr.add(current_a_fixed) };
+    let vb = unsafe { *b_ptr.add(current_b_fixed) };
+    let result = op(va, vb);
     for _ in 0..row_len {
-        *out_ptr.add(current_out) = result;
+        unsafe { *out_ptr.add(current_out) = result };
         current_out += out_step;
     }
 }
 
-// Helper for general strided case (original logic)
 #[inline(always)]
 unsafe fn process_row_general<F>(
     a_ptr: *const f64,
@@ -772,17 +774,15 @@ unsafe fn process_row_general<F>(
     F: Fn(f64, f64) -> f64,
 {
     for _ in 0..row_len {
-        let va = *a_ptr.add(current_a);
-        let vb = *b_ptr.add(current_b);
-        *out_ptr.add(current_out) = op(va, vb);
+        let va = unsafe { *a_ptr.add(current_a) };
+        let vb = unsafe { *b_ptr.add(current_b) };
+        unsafe { *out_ptr.add(current_out) = op(va, vb) };
         current_a += a_step;
         current_b += b_step;
         current_out += out_step;
     }
 }
 
-/// Unsafe kernel for broadcast_elementwise.
-/// Assumes `a_ptr`, `b_ptr`, and `out_ptr` do not alias.
 #[inline(always)]
 unsafe fn broadcast_elementwise_kernel<F>(
     output_iter: OutputFlatIndexIterator,
@@ -797,27 +797,37 @@ unsafe fn broadcast_elementwise_kernel<F>(
     F: Fn(f64, f64) -> f64 + Copy,
 {
     for (a_flat, b_flat, out_flat, row_len) in output_iter {
-        // Dispatch based on steps
         if a_step == 1 && b_step == 1 && out_step == 1 {
-            process_row_contiguous(a_ptr, b_ptr, out_ptr, a_flat, b_flat, out_flat, row_len, op);
+            unsafe {
+                process_row_contiguous(
+                    a_ptr, b_ptr, out_ptr, a_flat, b_flat, out_flat, row_len, op,
+                );
+            }
         } else if a_step == 0 && b_step == 0 {
-            process_row_broadcast_ab(
-                a_ptr, b_ptr, out_ptr, a_flat, b_flat, out_flat, out_step, row_len, op,
-            );
+            unsafe {
+                process_row_broadcast_ab(
+                    a_ptr, b_ptr, out_ptr, a_flat, b_flat, out_flat, out_step, row_len, op,
+                );
+            }
         } else if a_step == 0 {
-            process_row_broadcast_a(
-                a_ptr, b_ptr, out_ptr, a_flat, b_flat, out_flat, b_step, out_step, row_len, op,
-            );
+            unsafe {
+                process_row_broadcast_a(
+                    a_ptr, b_ptr, out_ptr, a_flat, b_flat, out_flat, b_step, out_step, row_len, op,
+                );
+            }
         } else if b_step == 0 {
-            process_row_broadcast_b(
-                a_ptr, b_ptr, out_ptr, a_flat, b_flat, out_flat, a_step, out_step, row_len, op,
-            );
+            unsafe {
+                process_row_broadcast_b(
+                    a_ptr, b_ptr, out_ptr, a_flat, b_flat, out_flat, a_step, out_step, row_len, op,
+                );
+            }
         } else {
-            // General strided case
-            process_row_general(
-                a_ptr, b_ptr, out_ptr, a_flat, b_flat, out_flat, a_step, b_step, out_step, row_len,
-                op,
-            );
+            unsafe {
+                process_row_general(
+                    a_ptr, b_ptr, out_ptr, a_flat, b_flat, out_flat, a_step, b_step, out_step,
+                    row_len, op,
+                );
+            }
         }
     }
 }
@@ -847,6 +857,11 @@ impl<'a> Iterator for ElementIter<'a> {
     }
 }
 
+/// An optimized element iterator over strided tensors.
+///
+/// Iteration tracking coordinates and memory offsets are modified incrementally
+/// using an amortized $O(1)$ technique, resolving performance penalties when
+/// performing element-by-element iteration.
 pub struct StridedElementIter<'a> {
     data: &'a [f64],
     strides: Strides,
@@ -860,6 +875,7 @@ pub struct StridedElementIter<'a> {
 impl<'a> Iterator for StridedElementIter<'a> {
     type Item = f64;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
             return None;
@@ -868,14 +884,19 @@ impl<'a> Iterator for StridedElementIter<'a> {
         let val = unsafe { *self.data.get_unchecked(self.flat_offset) };
         self.elements_yielded += 1;
 
-        // --- Advance logical index `self.idx` for the *next* iteration ---
         let rank = self.dims.rank();
         let dims = self.dims.dims();
+        let strides_slice = self.strides.as_slice();
 
         let mut carry = true;
         for i in (0..rank).rev() {
             self.idx[i] += 1;
+            self.flat_offset += strides_slice[i];
+
             if self.idx[i] >= dims[i] {
+                // Rewind flat memory offset accumulated along this dimension axis
+                let steps_taken = self.idx[i];
+                self.flat_offset -= strides_slice[i] * steps_taken;
                 self.idx[i] = 0;
             } else {
                 carry = false;
@@ -885,15 +906,12 @@ impl<'a> Iterator for StridedElementIter<'a> {
 
         if carry {
             self.done = true;
-        } else {
-            // Only recompute flat_offset if not done.
-            // flat_offset now refers to the next element.
-            self.flat_offset = self.strides.flat_index(&self.idx);
         }
 
         Some(val)
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.done {
             (0, Some(0))
@@ -905,6 +923,7 @@ impl<'a> Iterator for StridedElementIter<'a> {
     }
 }
 
+/// High-performance flat offset iterator resolving broadcast targets coordinate-by-coordinate.
 pub struct OutputFlatIndexIterator {
     dims: Shape,
     strides: Strides,
@@ -912,9 +931,13 @@ pub struct OutputFlatIndexIterator {
     done: bool,
     a_strides_padded: SmallVec<[usize; 8]>,
     b_strides_padded: SmallVec<[usize; 8]>,
+    current_a: usize,
+    current_b: usize,
+    current_out: usize,
 }
 
 impl OutputFlatIndexIterator {
+    #[must_use]
     pub fn new(
         output_shape: Shape,
         output_strides: Strides,
@@ -924,6 +947,20 @@ impl OutputFlatIndexIterator {
         let rank = output_shape.rank();
         let idx = SmallVec::<[usize; 8]>::from_elem(0, rank);
         let done = output_shape.numel() == 0;
+
+        let mut current_a = 0;
+        let mut current_b = 0;
+        let mut current_out = 0;
+
+        if rank > 0 && !done {
+            let out_strides_slice = output_strides.as_slice();
+            for i in 0..rank {
+                current_a += idx[i] * a_strides_padded[i];
+                current_b += idx[i] * b_strides_padded[i];
+                current_out += idx[i] * out_strides_slice[i];
+            }
+        }
+
         OutputFlatIndexIterator {
             dims: output_shape,
             strides: output_strides,
@@ -931,21 +968,14 @@ impl OutputFlatIndexIterator {
             done,
             a_strides_padded,
             b_strides_padded,
+            current_a,
+            current_b,
+            current_out,
         }
-    }
-
-    // Helper to calculate flat index from logical index and strides
-    fn calculate_flat_index(logical_idx: &[usize], strides_vec: &[usize]) -> usize {
-        logical_idx
-            .iter()
-            .zip(strides_vec.iter())
-            .map(|(&i, &s)| i * s)
-            .sum()
     }
 }
 
 impl Iterator for OutputFlatIndexIterator {
-    /// Item layout: (a_flat_row_start, b_flat_row_start, out_flat_row_start, row_len)
     type Item = (usize, usize, usize, usize);
 
     #[inline]
@@ -956,51 +986,53 @@ impl Iterator for OutputFlatIndexIterator {
 
         let rank = self.dims.rank();
         let dims = self.dims.dims();
-        let output_strides_slice = self.strides.as_slice();
+        let out_strides_slice = self.strides.as_slice();
 
-        // Handle rank-0 (scalar) tensors cleanly
         if rank == 0 {
             self.done = true;
-            // For rank-0, all flat offsets are 0, and row_len is 1
             return Some((0, 0, 0, 1));
         }
 
         let innermost_dim_idx = rank - 1;
         let row_len = dims[innermost_dim_idx];
 
-        // 1. Calculate the flat offsets for the start of this row block based on the current logical index
-        let current_out_flat = Self::calculate_flat_index(&self.idx, output_strides_slice);
-        let current_a_flat =
-            Self::calculate_flat_index(&self.idx, self.a_strides_padded.as_slice());
-        let current_b_flat =
-            Self::calculate_flat_index(&self.idx, self.b_strides_padded.as_slice());
+        let res = (self.current_a, self.current_b, self.current_out, row_len);
 
-        // Advance logical index `self.idx` to the start of the *next row block*
         let mut carry = true;
-        let mut current_dim_to_advance = rank; // Start from rank to correctly iterate downwards
+        let mut i = rank;
 
-        while carry && current_dim_to_advance > 0 {
-            current_dim_to_advance -= 1; // Decrement first to get the current dimension index
+        while carry && i > 0 {
+            i -= 1;
 
-            // Only the innermost dimension advances by row_len. Others by 1.
-            self.idx[current_dim_to_advance] += if current_dim_to_advance == innermost_dim_idx {
-                row_len
+            if i == innermost_dim_idx {
+                self.idx[i] += row_len;
+                self.current_a += self.a_strides_padded[i] * row_len;
+                self.current_b += self.b_strides_padded[i] * row_len;
+                self.current_out += out_strides_slice[i] * row_len;
             } else {
-                1
-            };
+                self.idx[i] += 1;
+                self.current_a += self.a_strides_padded[i];
+                self.current_b += self.b_strides_padded[i];
+                self.current_out += out_strides_slice[i];
+            }
 
-            if self.idx[current_dim_to_advance] >= dims[current_dim_to_advance] {
-                self.idx[current_dim_to_advance] = 0;
+            if self.idx[i] >= dims[i] {
+                let steps_taken = self.idx[i];
+                // Subtract the accumulated steps to rewind the offsets
+                self.current_a -= self.a_strides_padded[i] * steps_taken;
+                self.current_b -= self.b_strides_padded[i] * steps_taken;
+                self.current_out -= out_strides_slice[i] * steps_taken;
+                self.idx[i] = 0;
             } else {
-                carry = false; // No carry, stop propagating
+                carry = false;
             }
         }
+
         if carry {
-            // If carry is still true, it means outermost dim also rolled over
             self.done = true;
         }
 
-        Some((current_a_flat, current_b_flat, current_out_flat, row_len))
+        Some(res)
     }
 }
 
