@@ -206,7 +206,7 @@ impl<'a> TensorView<'a> {
             let rank = self.shape.rank();
             let idx = SmallVec::<[usize; 8]>::from_elem(0, rank);
             let done = self.shape.dims().contains(&0);
-            ElementIter::Strided(Box::new(StridedElementIter {
+            ElementIter::Strided(StridedElementIter {
                 data: self.data,
                 strides: self.strides.clone(),
                 dims: self.shape.clone(),
@@ -214,7 +214,7 @@ impl<'a> TensorView<'a> {
                 done,
                 flat_offset: self.storage_offset,
                 elements_yielded: 0,
-            }))
+            })
         }
     }
 }
@@ -838,11 +838,12 @@ unsafe fn broadcast_elementwise_kernel<F>(
 }
 
 /// An iterator over the elements of a tensor view.
+#[allow(clippy::large_enum_variant)]
 pub enum ElementIter<'a> {
     /// An iterator for contiguous tensor views.
     Contiguous(std::slice::Iter<'a, f64>),
     /// An iterator for strided (non-contiguous) tensor views.
-    Strided(Box<StridedElementIter<'a>>),
+    Strided(StridedElementIter<'a>),
 }
 
 impl<'a> Iterator for ElementIter<'a> {
