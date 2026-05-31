@@ -444,15 +444,17 @@ pub extern "C" fn rssn_dag_execute_bulk(
                     }
                 }
                 #[cfg(target_arch = "aarch64")]
-                unsafe {
-                    use std::arch::aarch64::_prefetch;
-                    use std::arch::aarch64::{_PREFETCH_LOCALITY3, _PREFETCH_READ};
+                use std::arch::asm;
+                #[cfg(target_arch = "aarch64")]
+                if row + PF < n_rows {
                     for &col in cols.iter().take(nv) {
-                        if row + PF < n_rows {
-                            _prefetch(
-                                col.add(row + PF) as *const i8,
-                                _PREFETCH_READ,
-                                _PREFETCH_LOCALITY3,
+                        unsafe {
+                            let target_ptr = col.add(row + PF);
+
+                            asm!(
+                                "prfm pldl1keep, [{ptr}]",
+                                ptr = in(reg) target_ptr,
+                                options(nostack, preserves_flags, readonly)
                             );
                         }
                     }
