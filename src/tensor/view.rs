@@ -687,7 +687,8 @@ unsafe fn process_row_contiguous<F>(
 }
 
 #[inline(always)]
-unsafe fn process_row_broadcast_a<F>(
+#[allow(clippy::similar_names)]
+unsafe fn process_row_broadcast_a<OpF>(
     a_ptr: *const f64,
     b_ptr: *const f64,
     out_ptr: *mut f64,
@@ -697,9 +698,9 @@ unsafe fn process_row_broadcast_a<F>(
     b_step: usize,
     out_step: usize,
     row_len: usize,
-    op: F,
+    op: OpF,
 ) where
-    F: Fn(f64, f64) -> f64,
+    OpF: Fn(f64, f64) -> f64,
 {
     let va = unsafe { *a_ptr.add(current_a_fixed) };
     for _ in 0..row_len {
@@ -711,7 +712,8 @@ unsafe fn process_row_broadcast_a<F>(
 }
 
 #[inline(always)]
-unsafe fn process_row_broadcast_b<F>(
+#[allow(clippy::similar_names)]
+unsafe fn process_row_broadcast_b<OpF>(
     a_ptr: *const f64,
     b_ptr: *const f64,
     out_ptr: *mut f64,
@@ -721,9 +723,9 @@ unsafe fn process_row_broadcast_b<F>(
     a_step: usize,
     out_step: usize,
     row_len: usize,
-    op: F,
+    op: OpF,
 ) where
-    F: Fn(f64, f64) -> f64,
+    OpF: Fn(f64, f64) -> f64,
 {
     let vb = unsafe { *b_ptr.add(current_b_fixed) };
     for _ in 0..row_len {
@@ -735,7 +737,8 @@ unsafe fn process_row_broadcast_b<F>(
 }
 
 #[inline(always)]
-unsafe fn process_row_broadcast_ab<F>(
+#[allow(clippy::similar_names)]
+unsafe fn process_row_broadcast_ab<OpF>(
     a_ptr: *const f64,
     b_ptr: *const f64,
     out_ptr: *mut f64,
@@ -744,9 +747,9 @@ unsafe fn process_row_broadcast_ab<F>(
     mut current_out: usize,
     out_step: usize,
     row_len: usize,
-    op: F,
+    op: OpF,
 ) where
-    F: Fn(f64, f64) -> f64,
+    OpF: Fn(f64, f64) -> f64,
 {
     let va = unsafe { *a_ptr.add(current_a_fixed) };
     let vb = unsafe { *b_ptr.add(current_b_fixed) };

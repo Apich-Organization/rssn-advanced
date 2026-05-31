@@ -619,23 +619,6 @@ enum RssnStatus rssn_batch_op_unregister(uint8_t aKind)
 ;
 
 /*
- Performs an element-wise binary operation on two `TensorView`s into a `TensorViewMut`.
-
- # Safety
-
- - `a`, `b` must be valid, non-null pointers to `TensorView`s.
- - `out` must be a valid, non-null pointer to a `TensorViewMut`.
- - `op` must be a valid, non-null function pointer to an `RssnBinaryOpFn`.
- - The underlying data for `a`, `b`, and `out` must not alias.
- */
-
-enum RssnStatus rssn_broadcast_elementwise(struct TensorView *aA,
-                                           struct TensorView *aB,
-                                           struct TensorViewMut *aOut,
-                                           struct Option_RssnBinaryOpFn aOp)
-;
-
-/*
  Adds an e-graph rewrite rule to a custom operator.
 
  `after_builtins`: non-zero → run after built-in algebraic rules each round.
@@ -2239,6 +2222,23 @@ void rssn_strides_free(struct Strides *aStrides)
  */
 
 void rssn_string_free(char *aS)
+;
+
+/*
+ Performs an element-wise binary operation on two `TensorView`s into a `TensorViewMut`.
+
+ # Safety
+
+ - `a`, `b` must be valid, non-null pointers to `TensorView`s.
+ - `out` must be a valid, non-null pointer to a `TensorViewMut`.
+ - `op` must be a valid, non-null function pointer to an `RssnBinaryOpFn`.
+ - The underlying data for `a`, `b`, and `out` must not alias.
+ */
+
+enum RssnStatus rssn_tensor_elementwise_binary_op(const struct TensorView *aA,
+                                                  const struct TensorView *aB,
+                                                  struct TensorViewMut *aOut,
+                                                  struct Option_RssnBinaryOpFn aOp)
 ;
 
 /*

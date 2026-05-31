@@ -38,7 +38,7 @@ pub fn compile_to_wgsl(
     ));
 
     let wgsl_code = format!(
-        r#"{bindings}
+        "{bindings}
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     let idx = global_id.x;
@@ -49,7 +49,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {{
     let val = {expr_str};
     out_col[idx] = val;
 }}
-"#
+"
     );
 
     Ok(wgsl_code)
@@ -217,9 +217,12 @@ impl GpuExecutor {
     #[must_use]
     pub fn new() -> Option<Self> {
         let instance = wgpu::Instance::default();
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?
-                .ok()?;
+        let adapter = match pollster::block_on(
+            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+        ) {
+            Ok(adapter) => adapter,
+            Err(_) => return None,
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("RSSN JIT GPU Device"),
             required_features: wgpu::Features::empty(),

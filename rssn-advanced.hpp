@@ -438,12 +438,6 @@ using RssnBatchOpCallback = uint32_t(*)(DagBuilder *builder,
                                         void *user_data);
 
 /*
- Type for a C-callable `extern "C" fn(f64, f64) -> f64` for binary operations.
- */
-using RssnBinaryOpFn = double(*)(double,
-                                 double);
-
-/*
  A C-callable rewrite rule for the E-graph.
 
  Called for each node during saturation. Return the ID of an equivalent
@@ -697,6 +691,12 @@ struct RssnSimplifyConfig {
     }
 };
 
+/*
+ Type for a C-callable `extern "C" fn(f64, f64) -> f64` for binary operations.
+ */
+using RssnBinaryOpFn = double(*)(double,
+                                 double);
+
 
 
 
@@ -792,23 +792,6 @@ RssnStatus rssn_batch_op_register(uint8_t aKind,
  */
 
 RssnStatus rssn_batch_op_unregister(uint8_t aKind)
-;
-
-/*
- Performs an element-wise binary operation on two `TensorView`s into a `TensorViewMut`.
-
- # Safety
-
- - `a`, `b` must be valid, non-null pointers to `TensorView`s.
- - `out` must be a valid, non-null pointer to a `TensorViewMut`.
- - `op` must be a valid, non-null function pointer to an `RssnBinaryOpFn`.
- - The underlying data for `a`, `b`, and `out` must not alias.
- */
-
-RssnStatus rssn_broadcast_elementwise(TensorView *aA,
-                                      TensorView *aB,
-                                      TensorViewMut *aOut,
-                                      Option<RssnBinaryOpFn> aOp)
 ;
 
 /*
@@ -2415,6 +2398,23 @@ void rssn_strides_free(Strides *aStrides)
  */
 
 void rssn_string_free(char *aS)
+;
+
+/*
+ Performs an element-wise binary operation on two `TensorView`s into a `TensorViewMut`.
+
+ # Safety
+
+ - `a`, `b` must be valid, non-null pointers to `TensorView`s.
+ - `out` must be a valid, non-null pointer to a `TensorViewMut`.
+ - `op` must be a valid, non-null function pointer to an `RssnBinaryOpFn`.
+ - The underlying data for `a`, `b`, and `out` must not alias.
+ */
+
+RssnStatus rssn_tensor_elementwise_binary_op(const TensorView *aA,
+                                             const TensorView *aB,
+                                             TensorViewMut *aOut,
+                                             Option<RssnBinaryOpFn> aOp)
 ;
 
 /*

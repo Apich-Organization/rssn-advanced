@@ -10,7 +10,7 @@ use super::types::RssnStatus;
 use crate::dag::builder::DagBuilder;
 use crate::dag::node::DagNodeId;
 use crate::heuristic::{HeuristicConfig, HeuristicEngine, SearchStrategy};
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
 use std::panic::catch_unwind;
 use std::time::Duration;
@@ -3484,10 +3484,10 @@ pub extern "C" fn rssn_string_free(s: *mut c_char) {
 #[unsafe(no_mangle)]
 #[cfg(feature = "gpu")]
 pub extern "C" fn rssn_gpu_executor_new() -> *mut GpuExecutor {
-    let result = catch_unwind(|| {
-        GpuExecutor::new().map_or(std::ptr::null_mut(), |exec| Box::into_raw(Box::new(exec)))
-    });
-    result.unwrap_or(std::ptr::null_mut())
+    match GpuExecutor::new() {
+        Some(exec) => Box::into_raw(Box::new(exec)),
+        None => std::ptr::null_mut(),
+    }
 }
 
 /// Releases the memory of a previously allocated `GpuExecutor`.
@@ -3503,9 +3503,12 @@ pub extern "C" fn rssn_gpu_executor_free(executor: *mut GpuExecutor) {
     if executor.is_null() {
         return;
     }
-    let _ = catch_unwind(|| {
-        let _ = unsafe { Box::from_raw(executor) };
-    });
+    // Safety: `executor` must be a valid pointer from `rssn_gpu_executor_new`, or NULL.
+    // We already checked for NULL.
+    // Dropping `Box::from_raw` will deallocate the GpuExecutor.
+    unsafe {
+        let _ = Box::from_raw(executor);
+    }
 }
 
 /// Compiles a DAG expression into WGSL shader code for GPU execution.
@@ -3534,33 +3537,36 @@ pub extern "C" fn rssn_gpu_compile_wgsl(
         return RssnStatus::NullPointer;
     }
 
-    let result = catch_unwind(|| -> RssnStatus {
-        let builder_ref = unsafe { &mut *builder };
-        let root_id = DagNodeId::new(root);
-        let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
+    let builder_ref = unsafe { &mut *builder };
+    let root_id = DagNodeId::new(root);
+    let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
 
-        let var_order_slice = unsafe { std::slice::from_raw_parts(var_order, n_vars as usize) };
-        let var_order_strs: Vec<&str> = var_order_slice
-            .iter()
-            .map(|&ptr| unsafe { CStr::from_ptr(ptr).to_str() })
-            .collect::<Result<Vec<&str>, _>>()
-            .map_err(|_| RssnStatus::InvalidUtf8)?;
+    let var_order_slice = unsafe { std::slice::from_raw_parts(var_order, n_vars as usize) };
+    let var_order_strs: Vec<&str> = match var_order_slice
+        .iter()
+        .map(|&ptr| unsafe { CStr::from_ptr(ptr).to_str() })
+        .collect::<Result<Vec<&str>, _>>()
+    {
+        Ok(s) => s,
+        Err(_) => return RssnStatus::InvalidUtf8,
+    };
 
-        match crate::gpu::compiler::compile_to_wgsl(
-            &ast,
-            builder_ref.registry(),
-            builder_ref.fn_registry(),
-            &var_order_strs,
-        ) {
-            Ok(wgsl_code) => {
-                let c_string = CString::new(wgsl_code).unwrap();
-                unsafe { *out_wgsl = c_string.into_raw() };
-                RssnStatus::Success
-            }
-            Err(_) => RssnStatus::CompilationError,
+    match crate::gpu::compiler::compile_to_wgsl(
+        &ast,
+        builder_ref.registry(),
+        builder_ref.fn_registry(),
+        &var_order_strs,
+    ) {
+        Ok(wgsl_code) => {
+            let c_string = match CString::new(wgsl_code) {
+                Ok(s) => s,
+                Err(_) => return RssnStatus::CompilationError, // Or a more specific error if available
+            };
+            unsafe { *out_wgsl = c_string.into_raw() };
+            RssnStatus::Success
         }
-    });
-    result.unwrap_or(RssnStatus::Panic)
+        Err(_) => RssnStatus::CompilationError,
+    }
 }
 
 /// Executes a compiled WGSL shader on the GPU in a batch.
@@ -3594,30 +3600,29 @@ pub extern "C" fn rssn_gpu_execute_batch(
         return RssnStatus::NullPointer;
     }
 
-    let result = catch_unwind(|| -> RssnStatus {
-        let executor_ref = unsafe { &mut *executor };
-        let c_str_wgsl = unsafe { CStr::from_ptr(wgsl_src) };
-        let wgsl_str = c_str_wgsl.to_str().map_err(|_| RssnStatus::InvalidUtf8)?;
+    let executor_ref = unsafe { &mut *executor };
+    let c_str_wgsl = unsafe { CStr::from_ptr(wgsl_src) };
+    let wgsl_str = match c_str_wgsl.to_str() {
+        Ok(s) => s,
+        Err(_) => return RssnStatus::InvalidUtf8,
+    };
 
-        let mut rust_vars_cols: Vec<&[f64]> = Vec::with_capacity(n_vars as usize);
-        for i in 0..(n_vars as usize) {
-            let col_ptr = unsafe { *vars_cols.add(i) };
-            if col_ptr.is_null() {
-                return RssnStatus::NullPointer;
-            }
-            let slice = unsafe { std::slice::from_raw_parts(col_ptr, n_rows) };
-            rust_vars_cols.push(slice);
+    let mut rust_vars_cols: Vec<&[f64]> = Vec::with_capacity(n_vars as usize);
+    for i in 0..(n_vars as usize) {
+        let col_ptr = unsafe { *vars_cols.add(i) };
+        if col_ptr.is_null() {
+            return RssnStatus::NullPointer;
         }
+        let slice = unsafe { std::slice::from_raw_parts(col_ptr, n_rows) };
+        rust_vars_cols.push(slice);
+    }
 
-        let out_slice = unsafe { std::slice::from_raw_parts_mut(out, n_rows) };
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out, n_rows) };
 
-        executor_ref
-            .execute_batch(wgsl_str, n_rows, &rust_vars_cols, out_slice)
-            .map_err(|_| RssnStatus::ExecutionError)?;
-
-        RssnStatus::Success
-    });
-    result.unwrap_or(RssnStatus::Panic)
+    match executor_ref.execute_batch(wgsl_str, n_rows, &rust_vars_cols, out_slice) {
+        Ok(_) => RssnStatus::Success,
+        Err(_) => RssnStatus::CompilationError,
+    }
 }
 
 // =========================================================================
@@ -3977,7 +3982,7 @@ pub extern "C" fn rssn_tensor_view_mut_get(
     let result = catch_unwind(|| -> RssnStatus {
         let view_mut_ref = unsafe { &mut *view_mut };
         let idx_slice = unsafe { std::slice::from_raw_parts(idx, n_idx as usize) };
-        if let Some(val_ref) = view_mut_ref.get(idx_slice) {
+        if let Some(val_ref) = view_mut_ref.get_mut(idx_slice) {
             unsafe { *out_val = *val_ref };
             RssnStatus::Success
         } else {
@@ -3999,9 +4004,9 @@ pub type RssnBinaryOpFn = extern "C" fn(f64, f64) -> f64;
 /// - `op` must be a valid, non-null function pointer to an `RssnBinaryOpFn`.
 /// - The underlying data for `a`, `b`, and `out` must not alias.
 #[unsafe(no_mangle)]
-pub extern "C" fn rssn_broadcast_elementwise(
-    a: *mut TensorView<'static>,
-    b: *mut TensorView<'static>,
+pub extern "C" fn rssn_tensor_elementwise_binary_op(
+    a: *const TensorView<'static>,
+    b: *const TensorView<'static>,
     out: *mut TensorViewMut<'static>,
     op: Option<RssnBinaryOpFn>,
 ) -> RssnStatus {
@@ -4012,15 +4017,14 @@ pub extern "C" fn rssn_broadcast_elementwise(
         return RssnStatus::NullPointer;
     };
 
-    let result = catch_unwind(|| -> RssnStatus {
-        let a_ref = unsafe { &*a };
-        let b_ref = unsafe { &*b };
-        let out_ref = unsafe { &mut *out };
+    let a_ref = unsafe { &*a };
+    let b_ref = unsafe { &*b };
+    let out_ref = unsafe { &mut *out };
 
-        crate::tensor::view::broadcast_elementwise(a_ref, b_ref, out_ref, |x, y| op_fn(x, y))
-            .map_err(|_| RssnStatus::BroadcastError)?;
+    let res = crate::tensor::view::broadcast_elementwise(a_ref, b_ref, out_ref, |x, y| op_fn(x, y));
 
-        RssnStatus::Success
-    });
-    result.unwrap_or(RssnStatus::Panic)
+    match res {
+        Ok(_) => RssnStatus::Success,
+        Err(_) => RssnStatus::BroadcastError,
+    }
 }
