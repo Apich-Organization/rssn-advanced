@@ -11,6 +11,15 @@ use bytemuck;
 ///
 /// Automatically registers all variable bindings, maps constant literals, and resolves
 /// transcendental/intrinsic functions to their native GPU hardware shader equivalents.
+///
+/// # Errors
+/// Returns a `String` describing the error if compilation fails due to:
+/// - An empty AST projection.
+/// - Invalid node indices in the AST.
+/// - Unsupported infinite or NaN constants.
+/// - Unknown variable or function symbol IDs.
+/// - Incorrect number of children for operators.
+/// - Unsupported functions or control flow nodes on the GPU backend.
 pub fn compile_to_wgsl(
     ast: &AstProjection,
     var_registry: &SymbolRegistry,
@@ -24,18 +33,24 @@ pub fn compile_to_wgsl(
     // Format the root node recursively.
     let expr_str = format_node(ast, 0, var_registry, fn_registry, var_order)?;
 
+    use std::fmt::Write; // Add this import at the top of the file
+
     // Construct the storage bindings and shader entry point template.
     let mut bindings = String::new();
     for (i, _) in var_order.iter().enumerate() {
-        bindings.push_str(&format!(
-            "@group(0) @binding({i}) var<storage, read> var_{i}: array<f32>;\n"
-        ));
+        writeln!(
+            &mut bindings,
+            "@group(0) @binding({i}) var<storage, read> var_{i}: array<f32>;"
+        )
+        .unwrap(); // Using unwrap assuming write! to String never fails.
     }
     // The output buffer is bound directly after the variables.
     let out_binding = var_order.len();
-    bindings.push_str(&format!(
-        "@group(0) @binding({out_binding}) var<storage, read_write> out_col: array<f32>;\n"
-    ));
+    writeln!(
+        &mut bindings,
+        "@group(0) @binding({out_binding}) var<storage, read_write> out_col: array<f32>;"
+    )
+    .unwrap();
 
     let wgsl_code = format!(
         "{bindings}
@@ -217,11 +232,10 @@ impl GpuExecutor {
     #[must_use]
     pub fn new() -> Option<Self> {
         let instance = wgpu::Instance::default();
-        let adapter = match pollster::block_on(
-            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
-        ) {
-            Ok(adapter) => adapter,
-            Err(_) => return None,
+        let Ok(adapter) =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        else {
+            return None;
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("RSSN JIT GPU Device"),
@@ -249,6 +263,22 @@ impl GpuExecutor {
     ///
     /// Performs zero-allocation float array conversions at the CPU-GPU memory boundary
     /// using a pre-allocated conversion scratchpad, maintaining optimal cache locality.
+    ///
+    /// # Panics
+    /// This function may panic if:
+    /// - Internal WGPU calls fail unexpectedly (e.g., `unwrap()` on `create_compute_pipeline`).
+    /// - A compute pipeline cannot be created.
+    /// - A bind group cannot be created.
+    /// - A command encoder cannot be created.
+    /// - Submission of commands to the queue fails.
+    /// - `pollster::block_on` encounters an error when polling the device.
+    /// - `bytemuck::cast_slice` fails (indicating incorrect memory layout assumptions).
+    ///
+    /// # Errors
+    /// Returns a `String` describing the error if execution fails due to:
+    /// - Failure to fetch the compute pipeline from the cache.
+    /// - Uninitialized output or staging buffers.
+    /// - Staging buffer mapping fails or the GPU channel disconnects.
     pub fn execute_batch(
         &mut self,
         shader_src: &str,

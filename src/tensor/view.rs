@@ -10,6 +10,9 @@
 //! The `get_unchecked` family is `unsafe` and requires the caller to guarantee
 //! that the flat index does not exceed the buffer length.
 
+#![allow(clippy::elidable_lifetime_names)]
+#![allow(clippy::too_many_arguments)]
+
 use super::shape::{Shape, Strides};
 use smallvec::SmallVec;
 
@@ -41,7 +44,7 @@ impl<'a> TensorView<'a> {
         } else {
             0
         };
-        let required_len = storage_offset + max_idx + if shape.numel() > 0 { 1 } else { 0 };
+        let required_len = storage_offset + max_idx + usize::from(shape.numel() > 0);
         assert!(
             data.len() >= required_len,
             "Buffer too small for contiguous shape: need {} elements, got {}",
@@ -86,7 +89,7 @@ impl<'a> TensorView<'a> {
         } else {
             0
         };
-        let required_len = storage_offset + max_idx + if shape.numel() > 0 { 1 } else { 0 };
+        let required_len = storage_offset + max_idx + usize::from(shape.numel() > 0);
         assert!(
             data.len() >= required_len,
             "Buffer too small for strided layout: need space for index {} (required size {}), got buffer of size {}",
@@ -195,6 +198,7 @@ impl<'a> TensorView<'a> {
     ///
     /// This is the fundamental building block for element-wise operations and
     /// vectorized kernel dispatch.
+    #[must_use]
     pub fn iter_elements(&self) -> ElementIter<'_> {
         if self.is_contiguous() {
             ElementIter::Contiguous(self.as_slice().iter())
@@ -202,7 +206,7 @@ impl<'a> TensorView<'a> {
             let rank = self.shape.rank();
             let idx = SmallVec::<[usize; 8]>::from_elem(0, rank);
             let done = self.shape.dims().contains(&0);
-            ElementIter::Strided(StridedElementIter {
+            ElementIter::Strided(Box::new(StridedElementIter {
                 data: self.data,
                 strides: self.strides.clone(),
                 dims: self.shape.clone(),
@@ -210,7 +214,7 @@ impl<'a> TensorView<'a> {
                 done,
                 flat_offset: self.storage_offset,
                 elements_yielded: 0,
-            })
+            }))
         }
     }
 }
@@ -222,7 +226,7 @@ impl<'a, const N: usize> core::ops::Index<[usize; N]> for TensorView<'a> {
     fn index(&self, index: [usize; N]) -> &Self::Output {
         assert_eq!(N, self.shape.rank(), "Index rank mismatch");
         for (&i, &d) in index.iter().zip(self.shape.dims()) {
-            assert!(i < d, "Index {} out of bounds for dimension size {}", i, d);
+            assert!(i < d, "Index {i} out of bounds for dimension size {d}");
         }
         let flat = self.strides.flat_index(&index);
         &self.data[self.storage_offset + flat]
@@ -236,7 +240,7 @@ impl<'a> core::ops::Index<&[usize]> for TensorView<'a> {
     fn index(&self, index: &[usize]) -> &Self::Output {
         assert_eq!(index.len(), self.shape.rank(), "Index rank mismatch");
         for (&i, &d) in index.iter().zip(self.shape.dims()) {
-            assert!(i < d, "Index {} out of bounds for dimension size {}", i, d);
+            assert!(i < d, "Index {i} out of bounds for dimension size {d}");
         }
         let flat = self.strides.flat_index(index);
         &self.data[self.storage_offset + flat]
@@ -291,7 +295,7 @@ impl<'a> TensorViewMut<'a> {
         } else {
             0
         };
-        let required_len = storage_offset + max_idx + if shape.numel() > 0 { 1 } else { 0 };
+        let required_len = storage_offset + max_idx + usize::from(shape.numel() > 0);
         assert!(
             data.len() >= required_len,
             "Buffer too small for shape and offset: need {} elements, got {}",
@@ -366,12 +370,10 @@ impl<'a> TensorViewMut<'a> {
     ///
     /// Returns `false` if the index is out-of-bounds.
     pub fn set(&mut self, idx: &[usize], val: f64) -> bool {
-        if let Some(slot) = self.get_mut(idx) {
+        self.get_mut(idx).is_some_and(|slot| {
             *slot = val;
             true
-        } else {
-            false
-        }
+        })
     }
 
     /// Returns the flat backing buffer immutably (the entire underlying memory).
@@ -383,7 +385,7 @@ impl<'a> TensorViewMut<'a> {
 
     /// Returns the flat backing buffer mutably (the entire underlying memory).
     /// Use `as_slice_mut()` to get the view's active segment.
-    pub fn as_raw_slice_mut(&mut self) -> &mut [f64] {
+    pub const fn as_raw_slice_mut(&mut self) -> &mut [f64] {
         self.data
     }
 
@@ -432,7 +434,7 @@ impl<'a, const N: usize> core::ops::Index<[usize; N]> for TensorViewMut<'a> {
     fn index(&self, index: [usize; N]) -> &Self::Output {
         assert_eq!(N, self.shape.rank(), "Index rank mismatch");
         for (&i, &d) in index.iter().zip(self.shape.dims()) {
-            assert!(i < d, "Index {} out of bounds for dimension size {}", i, d);
+            assert!(i < d, "Index {i} out of bounds for dimension size {d}");
         }
         let flat = self.strides.flat_index(&index);
         &self.data[self.storage_offset + flat]
@@ -444,7 +446,7 @@ impl<'a, const N: usize> core::ops::IndexMut<[usize; N]> for TensorViewMut<'a> {
     fn index_mut(&mut self, index: [usize; N]) -> &mut Self::Output {
         assert_eq!(N, self.shape.rank(), "Index rank mismatch");
         for (&i, &d) in index.iter().zip(self.shape.dims()) {
-            assert!(i < d, "Index {} out of bounds for dimension size {}", i, d);
+            assert!(i < d, "Index {i} out of bounds for dimension size {d}");
         }
         let flat = self.strides.flat_index(&index);
         &mut self.data[self.storage_offset + flat]
@@ -456,7 +458,7 @@ impl<'a> core::ops::IndexMut<&[usize]> for TensorViewMut<'a> {
     fn index_mut(&mut self, index: &[usize]) -> &mut Self::Output {
         assert_eq!(index.len(), self.shape.rank(), "Index rank mismatch");
         for (&i, &d) in index.iter().zip(self.shape.dims()) {
-            assert!(i < d, "Index {} out of bounds for dimension size {}", i, d);
+            assert!(i < d, "Index {i} out of bounds for dimension size {d}");
         }
         let flat = self.strides.flat_index(index);
         &mut self.data[self.storage_offset + flat]
@@ -470,7 +472,7 @@ impl<'a> core::ops::Index<&[usize]> for TensorViewMut<'a> {
     fn index(&self, index: &[usize]) -> &Self::Output {
         assert_eq!(index.len(), self.shape.rank(), "Index rank mismatch");
         for (&i, &d) in index.iter().zip(self.shape.dims()) {
-            assert!(i < d, "Index {} out of bounds for dimension size {}", i, d);
+            assert!(i < d, "Index {i} out of bounds for dimension size {d}");
         }
         let flat = self.strides.flat_index(index);
         &self.data[self.storage_offset + flat]
@@ -611,7 +613,7 @@ where
 
     let out_strides_cloned = out.strides().clone();
     let output_iter = OutputFlatIndexIterator::new(
-        out_shape.clone(),
+        out_shape,
         out_strides_cloned.clone(),
         a_strides_padded.clone(),
         b_strides_padded.clone(),
@@ -639,11 +641,11 @@ where
 
     // Debug assertions to catch physical overlap/aliasing in development
     debug_assert!(
-        a_ptr as *const () != out_ptr as *const (),
+        a_ptr.cast::<()>() != out_ptr as *const (),
         "Tensor A and Output alias!"
     );
     debug_assert!(
-        b_ptr as *const () != out_ptr as *const (),
+        b_ptr.cast::<()>() != out_ptr as *const (),
         "Tensor B and Output alias!"
     );
 
@@ -835,9 +837,12 @@ unsafe fn broadcast_elementwise_kernel<F>(
     }
 }
 
+/// An iterator over the elements of a tensor view.
 pub enum ElementIter<'a> {
+    /// An iterator for contiguous tensor views.
     Contiguous(std::slice::Iter<'a, f64>),
-    Strided(StridedElementIter<'a>),
+    /// An iterator for strided (non-contiguous) tensor views.
+    Strided(Box<StridedElementIter<'a>>),
 }
 
 impl<'a> Iterator for ElementIter<'a> {
@@ -878,6 +883,9 @@ pub struct StridedElementIter<'a> {
 impl<'a> Iterator for StridedElementIter<'a> {
     type Item = f64;
 
+    /// Advances the iterator and returns the next element.
+    ///
+    /// Returns `None` when the iterator is exhausted.
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -940,6 +948,7 @@ pub struct OutputFlatIndexIterator {
 }
 
 impl OutputFlatIndexIterator {
+    /// Creates a new `OutputFlatIndexIterator`.
     #[must_use]
     pub fn new(
         output_shape: Shape,
@@ -964,7 +973,7 @@ impl OutputFlatIndexIterator {
             }
         }
 
-        OutputFlatIndexIterator {
+        Self {
             dims: output_shape,
             strides: output_strides,
             idx,

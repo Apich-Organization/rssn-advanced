@@ -282,12 +282,7 @@ fn build_dag_node(
             OpKind::Neg if child_ids.len() == 1 => builder.neg(child_ids[0]),
             _ => DagNodeId::NONE,
         },
-        SymbolKind::Function(_) => builder.operator(
-            ast_node.kind,
-            child_ids,
-            crate::dag::metadata::NodeFlags::EMPTY,
-        ),
-        SymbolKind::ControlFlow(_) => builder.operator(
+        SymbolKind::Function(_) | SymbolKind::ControlFlow(_) => builder.operator(
             ast_node.kind,
             child_ids,
             crate::dag::metadata::NodeFlags::EMPTY,

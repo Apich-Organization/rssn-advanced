@@ -69,6 +69,7 @@ impl Shape {
     /// Broadcasting dimensions (size == 1) receive stride `0` so that their
     /// element is reused without copying.
     #[must_use]
+    #[allow(clippy::unnecessary_cast)]
     pub fn row_major_strides(&self) -> Strides {
         let rank = self.dims.len();
         if rank == 0 {
@@ -219,6 +220,7 @@ impl Strides {
     /// Computes a flat element index from a multi-dimensional index.
     /// Returns `Some(flat_index)` if the calculation does not overflow `usize`,
     /// `None` otherwise.
+    #[must_use]
     pub fn checked_flat_index(&self, idx: &[usize]) -> Option<usize> {
         debug_assert_eq!(
             idx.len(),
@@ -250,6 +252,7 @@ impl Strides {
     /// # Panics
     /// Panics if the rank of `self` and `shape` do not match.
     /// Panics if the maximum flat index calculation overflows `usize`.
+    #[must_use]
     pub fn max_flat_index(&self, shape: &Shape) -> usize {
         assert_eq!(
             self.strides.len(),

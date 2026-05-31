@@ -3466,7 +3466,7 @@ use crate::gpu::compiler::GpuExecutor;
 ///
 /// # Safety
 ///
-/// `s` must be a pointer to a CString allocated by Rust (e.g., via `CString::into_raw`).
+/// `s` must be a pointer to a `CString` allocated by Rust (e.g., via `CString::into_raw`).
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_string_free(s: *mut c_char) {
     if s.is_null() {
@@ -3484,10 +3484,7 @@ pub extern "C" fn rssn_string_free(s: *mut c_char) {
 #[unsafe(no_mangle)]
 #[cfg(feature = "gpu")]
 pub extern "C" fn rssn_gpu_executor_new() -> *mut GpuExecutor {
-    match GpuExecutor::new() {
-        Some(exec) => Box::into_raw(Box::new(exec)),
-        None => std::ptr::null_mut(),
-    }
+    GpuExecutor::new().map_or(std::ptr::null_mut(), |exec| Box::into_raw(Box::new(exec)))
 }
 
 /// Releases the memory of a previously allocated `GpuExecutor`.
@@ -3558,9 +3555,8 @@ pub extern "C" fn rssn_gpu_compile_wgsl(
         &var_order_strs,
     ) {
         Ok(wgsl_code) => {
-            let c_string = match CString::new(wgsl_code) {
-                Ok(s) => s,
-                Err(_) => return RssnStatus::CompilationError, // Or a more specific error if available
+            let Ok(c_string) = CString::new(wgsl_code) else {
+                return RssnStatus::CompilationError;
             };
             unsafe { *out_wgsl = c_string.into_raw() };
             RssnStatus::Success
@@ -3602,9 +3598,8 @@ pub extern "C" fn rssn_gpu_execute_batch(
 
     let executor_ref = unsafe { &mut *executor };
     let c_str_wgsl = unsafe { CStr::from_ptr(wgsl_src) };
-    let wgsl_str = match c_str_wgsl.to_str() {
-        Ok(s) => s,
-        Err(_) => return RssnStatus::InvalidUtf8,
+    let Ok(wgsl_str) = c_str_wgsl.to_str() else {
+        return RssnStatus::InvalidUtf8;
     };
 
     let mut rust_vars_cols: Vec<&[f64]> = Vec::with_capacity(n_vars as usize);
@@ -3620,7 +3615,7 @@ pub extern "C" fn rssn_gpu_execute_batch(
     let out_slice = unsafe { std::slice::from_raw_parts_mut(out, n_rows) };
 
     match executor_ref.execute_batch(wgsl_str, n_rows, &rust_vars_cols, out_slice) {
-        Ok(_) => RssnStatus::Success,
+        Ok(()) => RssnStatus::Success,
         Err(_) => RssnStatus::CompilationError,
     }
 }
@@ -3711,7 +3706,7 @@ pub extern "C" fn rssn_shape_numel(shape: *mut Shape, out_numel: *mut usize) -> 
 /// - `shape` must be a valid, non-null pointer to a `Shape`.
 /// - `out_dims` must be a valid, non-null, writable `*const usize` pointer.
 /// - `out_n_dims` must be a valid, non-null, writable `u32` pointer.
-/// The returned `*const usize` is only valid as long as the `Shape` object is alive.
+///   The returned `*const usize` is only valid as long as the `Shape` object is alive.
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_shape_dims(
     shape: *mut Shape,
@@ -3773,7 +3768,7 @@ pub extern "C" fn rssn_strides_free(strides: *mut Strides) {
 /// - `strides` must be a valid, non-null pointer to a `Strides`.
 /// - `out_strides` must be a valid, non-null, writable `*const usize` pointer.
 /// - `out_n_strides` must be a valid, non-null, writable `u32` pointer.
-/// The returned `*const usize` is only valid as long as the `Strides` object is alive.
+///   The returned `*const usize` is only valid as long as the `Strides` object is alive.
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_strides_as_slice(
     strides: *mut Strides,
@@ -3828,6 +3823,7 @@ pub extern "C" fn rssn_strides_flat_index(
 ///
 /// - `data` must point to an array of `n_data` valid `f64` values, which must outlive the `TensorView`.
 /// - `shape` must be a valid, non-null pointer to a `Shape`.
+#[allow(clippy::option_if_let_else)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_tensor_view_new(
     data: *const f64,
@@ -3838,13 +3834,11 @@ pub extern "C" fn rssn_tensor_view_new(
     if data.is_null() || shape.is_null() {
         return std::ptr::null_mut();
     }
-    let result = catch_unwind(|| {
-        let data_slice = unsafe { std::slice::from_raw_parts(data, n_data) };
-        let shape_ref = unsafe { &*shape };
-        let view = TensorView::new(data_slice, shape_ref.clone(), storage_offset);
-        Box::into_raw(Box::new(view))
-    });
-    result.unwrap_or(std::ptr::null_mut())
+
+    let data_slice = unsafe { std::slice::from_raw_parts(data, n_data) };
+    let shape_ref = unsafe { &*shape };
+    let view = TensorView::new(data_slice, shape_ref.clone(), storage_offset);
+    Box::into_raw(Box::new(view))
 }
 
 /// Frees a `TensorView` previously returned by [`rssn_tensor_view_new`].
@@ -3870,6 +3864,7 @@ pub extern "C" fn rssn_tensor_view_free(view: *mut TensorView<'static>) {
 ///
 /// - `data` must point to an array of `n_data` valid `f64` values, which must outlive the `TensorViewMut`.
 /// - `shape` must be a valid, non-null pointer to a `Shape`.
+#[allow(clippy::option_if_let_else)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rssn_tensor_view_mut_new(
     data: *mut f64,
@@ -3880,13 +3875,11 @@ pub extern "C" fn rssn_tensor_view_mut_new(
     if data.is_null() || shape.is_null() {
         return std::ptr::null_mut();
     }
-    let result = catch_unwind(|| {
-        let data_slice = unsafe { std::slice::from_raw_parts_mut(data, n_data) };
-        let shape_ref = unsafe { &*shape };
-        let view = TensorViewMut::new(data_slice, shape_ref.clone(), storage_offset);
-        Box::into_raw(Box::new(view))
-    });
-    result.unwrap_or(std::ptr::null_mut())
+
+    let data_slice = unsafe { std::slice::from_raw_parts_mut(data, n_data) };
+    let shape_ref = unsafe { &*shape };
+    let view = TensorViewMut::new(data_slice, shape_ref.clone(), storage_offset);
+    Box::into_raw(Box::new(view))
 }
 
 /// Frees a `TensorViewMut` previously returned by [`rssn_tensor_view_mut_new`].
@@ -3924,12 +3917,12 @@ pub extern "C" fn rssn_tensor_view_get(
     let result = catch_unwind(|| -> RssnStatus {
         let view_ref = unsafe { &*view };
         let idx_slice = unsafe { std::slice::from_raw_parts(idx, n_idx as usize) };
-        if let Some(val) = view_ref.get(idx_slice) {
-            unsafe { *out_val = val };
-            RssnStatus::Success
-        } else {
-            RssnStatus::OutOfBounds
-        }
+        view_ref
+            .get(idx_slice)
+            .map_or(RssnStatus::OutOfBounds, |val| {
+                unsafe { *out_val = val };
+                RssnStatus::Success
+            })
     });
     result.unwrap_or(RssnStatus::Panic)
 }
@@ -3982,12 +3975,12 @@ pub extern "C" fn rssn_tensor_view_mut_get(
     let result = catch_unwind(|| -> RssnStatus {
         let view_mut_ref = unsafe { &mut *view_mut };
         let idx_slice = unsafe { std::slice::from_raw_parts(idx, n_idx as usize) };
-        if let Some(val_ref) = view_mut_ref.get_mut(idx_slice) {
-            unsafe { *out_val = *val_ref };
-            RssnStatus::Success
-        } else {
-            RssnStatus::OutOfBounds
-        }
+        view_mut_ref
+            .get_mut(idx_slice)
+            .map_or(RssnStatus::OutOfBounds, |val_ref| {
+                unsafe { *out_val = *val_ref };
+                RssnStatus::Success
+            })
     });
     result.unwrap_or(RssnStatus::Panic)
 }
@@ -4024,7 +4017,7 @@ pub extern "C" fn rssn_tensor_elementwise_binary_op(
     let res = crate::tensor::view::broadcast_elementwise(a_ref, b_ref, out_ref, |x, y| op_fn(x, y));
 
     match res {
-        Ok(_) => RssnStatus::Success,
+        Ok(()) => RssnStatus::Success,
         Err(_) => RssnStatus::BroadcastError,
     }
 }

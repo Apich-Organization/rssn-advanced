@@ -16,6 +16,7 @@
 //!    instead of recursive — no more stack-overflow risk on deep
 //!    expressions.
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use crate::dag::arena::DagArena;
@@ -200,7 +201,7 @@ fn reduce_frame_with_overrides(
                         let body_val = child_vals[3];
                         let mut acc = init_val;
                         let mut idx = 0.0;
-                        while idx < limit_val {
+                        while idx.partial_cmp(&limit_val) == Some(Ordering::Less) {
                             acc += body_val;
                             idx += step_val;
                         }
@@ -382,7 +383,7 @@ fn reduce_frame(
                         let body_val = child_vals[3];
                         let mut acc = init_val;
                         let mut idx = 0.0;
-                        while idx < limit_val {
+                        while idx.partial_cmp(&limit_val) == Some(Ordering::Less) {
                             acc += body_val;
                             idx += step_val;
                         }
@@ -501,7 +502,7 @@ fn reduce_frame_with_fns(
                         let body_val = child_vals[3];
                         let mut acc = init_val;
                         let mut idx = 0.0;
-                        while idx < limit_val {
+                        while idx.partial_cmp(&limit_val) == Some(Ordering::Less) {
                             acc += body_val;
                             idx += step_val;
                         }

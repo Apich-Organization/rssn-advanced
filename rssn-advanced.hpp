@@ -2274,7 +2274,7 @@ RssnRuleRegistry *rssn_rule_registry_new()
  - `shape` must be a valid, non-null pointer to a `Shape`.
  - `out_dims` must be a valid, non-null, writable `*const usize` pointer.
  - `out_n_dims` must be a valid, non-null, writable `u32` pointer.
- The returned `*const usize` is only valid as long as the `Shape` object is alive.
+   The returned `*const usize` is only valid as long as the `Shape` object is alive.
  */
 
 RssnStatus rssn_shape_dims(Shape *aShape,
@@ -2354,7 +2354,7 @@ Strides *rssn_shape_row_major_strides(Shape *aShape)
  - `strides` must be a valid, non-null pointer to a `Strides`.
  - `out_strides` must be a valid, non-null, writable `*const usize` pointer.
  - `out_n_strides` must be a valid, non-null, writable `u32` pointer.
- The returned `*const usize` is only valid as long as the `Strides` object is alive.
+   The returned `*const usize` is only valid as long as the `Strides` object is alive.
  */
 
 RssnStatus rssn_strides_as_slice(Strides *aStrides,
@@ -2394,7 +2394,7 @@ void rssn_strides_free(Strides *aStrides)
 
  # Safety
 
- `s` must be a pointer to a CString allocated by Rust (e.g., via `CString::into_raw`).
+ `s` must be a pointer to a `CString` allocated by Rust (e.g., via `CString::into_raw`).
  */
 
 void rssn_string_free(char *aS)

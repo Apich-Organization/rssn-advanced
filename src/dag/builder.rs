@@ -266,10 +266,10 @@ impl DagBuilder {
     /// Compiles to a loop header, loop body, and loop exit block in Cranelift IR
     /// using SSA block parameters to carry the accumulator across iterations.
     ///
-    /// - `init`: initial accumulator value.
-    /// - `limit`: loop runs while `loop_idx < limit` (exclusive upper bound).
-    /// - `step`: loop index is incremented by `step` each iteration.
-    /// - `body`: expression evaluated each iteration; may reference the current
+    ///  - `init`: initial accumulator value.
+    ///  - `limit`: loop runs while `loop_idx < limit` (exclusive upper bound).
+    ///  - `step`: loop index is incremented by `step` each iteration.
+    ///  - `body`: expression evaluated each iteration; may reference the current
     ///    loop index and accumulator via `LoopVar`/`Acc` special variables.
     pub fn for_loop(
         &mut self,
