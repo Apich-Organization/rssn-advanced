@@ -3454,3 +3454,573 @@ pub extern "C" fn rssn_dag_egraph_with_custom_ops(
     }));
     result.unwrap_or(RssnStatus::Panic)
 }
+
+// =========================================================================
+// GPU Functions
+// =========================================================================
+
+#[cfg(feature = "gpu")]
+use crate::gpu::compiler::GpuExecutor;
+
+/// Frees a string previously allocated by Rust and passed to C.
+///
+/// # Safety
+///
+/// `s` must be a pointer to a CString allocated by Rust (e.g., via `CString::into_raw`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_string_free(s: *mut c_char) {
+    if s.is_null() {
+        return;
+    }
+    let _ = catch_unwind(|| {
+        let _ = unsafe { CString::from_raw(s) };
+    });
+}
+
+/// Creates a new `GpuExecutor` context.
+///
+/// Returns a raw pointer to the executor, or NULL if creation failed or panicked.
+/// The returned pointer must be freed exactly once via [`rssn_gpu_executor_free`].
+#[unsafe(no_mangle)]
+#[cfg(feature = "gpu")]
+pub extern "C" fn rssn_gpu_executor_new() -> *mut GpuExecutor {
+    let result = catch_unwind(|| {
+        GpuExecutor::new().map_or(std::ptr::null_mut(), |exec| Box::into_raw(Box::new(exec)))
+    });
+    result.unwrap_or(std::ptr::null_mut())
+}
+
+/// Releases the memory of a previously allocated `GpuExecutor`.
+///
+/// # Safety
+///
+/// `executor` must be a pointer previously returned by [`rssn_gpu_executor_new`], or NULL.
+/// After this call the pointer is dangling and must not be used.
+/// Passing a pointer not from `rssn_gpu_executor_new`, or freeing twice, is undefined behaviour.
+#[unsafe(no_mangle)]
+#[cfg(feature = "gpu")]
+pub extern "C" fn rssn_gpu_executor_free(executor: *mut GpuExecutor) {
+    if executor.is_null() {
+        return;
+    }
+    let _ = catch_unwind(|| {
+        let _ = unsafe { Box::from_raw(executor) };
+    });
+}
+
+/// Compiles a DAG expression into WGSL shader code for GPU execution.
+///
+/// On `Success`, writes a pointer to a C-string containing the WGSL code to `*out_wgsl`.
+/// The caller is responsible for freeing this string using [`rssn_string_free`].
+///
+/// # Safety
+///
+/// - `builder` must be a valid, non-null pointer to a `DagBuilder`.
+/// - `out_wgsl` must be a valid, non-null, writable `*mut c_char` pointer.
+/// - `var_order` must point to an array of `n_vars` valid, null-terminated C strings.
+#[unsafe(no_mangle)]
+#[cfg(feature = "gpu")]
+pub extern "C" fn rssn_gpu_compile_wgsl(
+    builder: *mut DagBuilder,
+    root: u32,
+    var_order: *const *const c_char,
+    n_vars: u32,
+    out_wgsl: *mut *mut c_char,
+) -> RssnStatus {
+    if builder.is_null() || out_wgsl.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if n_vars > 0 && var_order.is_null() {
+        return RssnStatus::NullPointer;
+    }
+
+    let result = catch_unwind(|| -> RssnStatus {
+        let builder_ref = unsafe { &mut *builder };
+        let root_id = DagNodeId::new(root);
+        let ast = crate::ast::convert::dag_to_ast(builder_ref.arena(), root_id);
+
+        let var_order_slice = unsafe { std::slice::from_raw_parts(var_order, n_vars as usize) };
+        let var_order_strs: Vec<&str> = var_order_slice
+            .iter()
+            .map(|&ptr| unsafe { CStr::from_ptr(ptr).to_str() })
+            .collect::<Result<Vec<&str>, _>>()
+            .map_err(|_| RssnStatus::InvalidUtf8)?;
+
+        match crate::gpu::compiler::compile_to_wgsl(
+            &ast,
+            builder_ref.registry(),
+            builder_ref.fn_registry(),
+            &var_order_strs,
+        ) {
+            Ok(wgsl_code) => {
+                let c_string = CString::new(wgsl_code).unwrap();
+                unsafe { *out_wgsl = c_string.into_raw() };
+                RssnStatus::Success
+            }
+            Err(_) => RssnStatus::CompilationError,
+        }
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Executes a compiled WGSL shader on the GPU in a batch.
+///
+/// `vars_cols` is an array of `n_vars` pointers; each pointer addresses a
+/// contiguous column of `n_rows` `f64` values for the corresponding variable.
+///
+/// `out` must point to a writable array of `n_rows` `f64` values.
+///
+/// # Safety
+///
+/// - `executor` must be a valid, non-null pointer to a `GpuExecutor`.
+/// - `wgsl_src` must be a valid, non-null, null-terminated C string.
+/// - `vars_cols` must point to `n_vars` valid column pointers, each of length `n_rows`.
+/// - `out` must point to a writable array of `n_rows` `f64` values.
+/// - All pointers must remain valid for the duration of this call.
+#[unsafe(no_mangle)]
+#[cfg(feature = "gpu")]
+pub extern "C" fn rssn_gpu_execute_batch(
+    executor: *mut GpuExecutor,
+    wgsl_src: *const c_char,
+    n_rows: usize,
+    vars_cols: *const *const f64,
+    n_vars: u32,
+    out: *mut f64,
+) -> RssnStatus {
+    if executor.is_null() || wgsl_src.is_null() || out.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    if n_vars > 0 && vars_cols.is_null() {
+        return RssnStatus::NullPointer;
+    }
+
+    let result = catch_unwind(|| -> RssnStatus {
+        let executor_ref = unsafe { &mut *executor };
+        let c_str_wgsl = unsafe { CStr::from_ptr(wgsl_src) };
+        let wgsl_str = c_str_wgsl.to_str().map_err(|_| RssnStatus::InvalidUtf8)?;
+
+        let mut rust_vars_cols: Vec<&[f64]> = Vec::with_capacity(n_vars as usize);
+        for i in 0..(n_vars as usize) {
+            let col_ptr = unsafe { *vars_cols.add(i) };
+            if col_ptr.is_null() {
+                return RssnStatus::NullPointer;
+            }
+            let slice = unsafe { std::slice::from_raw_parts(col_ptr, n_rows) };
+            rust_vars_cols.push(slice);
+        }
+
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(out, n_rows) };
+
+        executor_ref
+            .execute_batch(wgsl_str, n_rows, &rust_vars_cols, out_slice)
+            .map_err(|_| RssnStatus::ExecutionError)?;
+
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+// =========================================================================
+// Tensor Functions
+// =========================================================================
+
+use crate::tensor::shape::{Shape, Strides};
+use crate::tensor::view::{TensorView, TensorViewMut};
+
+/// Creates a new `Shape` from a slice of dimension extents.
+///
+/// The returned pointer must be freed exactly once via [`rssn_shape_free`].
+///
+/// # Safety
+///
+/// `dims` must point to an array of `n_dims` valid `usize` values.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_shape_new(dims: *const usize, n_dims: u32) -> *mut Shape {
+    if n_dims > 0 && dims.is_null() {
+        return std::ptr::null_mut();
+    }
+    let result = catch_unwind(|| {
+        let dims_slice = unsafe { std::slice::from_raw_parts(dims, n_dims as usize) };
+        Box::into_raw(Box::new(Shape::from_dims(dims_slice)))
+    });
+    result.unwrap_or(std::ptr::null_mut())
+}
+
+/// Frees a `Shape` previously returned by [`rssn_shape_new`].
+///
+/// # Safety
+///
+/// `shape` must be a pointer previously returned by [`rssn_shape_new`], or NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_shape_free(shape: *mut Shape) {
+    if shape.is_null() {
+        return;
+    }
+    let _ = catch_unwind(|| {
+        let _ = unsafe { Box::from_raw(shape) };
+    });
+}
+
+/// Returns the number of dimensions (rank) of a `Shape`.
+///
+/// # Safety
+///
+/// `shape` must be a valid, non-null pointer to a `Shape`.
+/// `out_rank` must be a valid, non-null, writable `u32` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_shape_rank(shape: *mut Shape, out_rank: *mut u32) -> RssnStatus {
+    if shape.is_null() || out_rank.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| {
+        let shape_ref = unsafe { &*shape };
+        unsafe { *out_rank = shape_ref.rank() as u32 };
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Returns the total number of elements (`numel`) of a `Shape`.
+///
+/// # Safety
+///
+/// `shape` must be a valid, non-null pointer to a `Shape`.
+/// `out_numel` must be a valid, non-null, writable `usize` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_shape_numel(shape: *mut Shape, out_numel: *mut usize) -> RssnStatus {
+    if shape.is_null() || out_numel.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| {
+        let shape_ref = unsafe { &*shape };
+        unsafe { *out_numel = shape_ref.numel() };
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Returns a pointer to the internal dimensions slice of a `Shape`.
+///
+/// # Safety
+///
+/// - `shape` must be a valid, non-null pointer to a `Shape`.
+/// - `out_dims` must be a valid, non-null, writable `*const usize` pointer.
+/// - `out_n_dims` must be a valid, non-null, writable `u32` pointer.
+/// The returned `*const usize` is only valid as long as the `Shape` object is alive.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_shape_dims(
+    shape: *mut Shape,
+    out_dims: *mut *const usize,
+    out_n_dims: *mut u32,
+) -> RssnStatus {
+    if shape.is_null() || out_dims.is_null() || out_n_dims.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| {
+        let shape_ref = unsafe { &*shape };
+        unsafe {
+            *out_dims = shape_ref.dims().as_ptr();
+            *out_n_dims = shape_ref.rank() as u32;
+        }
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Computes row-major (C-order) strides for a given `Shape`.
+///
+/// The returned pointer must be freed exactly once via [`rssn_strides_free`].
+///
+/// # Safety
+///
+/// `shape` must be a valid, non-null pointer to a `Shape`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_shape_row_major_strides(shape: *mut Shape) -> *mut Strides {
+    if shape.is_null() {
+        return std::ptr::null_mut();
+    }
+    let result = catch_unwind(|| {
+        let shape_ref = unsafe { &*shape };
+        Box::into_raw(Box::new(shape_ref.row_major_strides()))
+    });
+    result.unwrap_or(std::ptr::null_mut())
+}
+
+/// Frees a `Strides` object previously returned by [`rssn_shape_row_major_strides`].
+///
+/// # Safety
+///
+/// `strides` must be a pointer previously returned by `rssn_shape_row_major_strides`, or NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_strides_free(strides: *mut Strides) {
+    if strides.is_null() {
+        return;
+    }
+    let _ = catch_unwind(|| {
+        let _ = unsafe { Box::from_raw(strides) };
+    });
+}
+
+/// Returns a pointer to the internal strides slice of a `Strides` object.
+///
+/// # Safety
+///
+/// - `strides` must be a valid, non-null pointer to a `Strides`.
+/// - `out_strides` must be a valid, non-null, writable `*const usize` pointer.
+/// - `out_n_strides` must be a valid, non-null, writable `u32` pointer.
+/// The returned `*const usize` is only valid as long as the `Strides` object is alive.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_strides_as_slice(
+    strides: *mut Strides,
+    out_strides: *mut *const usize,
+    out_n_strides: *mut u32,
+) -> RssnStatus {
+    if strides.is_null() || out_strides.is_null() || out_n_strides.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| {
+        let strides_ref = unsafe { &*strides };
+        unsafe {
+            *out_strides = strides_ref.as_slice().as_ptr();
+            *out_n_strides = strides_ref.as_slice().len() as u32;
+        }
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Computes a flat element index from a multi-dimensional index using `Strides`.
+///
+/// # Safety
+///
+/// - `strides` must be a valid, non-null pointer to a `Strides`.
+/// - `idx` must point to an array of `n_idx` valid `usize` values.
+/// - `out_flat_idx` must be a valid, non-null, writable `usize` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_strides_flat_index(
+    strides: *mut Strides,
+    idx: *const usize,
+    n_idx: u32,
+    out_flat_idx: *mut usize,
+) -> RssnStatus {
+    if strides.is_null() || idx.is_null() || out_flat_idx.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| {
+        let strides_ref = unsafe { &*strides };
+        let idx_slice = unsafe { std::slice::from_raw_parts(idx, n_idx as usize) };
+        unsafe { *out_flat_idx = strides_ref.flat_index(idx_slice) };
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Creates a new read-only `TensorView`.
+///
+/// The returned pointer must be freed exactly once via [`rssn_tensor_view_free`].
+///
+/// # Safety
+///
+/// - `data` must point to an array of `n_data` valid `f64` values, which must outlive the `TensorView`.
+/// - `shape` must be a valid, non-null pointer to a `Shape`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_tensor_view_new(
+    data: *const f64,
+    n_data: usize,
+    shape: *mut Shape,
+    storage_offset: usize,
+) -> *mut TensorView<'static> {
+    if data.is_null() || shape.is_null() {
+        return std::ptr::null_mut();
+    }
+    let result = catch_unwind(|| {
+        let data_slice = unsafe { std::slice::from_raw_parts(data, n_data) };
+        let shape_ref = unsafe { &*shape };
+        let view = TensorView::new(data_slice, shape_ref.clone(), storage_offset);
+        Box::into_raw(Box::new(view))
+    });
+    result.unwrap_or(std::ptr::null_mut())
+}
+
+/// Frees a `TensorView` previously returned by [`rssn_tensor_view_new`].
+///
+/// # Safety
+///
+/// `view` must be a pointer previously returned by `rssn_tensor_view_new`, or NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_tensor_view_free(view: *mut TensorView<'static>) {
+    if view.is_null() {
+        return;
+    }
+    let _ = catch_unwind(|| {
+        let _ = unsafe { Box::from_raw(view) };
+    });
+}
+
+/// Creates a new mutable `TensorViewMut`.
+///
+/// The returned pointer must be freed exactly once via [`rssn_tensor_view_mut_free`].
+///
+/// # Safety
+///
+/// - `data` must point to an array of `n_data` valid `f64` values, which must outlive the `TensorViewMut`.
+/// - `shape` must be a valid, non-null pointer to a `Shape`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_tensor_view_mut_new(
+    data: *mut f64,
+    n_data: usize,
+    shape: *mut Shape,
+    storage_offset: usize,
+) -> *mut TensorViewMut<'static> {
+    if data.is_null() || shape.is_null() {
+        return std::ptr::null_mut();
+    }
+    let result = catch_unwind(|| {
+        let data_slice = unsafe { std::slice::from_raw_parts_mut(data, n_data) };
+        let shape_ref = unsafe { &*shape };
+        let view = TensorViewMut::new(data_slice, shape_ref.clone(), storage_offset);
+        Box::into_raw(Box::new(view))
+    });
+    result.unwrap_or(std::ptr::null_mut())
+}
+
+/// Frees a `TensorViewMut` previously returned by [`rssn_tensor_view_mut_new`].
+///
+/// # Safety
+///
+/// `view_mut` must be a pointer previously returned by `rssn_tensor_view_mut_new`, or NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_tensor_view_mut_free(view_mut: *mut TensorViewMut<'static>) {
+    if view_mut.is_null() {
+        return;
+    }
+    let _ = catch_unwind(|| {
+        let _ = unsafe { Box::from_raw(view_mut) };
+    });
+}
+
+/// Gets an element from a `TensorView`.
+///
+/// # Safety
+///
+/// - `view` must be a valid, non-null pointer to a `TensorView`.
+/// - `idx` must point to an array of `n_idx` valid `usize` values.
+/// - `out_val` must be a valid, non-null, writable `f64` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_tensor_view_get(
+    view: *mut TensorView<'static>,
+    idx: *const usize,
+    n_idx: u32,
+    out_val: *mut f64,
+) -> RssnStatus {
+    if view.is_null() || idx.is_null() || out_val.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let view_ref = unsafe { &*view };
+        let idx_slice = unsafe { std::slice::from_raw_parts(idx, n_idx as usize) };
+        if let Some(val) = view_ref.get(idx_slice) {
+            unsafe { *out_val = val };
+            RssnStatus::Success
+        } else {
+            RssnStatus::OutOfBounds
+        }
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Sets an element in a `TensorViewMut`.
+///
+/// # Safety
+///
+/// - `view_mut` must be a valid, non-null pointer to a `TensorViewMut`.
+/// - `idx` must point to an array of `n_idx` valid `usize` values.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_tensor_view_mut_set(
+    view_mut: *mut TensorViewMut<'static>,
+    idx: *const usize,
+    n_idx: u32,
+    val: f64,
+) -> RssnStatus {
+    if view_mut.is_null() || idx.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let view_mut_ref = unsafe { &mut *view_mut };
+        let idx_slice = unsafe { std::slice::from_raw_parts(idx, n_idx as usize) };
+        if view_mut_ref.set(idx_slice, val) {
+            RssnStatus::Success
+        } else {
+            RssnStatus::OutOfBounds
+        }
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Gets an element from a `TensorViewMut`.
+///
+/// # Safety
+///
+/// - `view_mut` must be a valid, non-null pointer to a `TensorViewMut`.
+/// - `idx` must point to an array of `n_idx` valid `usize` values.
+/// - `out_val` must be a valid, non-null, writable `f64` pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_tensor_view_mut_get(
+    view_mut: *mut TensorViewMut<'static>,
+    idx: *const usize,
+    n_idx: u32,
+    out_val: *mut f64,
+) -> RssnStatus {
+    if view_mut.is_null() || idx.is_null() || out_val.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let result = catch_unwind(|| -> RssnStatus {
+        let view_mut_ref = unsafe { &mut *view_mut };
+        let idx_slice = unsafe { std::slice::from_raw_parts(idx, n_idx as usize) };
+        if let Some(val_ref) = view_mut_ref.get(idx_slice) {
+            unsafe { *out_val = *val_ref };
+            RssnStatus::Success
+        } else {
+            RssnStatus::OutOfBounds
+        }
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}
+
+/// Type for a C-callable `extern "C" fn(f64, f64) -> f64` for binary operations.
+pub type RssnBinaryOpFn = extern "C" fn(f64, f64) -> f64;
+
+/// Performs an element-wise binary operation on two `TensorView`s into a `TensorViewMut`.
+///
+/// # Safety
+///
+/// - `a`, `b` must be valid, non-null pointers to `TensorView`s.
+/// - `out` must be a valid, non-null pointer to a `TensorViewMut`.
+/// - `op` must be a valid, non-null function pointer to an `RssnBinaryOpFn`.
+/// - The underlying data for `a`, `b`, and `out` must not alias.
+#[unsafe(no_mangle)]
+pub extern "C" fn rssn_broadcast_elementwise(
+    a: *mut TensorView<'static>,
+    b: *mut TensorView<'static>,
+    out: *mut TensorViewMut<'static>,
+    op: Option<RssnBinaryOpFn>,
+) -> RssnStatus {
+    if a.is_null() || b.is_null() || out.is_null() {
+        return RssnStatus::NullPointer;
+    }
+    let Some(op_fn) = op else {
+        return RssnStatus::NullPointer;
+    };
+
+    let result = catch_unwind(|| -> RssnStatus {
+        let a_ref = unsafe { &*a };
+        let b_ref = unsafe { &*b };
+        let out_ref = unsafe { &mut *out };
+
+        crate::tensor::view::broadcast_elementwise(a_ref, b_ref, out_ref, |x, y| op_fn(x, y))
+            .map_err(|_| RssnStatus::BroadcastError)?;
+
+        RssnStatus::Success
+    });
+    result.unwrap_or(RssnStatus::Panic)
+}

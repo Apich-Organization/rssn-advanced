@@ -43,4 +43,8 @@ pub enum RssnStatus {
     InvalidNode = 14,
     /// A caller-provided output buffer was too small to hold the result.
     BufferTooSmall = 15,
+    /// An index was out of bounds.
+    OutOfBounds = 16,
+    /// A broadcast operation failed due to incompatible dimensions.
+    BroadcastError = 17,
 }

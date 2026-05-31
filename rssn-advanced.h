@@ -167,6 +167,14 @@ typedef enum RssnStatus {
      A caller-provided output buffer was too small to hold the result.
      */
     RssnStatusBufferTooSmall = 15,
+    /*
+     An index was out of bounds.
+     */
+    RssnStatusOutOfBounds = 16,
+    /*
+     A broadcast operation failed due to incompatible dimensions.
+     */
+    RssnStatusBroadcastError = 17,
 } RssnStatus;
 
 /*
@@ -198,6 +206,11 @@ typedef struct DagNodeId DagNodeId;
 typedef struct FnId FnId;
 
 /*
+ A high-performance WebGPU compute execution context with dynamic buffer pooling and pipeline caching.
+ */
+typedef struct GpuExecutor GpuExecutor;
+
+/*
  Flags that describe algebraic properties of a node.
  */
 typedef struct NodeFlags NodeFlags;
@@ -211,6 +224,8 @@ typedef struct NodeFlags NodeFlags;
 typedef struct NodeHash NodeHash;
 
 typedef struct Option_RssnBatchOpCallback Option_RssnBatchOpCallback;
+
+typedef struct Option_RssnBinaryOpFn Option_RssnBinaryOpFn;
 
 typedef struct Option_RssnEGraphRuleCallback Option_RssnEGraphRuleCallback;
 
@@ -245,6 +260,39 @@ typedef struct RssnJitContext RssnJitContext;
  Create with [`rssn_rule_registry_new`]; free with [`rssn_rule_registry_free`].
  */
 typedef struct RssnRuleRegistry RssnRuleRegistry;
+
+/*
+ Dimension extents for a tensor (e.g. `[batch, rows, cols]`).
+
+ Stored inline (stack-allocated) for rank ≤ 8, heap-allocated otherwise.
+
+ This struct is `Send` and `Sync` because all its components (`usize` and `smallvec::SmallVec`) are `Send` and `Sync`.
+ */
+typedef struct Shape Shape;
+
+/*
+ Stride values (element-offset per index step) for each dimension.
+
+ A stride of `0` means broadcast: the same element is reused across that axis.
+
+ This struct is `Send` and `Sync` because all its components (`usize` and `smallvec::SmallVec`) are `Send` and `Sync`.
+ */
+typedef struct Strides Strides;
+
+/*
+ An immutable zero-copy view of a multi-dimensional `f64` tensor.
+
+ This struct is `Send` and `Sync` because all its components (`&[f64]`, `Shape`, `Strides`, and `usize`) are `Send` and `Sync`.
+ */
+typedef struct TensorView TensorView;
+
+/*
+ A mutable zero-copy view of a multi-dimensional `f64` tensor.
+
+ This struct is `Send` but NOT `Sync`. It is `Send` because `&mut [f64]` is `Send`.
+ It is not `Sync` because `&mut [f64]` is not `Sync`.
+ */
+typedef struct TensorViewMut TensorViewMut;
 
 /*
  Opaque handle returned by [`rssn_dag_compile_async`].
@@ -568,6 +616,23 @@ enum RssnStatus rssn_batch_op_register(uint8_t aKind,
  */
 
 enum RssnStatus rssn_batch_op_unregister(uint8_t aKind)
+;
+
+/*
+ Performs an element-wise binary operation on two `TensorView`s into a `TensorViewMut`.
+
+ # Safety
+
+ - `a`, `b` must be valid, non-null pointers to `TensorView`s.
+ - `out` must be a valid, non-null pointer to a `TensorViewMut`.
+ - `op` must be a valid, non-null function pointer to an `RssnBinaryOpFn`.
+ - The underlying data for `a`, `b`, and `out` must not alias.
+ */
+
+enum RssnStatus rssn_broadcast_elementwise(struct TensorView *aA,
+                                           struct TensorView *aB,
+                                           struct TensorViewMut *aOut,
+                                           struct Option_RssnBinaryOpFn aOp)
 ;
 
 /*
@@ -1797,6 +1862,74 @@ enum RssnStatus rssn_dag_variable_v2(struct DagBuilder *aBuilder,
                                      uint32_t *aOutId)
 ;
 
+/*
+ Compiles a DAG expression into WGSL shader code for GPU execution.
+
+ On `Success`, writes a pointer to a C-string containing the WGSL code to `*out_wgsl`.
+ The caller is responsible for freeing this string using [`rssn_string_free`].
+
+ # Safety
+
+ - `builder` must be a valid, non-null pointer to a `DagBuilder`.
+ - `out_wgsl` must be a valid, non-null, writable `*mut c_char` pointer.
+ - `var_order` must point to an array of `n_vars` valid, null-terminated C strings.
+ */
+
+enum RssnStatus rssn_gpu_compile_wgsl(struct DagBuilder *aBuilder,
+                                      uint32_t aRoot,
+                                      const char *const *aVarOrder,
+                                      uint32_t aNVars,
+                                      char **aOutWgsl)
+;
+
+/*
+ Executes a compiled WGSL shader on the GPU in a batch.
+
+ `vars_cols` is an array of `n_vars` pointers; each pointer addresses a
+ contiguous column of `n_rows` `f64` values for the corresponding variable.
+
+ `out` must point to a writable array of `n_rows` `f64` values.
+
+ # Safety
+
+ - `executor` must be a valid, non-null pointer to a `GpuExecutor`.
+ - `wgsl_src` must be a valid, non-null, null-terminated C string.
+ - `vars_cols` must point to `n_vars` valid column pointers, each of length `n_rows`.
+ - `out` must point to a writable array of `n_rows` `f64` values.
+ - All pointers must remain valid for the duration of this call.
+ */
+
+enum RssnStatus rssn_gpu_execute_batch(struct GpuExecutor *aExecutor,
+                                       const char *aWgslSrc,
+                                       size_t aNRows,
+                                       const double *const *aVarsCols,
+                                       uint32_t aNVars,
+                                       double *aOut)
+;
+
+/*
+ Releases the memory of a previously allocated `GpuExecutor`.
+
+ # Safety
+
+ `executor` must be a pointer previously returned by [`rssn_gpu_executor_new`], or NULL.
+ After this call the pointer is dangling and must not be used.
+ Passing a pointer not from `rssn_gpu_executor_new`, or freeing twice, is undefined behaviour.
+ */
+
+void rssn_gpu_executor_free(struct GpuExecutor *aExecutor)
+;
+
+/*
+ Creates a new `GpuExecutor` context.
+
+ Returns a raw pointer to the executor, or NULL if creation failed or panicked.
+ The returned pointer must be freed exactly once via [`rssn_gpu_executor_free`].
+ */
+
+struct GpuExecutor *rssn_gpu_executor_new(void)
+;
+
 #if defined(RSSNADV_CRANELIFT_JIT)
 /*
  Frees a persistent JIT context previously created by
@@ -1972,6 +2105,243 @@ void rssn_rule_registry_free(struct RssnRuleRegistry *aRegistry)
  */
 
 struct RssnRuleRegistry *rssn_rule_registry_new(void)
+;
+
+/*
+ Returns a pointer to the internal dimensions slice of a `Shape`.
+
+ # Safety
+
+ - `shape` must be a valid, non-null pointer to a `Shape`.
+ - `out_dims` must be a valid, non-null, writable `*const usize` pointer.
+ - `out_n_dims` must be a valid, non-null, writable `u32` pointer.
+ The returned `*const usize` is only valid as long as the `Shape` object is alive.
+ */
+
+enum RssnStatus rssn_shape_dims(struct Shape *aShape,
+                                const size_t **aOutDims,
+                                uint32_t *aOutNDims)
+;
+
+/*
+ Frees a `Shape` previously returned by [`rssn_shape_new`].
+
+ # Safety
+
+ `shape` must be a pointer previously returned by [`rssn_shape_new`], or NULL.
+ */
+
+void rssn_shape_free(struct Shape *aShape)
+;
+
+/*
+ Creates a new `Shape` from a slice of dimension extents.
+
+ The returned pointer must be freed exactly once via [`rssn_shape_free`].
+
+ # Safety
+
+ `dims` must point to an array of `n_dims` valid `usize` values.
+ */
+
+struct Shape *rssn_shape_new(const size_t *aDims,
+                             uint32_t aNDims)
+;
+
+/*
+ Returns the total number of elements (`numel`) of a `Shape`.
+
+ # Safety
+
+ `shape` must be a valid, non-null pointer to a `Shape`.
+ `out_numel` must be a valid, non-null, writable `usize` pointer.
+ */
+
+enum RssnStatus rssn_shape_numel(struct Shape *aShape,
+                                 size_t *aOutNumel)
+;
+
+/*
+ Returns the number of dimensions (rank) of a `Shape`.
+
+ # Safety
+
+ `shape` must be a valid, non-null pointer to a `Shape`.
+ `out_rank` must be a valid, non-null, writable `u32` pointer.
+ */
+
+enum RssnStatus rssn_shape_rank(struct Shape *aShape,
+                                uint32_t *aOutRank)
+;
+
+/*
+ Computes row-major (C-order) strides for a given `Shape`.
+
+ The returned pointer must be freed exactly once via [`rssn_strides_free`].
+
+ # Safety
+
+ `shape` must be a valid, non-null pointer to a `Shape`.
+ */
+
+struct Strides *rssn_shape_row_major_strides(struct Shape *aShape)
+;
+
+/*
+ Returns a pointer to the internal strides slice of a `Strides` object.
+
+ # Safety
+
+ - `strides` must be a valid, non-null pointer to a `Strides`.
+ - `out_strides` must be a valid, non-null, writable `*const usize` pointer.
+ - `out_n_strides` must be a valid, non-null, writable `u32` pointer.
+ The returned `*const usize` is only valid as long as the `Strides` object is alive.
+ */
+
+enum RssnStatus rssn_strides_as_slice(struct Strides *aStrides,
+                                      const size_t **aOutStrides,
+                                      uint32_t *aOutNStrides)
+;
+
+/*
+ Computes a flat element index from a multi-dimensional index using `Strides`.
+
+ # Safety
+
+ - `strides` must be a valid, non-null pointer to a `Strides`.
+ - `idx` must point to an array of `n_idx` valid `usize` values.
+ - `out_flat_idx` must be a valid, non-null, writable `usize` pointer.
+ */
+
+enum RssnStatus rssn_strides_flat_index(struct Strides *aStrides,
+                                        const size_t *aIdx,
+                                        uint32_t aNIdx,
+                                        size_t *aOutFlatIdx)
+;
+
+/*
+ Frees a `Strides` object previously returned by [`rssn_shape_row_major_strides`].
+
+ # Safety
+
+ `strides` must be a pointer previously returned by `rssn_shape_row_major_strides`, or NULL.
+ */
+
+void rssn_strides_free(struct Strides *aStrides)
+;
+
+/*
+ Frees a string previously allocated by Rust and passed to C.
+
+ # Safety
+
+ `s` must be a pointer to a CString allocated by Rust (e.g., via `CString::into_raw`).
+ */
+
+void rssn_string_free(char *aS)
+;
+
+/*
+ Frees a `TensorView` previously returned by [`rssn_tensor_view_new`].
+
+ # Safety
+
+ `view` must be a pointer previously returned by `rssn_tensor_view_new`, or NULL.
+ */
+
+void rssn_tensor_view_free(struct TensorView *aView)
+;
+
+/*
+ Gets an element from a `TensorView`.
+
+ # Safety
+
+ - `view` must be a valid, non-null pointer to a `TensorView`.
+ - `idx` must point to an array of `n_idx` valid `usize` values.
+ - `out_val` must be a valid, non-null, writable `f64` pointer.
+ */
+
+enum RssnStatus rssn_tensor_view_get(struct TensorView *aView,
+                                     const size_t *aIdx,
+                                     uint32_t aNIdx,
+                                     double *aOutVal)
+;
+
+/*
+ Frees a `TensorViewMut` previously returned by [`rssn_tensor_view_mut_new`].
+
+ # Safety
+
+ `view_mut` must be a pointer previously returned by `rssn_tensor_view_mut_new`, or NULL.
+ */
+
+void rssn_tensor_view_mut_free(struct TensorViewMut *aViewMut)
+;
+
+/*
+ Gets an element from a `TensorViewMut`.
+
+ # Safety
+
+ - `view_mut` must be a valid, non-null pointer to a `TensorViewMut`.
+ - `idx` must point to an array of `n_idx` valid `usize` values.
+ - `out_val` must be a valid, non-null, writable `f64` pointer.
+ */
+
+enum RssnStatus rssn_tensor_view_mut_get(struct TensorViewMut *aViewMut,
+                                         const size_t *aIdx,
+                                         uint32_t aNIdx,
+                                         double *aOutVal)
+;
+
+/*
+ Creates a new mutable `TensorViewMut`.
+
+ The returned pointer must be freed exactly once via [`rssn_tensor_view_mut_free`].
+
+ # Safety
+
+ - `data` must point to an array of `n_data` valid `f64` values, which must outlive the `TensorViewMut`.
+ - `shape` must be a valid, non-null pointer to a `Shape`.
+ */
+
+struct TensorViewMut *rssn_tensor_view_mut_new(double *aData,
+                                               size_t aNData,
+                                               struct Shape *aShape,
+                                               size_t aStorageOffset)
+;
+
+/*
+ Sets an element in a `TensorViewMut`.
+
+ # Safety
+
+ - `view_mut` must be a valid, non-null pointer to a `TensorViewMut`.
+ - `idx` must point to an array of `n_idx` valid `usize` values.
+ */
+
+enum RssnStatus rssn_tensor_view_mut_set(struct TensorViewMut *aViewMut,
+                                         const size_t *aIdx,
+                                         uint32_t aNIdx,
+                                         double aVal)
+;
+
+/*
+ Creates a new read-only `TensorView`.
+
+ The returned pointer must be freed exactly once via [`rssn_tensor_view_free`].
+
+ # Safety
+
+ - `data` must point to an array of `n_data` valid `f64` values, which must outlive the `TensorView`.
+ - `shape` must be a valid, non-null pointer to a `Shape`.
+ */
+
+struct TensorView *rssn_tensor_view_new(const double *aData,
+                                        size_t aNData,
+                                        struct Shape *aShape,
+                                        size_t aStorageOffset)
 ;
 
 #ifdef __cplusplus
