@@ -609,6 +609,42 @@ impl<'b> EGraph<'b> {
             let sq = self.builder.pow(lhs, two);
             self.do_merge(id, sq);
         }
+
+        // Distributive law: (a + b) * c = a*c + b*c,  (a - b) * c = a*c - b*c
+        if let Some(lhs_node) = self.builder.arena().get(lhs)
+            && let SymbolKind::Operator(op) = lhs_node.kind
+        {
+            let inner_ch = lhs_node.children.as_slice();
+            if inner_ch.len() == 2 {
+                let (a, b) = (inner_ch[0], inner_ch[1]);
+                let ac = self.builder.mul(a, rhs);
+                let bc = self.builder.mul(b, rhs);
+                match op {
+                    OpKind::Add => {
+                        let distributed = self.builder.add(ac, bc);
+                        self.do_merge(id, distributed);
+                    }
+                    OpKind::Sub => {
+                        let distributed = self.builder.sub(ac, bc);
+                        self.do_merge(id, distributed);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Hoisting negation in multiplication: (-a) * b = -(a * b)
+        if let Some(lhs_node) = self.builder.arena().get(lhs)
+            && lhs_node.kind == SymbolKind::Operator(OpKind::Neg)
+        {
+            let inner_ch = lhs_node.children.as_slice();
+            if inner_ch.len() == 1 {
+                let a = inner_ch[0];
+                let ab = self.builder.mul(a, rhs);
+                let negated = self.builder.neg(ab);
+                self.do_merge(id, negated);
+            }
+        }
     }
 
     fn rules_div(&mut self, id: DagNodeId, ch: &[DagNodeId], cv: &[Option<f64>]) {
@@ -704,6 +740,114 @@ impl<'b> EGraph<'b> {
         if cv.get(1) == Some(&Some(2.0)) {
             let sq = self.builder.mul(base, base);
             self.do_merge(id, sq);
+        }
+
+        // Algebraic expansions for pow(base, exponent) where base is Add/Sub and exponent is 2.0 or 3.0:
+        if let Some(exp_val) = cv.get(1).copied().flatten()
+            && let Some(base_node) = self.builder.arena().get(base)
+        {
+            if exp_val == 2.0 {
+                if let SymbolKind::Operator(op) = base_node.kind {
+                    let inner_ch = base_node.children.as_slice();
+                    if inner_ch.len() == 2 {
+                        let (a, b) = (inner_ch[0], inner_ch[1]);
+                        let two = self.builder.constant(2.0);
+                        let a2 = self.builder.pow(a, two);
+                        let b2 = self.builder.pow(b, two);
+                        let ab = self.builder.mul(a, b);
+                        let two_ab = self.builder.mul(two, ab);
+                        match op {
+                            OpKind::Add => {
+                                let sum1 = self.builder.add(a2, two_ab);
+                                let expanded = self.builder.add(sum1, b2);
+                                self.do_merge(id, expanded);
+                            }
+                            OpKind::Sub => {
+                                let diff1 = self.builder.sub(a2, two_ab);
+                                let expanded = self.builder.add(diff1, b2);
+                                self.do_merge(id, expanded);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            } else if exp_val == 3.0
+                && let SymbolKind::Operator(op) = base_node.kind
+            {
+                let inner_ch = base_node.children.as_slice();
+                if inner_ch.len() == 2 {
+                    let (a, b) = (inner_ch[0], inner_ch[1]);
+                    let two = self.builder.constant(2.0);
+                    let c3 = self.builder.constant(3.0);
+                    let a3 = self.builder.pow(a, c3);
+                    let b3 = self.builder.pow(b, c3);
+                    let a2 = self.builder.pow(a, two);
+                    let b2 = self.builder.pow(b, two);
+                    let a2b = self.builder.mul(a2, b);
+                    let three_a2b = self.builder.mul(c3, a2b);
+                    let ab2 = self.builder.mul(a, b2);
+                    let three_ab2 = self.builder.mul(c3, ab2);
+                    match op {
+                        OpKind::Add => {
+                            let sum1 = self.builder.add(a3, three_a2b);
+                            let sum2 = self.builder.add(sum1, three_ab2);
+                            let expanded = self.builder.add(sum2, b3);
+                            self.do_merge(id, expanded);
+                        }
+                        OpKind::Sub => {
+                            let diff1 = self.builder.sub(a3, three_a2b);
+                            let sum1 = self.builder.add(diff1, three_ab2);
+                            let expanded = self.builder.sub(sum1, b3);
+                            self.do_merge(id, expanded);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Exponent rule: (x^a)^b = x^(a*b)
+        if let Some(base_node) = self.builder.arena().get(base)
+            && base_node.kind == SymbolKind::Operator(OpKind::Pow)
+        {
+            let inner_ch = base_node.children.as_slice();
+            if inner_ch.len() == 2 {
+                let (x, a) = (inner_ch[0], inner_ch[1]);
+                let b = ch[1];
+                let ab = self.builder.mul(a, b);
+                let folded_pow = self.builder.pow(x, ab);
+                self.do_merge(id, folded_pow);
+            }
+        }
+
+        // Power of product: (a * b)^e = a^e * b^e
+        if let Some(base_node) = self.builder.arena().get(base)
+            && base_node.kind == SymbolKind::Operator(OpKind::Mul)
+        {
+            let inner_ch = base_node.children.as_slice();
+            if inner_ch.len() == 2 {
+                let (a, b) = (inner_ch[0], inner_ch[1]);
+                let e = ch[1];
+                let ae = self.builder.pow(a, e);
+                let be = self.builder.pow(b, e);
+                let distributed = self.builder.mul(ae, be);
+                self.do_merge(id, distributed);
+            }
+        }
+
+        // Power of division: (a / b)^e = a^e / b^e
+        if let Some(base_node) = self.builder.arena().get(base)
+            && base_node.kind == SymbolKind::Operator(OpKind::Div)
+        {
+            let inner_ch = base_node.children.as_slice();
+            if inner_ch.len() == 2 {
+                let (a, b) = (inner_ch[0], inner_ch[1]);
+                let e = ch[1];
+                let ae = self.builder.pow(a, e);
+                let be = self.builder.pow(b, e);
+                let distributed = self.builder.div(ae, be);
+                self.do_merge(id, distributed);
+            }
         }
 
         // x^0.5 = sqrt(x) — expose the SIMD-optimised form.
