@@ -35,12 +35,14 @@ import sympy
 
 try:
     import numexpr as ne
+
     HAS_NUMEXPR = True
 except ImportError:
     HAS_NUMEXPR = False
 
 try:
     import numba
+
     HAS_NUMBA = True
 except ImportError:
     HAS_NUMBA = False
@@ -48,9 +50,9 @@ except ImportError:
 # ── Load shared library ────────────────────────────────────────────────────
 
 _lib_candidates = [
-    "../target/release/librssn_advanced.so",    # Linux
-    "../target/release/librssn_advanced.dylib", # macOS
-    "../target/release/rssn_advanced.dll",      # Windows
+    "../target/release/librssn_advanced.so",  # Linux
+    "../target/release/librssn_advanced.dylib",  # macOS
+    "../target/release/rssn_advanced.dll",  # Windows
 ]
 
 lib_path = None
@@ -69,19 +71,19 @@ lib = ctypes.CDLL(lib_path)
 # ── FFI signatures ─────────────────────────────────────────────────────────
 
 c_void_p = ctypes.c_void_p
-c_uint32  = ctypes.c_uint32
-c_double  = ctypes.c_double
-c_size_t  = ctypes.c_size_t
-c_int     = ctypes.c_int
-c_char_p  = ctypes.c_char_p
-DoubleP   = ctypes.POINTER(ctypes.c_double)
-UInt32P   = ctypes.POINTER(ctypes.c_uint32)
-VoidPP    = ctypes.POINTER(ctypes.c_void_p)
+c_uint32 = ctypes.c_uint32
+c_double = ctypes.c_double
+c_size_t = ctypes.c_size_t
+c_int = ctypes.c_int
+c_char_p = ctypes.c_char_p
+DoubleP = ctypes.POINTER(ctypes.c_double)
+UInt32P = ctypes.POINTER(ctypes.c_uint32)
+VoidPP = ctypes.POINTER(ctypes.c_void_p)
 
 
 def _sig(fn, argtypes, restype):
     fn.argtypes = argtypes
-    fn.restype  = restype
+    fn.restype = restype
 
 
 class RssnEGraphConfig(ctypes.Structure):
@@ -92,20 +94,28 @@ class RssnEGraphConfig(ctypes.Structure):
         ("strict_ieee754_signed_zero", ctypes.c_uint8),
     ]
 
-_sig(lib.rssn_dag_new,              [],                               c_void_p)
-_sig(lib.rssn_dag_free,             [c_void_p],                       None)
-_sig(lib.rssn_dag_parse,            [c_void_p, c_char_p, UInt32P],   c_int)
-_sig(lib.rssn_dag_simplify,         [c_void_p, c_uint32],             c_uint32)
-_sig(lib.rssn_dag_simplify_with_egraph, [c_void_p, c_uint32, RssnEGraphConfig, UInt32P], c_int)
-_sig(lib.rssn_dag_compile,          [c_void_p, c_uint32, VoidPP],    c_int)
-_sig(lib.rssn_dag_compile_batch,    [c_void_p, c_uint32, VoidPP],    c_int)
+
+_sig(lib.rssn_dag_new, [], c_void_p)
+_sig(lib.rssn_dag_free, [c_void_p], None)
+_sig(lib.rssn_dag_parse, [c_void_p, c_char_p, UInt32P], c_int)
+_sig(lib.rssn_dag_simplify, [c_void_p, c_uint32], c_uint32)
+_sig(
+    lib.rssn_dag_simplify_with_egraph,
+    [c_void_p, c_uint32, RssnEGraphConfig, UInt32P],
+    c_int,
+)
+_sig(lib.rssn_dag_compile, [c_void_p, c_uint32, VoidPP], c_int)
+_sig(lib.rssn_dag_compile_batch, [c_void_p, c_uint32, VoidPP], c_int)
 _sig(lib.rssn_dag_compile_batch_f64x4, [c_void_p, c_uint32, VoidPP], c_int)
 _sig(lib.rssn_dag_compile_batch_f64x8, [c_void_p, c_uint32, VoidPP], c_int)
-_sig(lib.rssn_dag_execute_bulk,     [c_void_p, VoidPP, c_uint32, c_size_t, DoubleP], c_int)
-_sig(lib.rssn_dag_execute_batch,    [c_void_p, VoidPP, c_size_t, DoubleP], c_int)
+_sig(lib.rssn_dag_execute_bulk, [c_void_p, VoidPP, c_uint32, c_size_t, DoubleP], c_int)
+_sig(lib.rssn_dag_execute_batch, [c_void_p, VoidPP, c_size_t, DoubleP], c_int)
 # n_workers=0 → auto-detect (logical CPUs, capped at 16)
-_sig(lib.rssn_dag_execute_batch_parallel,
-     [c_void_p, VoidPP, c_uint32, c_size_t, DoubleP, c_uint32], c_int)
+_sig(
+    lib.rssn_dag_execute_batch_parallel,
+    [c_void_p, VoidPP, c_uint32, c_size_t, DoubleP, c_uint32],
+    c_int,
+)
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -125,34 +135,44 @@ def build_expr(expr_str: str):
     assert status == 0, f"parse failed ({status}) for: {expr_str!r}"
 
     # Use the powerful E-graph saturation simplifier.
-    cfg = RssnEGraphConfig(max_rounds=8, max_merges=512, max_new_nodes=1024, strict_ieee754_signed_zero=0)
+    cfg = RssnEGraphConfig(
+        max_rounds=8, max_merges=512, max_new_nodes=1024, strict_ieee754_signed_zero=0
+    )
     simp_id_val = ctypes.c_uint32(0)
-    status = lib.rssn_dag_simplify_with_egraph(builder, root_id, cfg, ctypes.byref(simp_id_val))
+    status = lib.rssn_dag_simplify_with_egraph(
+        builder, root_id, cfg, ctypes.byref(simp_id_val)
+    )
     assert status == 0, f"egraph simplify failed ({status})"
     simp_id = simp_id_val.value
 
     scalar_ptr = ctypes.c_void_p()
     status = lib.rssn_dag_compile(builder, simp_id, ctypes.byref(scalar_ptr))
-    assert status == 0 and scalar_ptr.value, \
+    assert status == 0 and scalar_ptr.value, (
         f"scalar compile failed ({status}) for: {expr_str!r}"
+    )
 
     batch_ptr = ctypes.c_void_p()
     bst = lib.rssn_dag_compile_batch(builder, simp_id, ctypes.byref(batch_ptr))
     has_batch = bst == 0 and bool(batch_ptr.value)
 
     batch_f64x4_ptr = ctypes.c_void_p()
-    bst_f64x4 = lib.rssn_dag_compile_batch_f64x4(builder, simp_id, ctypes.byref(batch_f64x4_ptr))
+    bst_f64x4 = lib.rssn_dag_compile_batch_f64x4(
+        builder, simp_id, ctypes.byref(batch_f64x4_ptr)
+    )
     has_batch_f64x4 = bst_f64x4 == 0 and bool(batch_f64x4_ptr.value)
 
     batch_f64x8_ptr = ctypes.c_void_p()
-    bst_f64x8 = lib.rssn_dag_compile_batch_f64x8(builder, simp_id, ctypes.byref(batch_f64x8_ptr))
+    bst_f64x8 = lib.rssn_dag_compile_batch_f64x8(
+        builder, simp_id, ctypes.byref(batch_f64x8_ptr)
+    )
     has_batch_f64x8 = bst_f64x8 == 0 and bool(batch_f64x8_ptr.value)
 
     return (
-        builder, scalar_ptr,
-        batch_ptr        if has_batch       else None,
-        batch_f64x4_ptr  if has_batch_f64x4 else None,
-        batch_f64x8_ptr  if has_batch_f64x8 else None,
+        builder,
+        scalar_ptr,
+        batch_ptr if has_batch else None,
+        batch_f64x4_ptr if has_batch_f64x4 else None,
+        batch_f64x8_ptr if has_batch_f64x8 else None,
     )
 
 
@@ -169,7 +189,7 @@ def bench_fn(fn, warmup=2, repeats=5):
 
 
 def print_row(label: str, t: float, N: int, ref_t: float | None = None):
-    ns    = t / N * 1e9
+    ns = t / N * 1e9
     ratio = f"  {ref_t / t:6.2f}x vs NumPy" if ref_t is not None and ref_t != t else ""
     print(f"  {label:<50s}  {t * 1e3:8.3f} ms  {ns:7.2f} ns/eval{ratio}")
 
@@ -208,7 +228,7 @@ def _make_numba_2var(body_src: str):
     if not HAS_NUMBA:
         return None
     import numba  # noqa
-    import math   # noqa (used inside eval'd body)
+    import math  # noqa (used inside eval'd body)
     import numpy as np  # noqa
 
     ns: dict = {}
@@ -262,17 +282,31 @@ SUITE = [
         "x^3 + y^3 + z^3 - 3*x*y*z + x^2*y - x*y^2 + y^2*z - y*z^2 + z^2*x - z*x^2",
         3,
         lambda xc, yc, zc: (
-            xc**3 + yc**3 + zc**3
+            xc**3
+            + yc**3
+            + zc**3
             - 3 * xc * yc * zc
-            + xc**2 * yc - xc * yc**2
-            + yc**2 * zc - yc * zc**2
-            + zc**2 * xc - zc * xc**2
+            + xc**2 * yc
+            - xc * yc**2
+            + yc**2 * zc
+            - yc * zc**2
+            + zc**2 * xc
+            - zc * xc**2
         ),
         "x**3 + y**3 + z**3 - 3*x*y*z + x**2*y - x*y**2 + y**2*z - y*z**2 + z**2*x - z*x**2",
         _make_numba_3var(
             "x**3 + y**3 + z**3 - 3*x*y*z + x**2*y - x*y**2 + y**2*z - y*z**2 + z**2*x - z*x**2"
         ),
-        x**3 + y**3 + z**3 - 3*x*y*z + x**2*y - x*y**2 + y**2*z - y*z**2 + z**2*x - z*x**2,
+        x**3
+        + y**3
+        + z**3
+        - 3 * x * y * z
+        + x**2 * y
+        - x * y**2
+        + y**2 * z
+        - y * z**2
+        + z**2 * x
+        - z * x**2,
     ),
     (
         "4. Rational w/ CSE  [2 vars, repeated subexpr]",
@@ -294,11 +328,16 @@ SUITE = [
         "x^5 - y^5 + z^5 - 5*x^3*y^2 + 5*x^2*y^3 - 5*y^3*z^2 + 5*y^2*z^3 - 5*z^3*x^2 + 5*z^2*x^3 + x*y*z*(x^2 + y^2 + z^2)",
         3,
         lambda xc, yc, zc: (
-            xc**5 - yc**5 + zc**5
-            - 5*xc**3*yc**2 + 5*xc**2*yc**3
-            - 5*yc**3*zc**2 + 5*yc**2*zc**3
-            - 5*zc**3*xc**2 + 5*zc**2*xc**3
-            + xc*yc*zc*(xc**2 + yc**2 + zc**2)
+            xc**5
+            - yc**5
+            + zc**5
+            - 5 * xc**3 * yc**2
+            + 5 * xc**2 * yc**3
+            - 5 * yc**3 * zc**2
+            + 5 * yc**2 * zc**3
+            - 5 * zc**3 * xc**2
+            + 5 * zc**2 * xc**3
+            + xc * yc * zc * (xc**2 + yc**2 + zc**2)
         ),
         "x**5 - y**5 + z**5 - 5*x**3*y**2 + 5*x**2*y**3 - 5*y**3*z**2 + 5*y**2*z**3 - 5*z**3*x**2 + 5*z**2*x**3 + x*y*z*(x**2 + y**2 + z**2)",
         _make_numba_3var(
@@ -308,11 +347,16 @@ SUITE = [
             " - 5*z**3*x**2 + 5*z**2*x**3"
             " + x*y*z*(x**2 + y**2 + z**2)"
         ),
-        x**5 - y**5 + z**5
-        - 5*x**3*y**2 + 5*x**2*y**3
-        - 5*y**3*z**2 + 5*y**2*z**3
-        - 5*z**3*x**2 + 5*z**2*x**3
-        + x*y*z*(x**2 + y**2 + z**2),
+        x**5
+        - y**5
+        + z**5
+        - 5 * x**3 * y**2
+        + 5 * x**2 * y**3
+        - 5 * y**3 * z**2
+        + 5 * y**2 * z**3
+        - 5 * z**3 * x**2
+        + 5 * z**2 * x**3
+        + x * y * z * (x**2 + y**2 + z**2),
     ),
     (
         "6. Positive Nested Sqrt [2 vars]",
@@ -329,7 +373,7 @@ SUITE = [
             " + math.sqrt(x**2 + y**2 + 1.0)"
             " + math.sqrt(x**2 + y**2 + 2.0)"
         ),
-        (x**2 + 1.0)**0.5 + (x**2 + y**2 + 1.0)**0.5 + (x**2 + y**2 + 2.0)**0.5,
+        (x**2 + 1.0) ** 0.5 + (x**2 + y**2 + 1.0) ** 0.5 + (x**2 + y**2 + 2.0) ** 0.5,
     ),
     (
         "7. Redundant Algebraic Cubics (E-Graph target) [2 vars]",
@@ -337,18 +381,20 @@ SUITE = [
         2,
         lambda xc, yc: (2.0 * yc**3) / (yc**2 + 1.0),
         "((x + y)**3 - (x - y)**3 - 6 * x**2 * y) / (y**2 + 1.0) + x * y - y * x",
-        _make_numba_2var("((x + y)**3 - (x - y)**3 - 6 * x**2 * y) / (y**2 + 1.0) + x * y - y * x"),
-        ((x + y)**3 - (x - y)**3 - 6 * x**2 * y) / (y**2 + 1.0) + x * y - y * x,
+        _make_numba_2var(
+            "((x + y)**3 - (x - y)**3 - 6 * x**2 * y) / (y**2 + 1.0) + x * y - y * x"
+        ),
+        ((x + y) ** 3 - (x - y) ** 3 - 6 * x**2 * y) / (y**2 + 1.0) + x * y - y * x,
     ),
 ]
 
 # ── Main ───────────────────────────────────────────────────────────────────
 
-N = 100_000_000
+N = 10_000_000
 
 
 def run_benchmark():
-    sep  = "=" * 94
+    sep = "=" * 94
     sep2 = "─" * 94
 
     print(sep)
@@ -374,7 +420,7 @@ def run_benchmark():
     }
     var_order = ["x", "y", "z"]
 
-    out   = np.empty(N, np.float64)
+    out = np.empty(N, np.float64)
     out_p = out.ctypes.data_as(DoubleP)
     cols_3 = col_ptrs(*[cols_data[v] for v in var_order])
     cols_2 = col_ptrs(*[cols_data[v] for v in var_order[:2]])
@@ -388,7 +434,9 @@ def run_benchmark():
         print(f"  {expr_str}")
         print(sep2)
 
-        builder, scalar_ptr, batch_ptr, batch_f64x4_ptr, batch_f64x8_ptr = build_expr(expr_str)
+        builder, scalar_ptr, batch_ptr, batch_f64x4_ptr, batch_f64x8_ptr = build_expr(
+            expr_str
+        )
         cols = cols_3 if n_vars == 3 else cols_2
         args = [cols_data[v] for v in var_order[:n_vars]]
 
@@ -406,8 +454,10 @@ def run_benchmark():
         t_batch = None
         rust_batch_out = None
         if batch_ptr is not None:
+
             def rust_batch():
                 lib.rssn_dag_execute_batch(batch_ptr, cols, N, out_p)
+
             t_batch = bench_fn(rust_batch)
             rust_batch_out = out.copy()
 
@@ -415,8 +465,10 @@ def run_benchmark():
         t_batch4 = None
         rust_batch4_out = None
         if batch_f64x4_ptr is not None:
+
             def rust_batch4():
                 lib.rssn_dag_execute_batch(batch_f64x4_ptr, cols, N, out_p)
+
             t_batch4 = bench_fn(rust_batch4)
             rust_batch4_out = out.copy()
 
@@ -424,8 +476,10 @@ def run_benchmark():
         t_batch8 = None
         rust_batch8_out = None
         if batch_f64x8_ptr is not None:
+
             def rust_batch8():
                 lib.rssn_dag_execute_batch(batch_f64x8_ptr, cols, N, out_p)
+
             t_batch8 = bench_fn(rust_batch8)
             rust_batch8_out = out.copy()
 
@@ -433,9 +487,12 @@ def run_benchmark():
         t_batch_par = None
         rust_batch_par_out = None
         if batch_ptr is not None:
+
             def rust_batch_par():
                 lib.rssn_dag_execute_batch_parallel(
-                    batch_ptr, cols, n_vars, N, out_p, 0)
+                    batch_ptr, cols, n_vars, N, out_p, 0
+                )
+
             t_batch_par = bench_fn(rust_batch_par)
             rust_batch_par_out = out.copy()
 
@@ -443,9 +500,12 @@ def run_benchmark():
         t_batch4_par = None
         rust_batch4_par_out = None
         if batch_f64x4_ptr is not None:
+
             def rust_batch4_par():
                 lib.rssn_dag_execute_batch_parallel(
-                    batch_f64x4_ptr, cols, n_vars, N, out_p, 0)
+                    batch_f64x4_ptr, cols, n_vars, N, out_p, 0
+                )
+
             t_batch4_par = bench_fn(rust_batch4_par)
             rust_batch4_par_out = out.copy()
 
@@ -453,9 +513,12 @@ def run_benchmark():
         t_batch8_par = None
         rust_batch8_par_out = None
         if batch_f64x8_ptr is not None:
+
             def rust_batch8_par():
                 lib.rssn_dag_execute_batch_parallel(
-                    batch_f64x8_ptr, cols, n_vars, N, out_p, 0)
+                    batch_f64x8_ptr, cols, n_vars, N, out_p, 0
+                )
+
             t_batch8_par = bench_fn(rust_batch8_par)
             rust_batch8_par_out = out.copy()
 
@@ -473,8 +536,10 @@ def run_benchmark():
             local_dict = {v: cols_data[v] for v in var_order[:n_vars]}
             try:
                 ne.evaluate(ne_str, local_dict=local_dict, out=out)  # warm-up
+
                 def ne_eval():
                     ne.evaluate(ne_str, local_dict=local_dict, out=out)
+
                 t_ne = bench_fn(ne_eval)
             except Exception as exc:
                 print(f"  [numexpr skipped: {exc}]")
@@ -486,15 +551,17 @@ def run_benchmark():
                 # AOT warm-up (triggers compilation on first call)
                 _numba_result = numba_fn(*args)
                 numba_fn(*args)  # second call — JIT is now hot
+
                 def numba_eval():
                     nonlocal _numba_result
                     _numba_result = numba_fn(*args)
+
                 t_numba = bench_fn(numba_eval)
             except Exception as exc:
                 print(f"  [numba skipped: {exc}]")
 
         # ── SymPy lambdify ───────────────────────────────────────────────
-        syms   = [x, y, z][:n_vars]
+        syms = [x, y, z][:n_vars]
         lam_np = sympy.lambdify(syms, sympy_expr, "numpy")
         lam_np(*args)  # warm-up
 
@@ -505,31 +572,33 @@ def run_benchmark():
 
         # ── Print timing rows ─────────────────────────────────────────────
         print()
-        print_row("RSSN JIT  bulk  (scalar, Rust loop)",   t_bulk,   N, t_numpy)
-        if t_batch  is not None:
-            print_row("RSSN JIT  batch f64x2",             t_batch,  N, t_numpy)
+        print_row("RSSN JIT  bulk  (scalar, Rust loop)", t_bulk, N, t_numpy)
+        if t_batch is not None:
+            print_row("RSSN JIT  batch f64x2", t_batch, N, t_numpy)
         if t_batch_par is not None:
-            print_row("RSSN JIT  f64x2 parallel",          t_batch_par, N, t_numpy)
+            print_row("RSSN JIT  f64x2 parallel", t_batch_par, N, t_numpy)
         if t_batch4 is not None:
-            print_row("RSSN JIT  batch f64x4 (2×F64X2)",  t_batch4, N, t_numpy)
+            print_row("RSSN JIT  batch f64x4 (2×F64X2)", t_batch4, N, t_numpy)
         if t_batch4_par is not None:
-            print_row("RSSN JIT  f64x4 parallel",          t_batch4_par, N, t_numpy)
+            print_row("RSSN JIT  f64x4 parallel", t_batch4_par, N, t_numpy)
         if t_batch8 is not None:
-            print_row("RSSN JIT  batch f64x8 (4×F64X2)",         t_batch8,     N, t_numpy)
+            print_row("RSSN JIT  batch f64x8 (4×F64X2)", t_batch8, N, t_numpy)
         if t_batch8_par is not None:
-            print_row("RSSN JIT  f64x8 parallel (dtact fibers)",  t_batch8_par, N, t_numpy)
-        print_row("NumPy     (SIMD/C, hand-optimised)",    t_numpy,  N)
+            print_row(
+                "RSSN JIT  f64x8 parallel (dtact fibers)", t_batch8_par, N, t_numpy
+            )
+        print_row("NumPy     (SIMD/C, hand-optimised)", t_numpy, N)
         if t_ne is not None:
-            print_row("numexpr   (multi-threaded JIT)",    t_ne,     N, t_numpy)
+            print_row("numexpr   (multi-threaded JIT)", t_ne, N, t_numpy)
         if t_numba is not None:
-            print_row("Numba     (LLVM, vectorized ufunc)", t_numba,  N, t_numpy)
-        print_row("SymPy     lambdify → numpy",            t_sympy,  N, t_numpy)
+            print_row("Numba     (LLVM, vectorized ufunc)", t_numba, N, t_numpy)
+        print_row("SymPy     lambdify → numpy", t_sympy, N, t_numpy)
 
         # ── Speedup summary ───────────────────────────────────────────────
         print()
-        print(f"  Speedups vs NumPy ({t_numpy*1e3:.2f} ms baseline):")
+        print(f"  Speedups vs NumPy ({t_numpy * 1e3:.2f} ms baseline):")
         print(f"    JIT bulk   : {speedup_str(t_numpy, t_bulk)}")
-        if t_batch  is not None:
+        if t_batch is not None:
             print(f"    JIT f64x2  : {speedup_str(t_numpy, t_batch)}")
         if t_batch_par is not None:
             print(f"    JIT f64x2∥ : {speedup_str(t_numpy, t_batch_par)} (parallel)")
@@ -550,39 +619,58 @@ def run_benchmark():
         # ── Accuracy ─────────────────────────────────────────────────────
         ref = numpy_out
         print()
+
         def chk(label, arr):
             if arr is None:
                 return
             d = float(np.max(np.abs(arr - ref)))
             mark = "✔" if d < 1e-9 else "✗ MISMATCH"
             print(f"  Accuracy  {label:<22s}  max|Δ|={d:.2e}  {mark}")
-        chk("bulk",        rust_bulk_out)
+
+        chk("bulk", rust_bulk_out)
         chk("batch f64x2", rust_batch_out)
         chk("batch f64x2 parallel", rust_batch_par_out)
         chk("batch f64x4", rust_batch4_out)
         chk("batch f64x4 parallel", rust_batch4_par_out)
-        chk("batch f64x8",          rust_batch8_out)
+        chk("batch f64x8", rust_batch8_out)
         chk("batch f64x8 parallel", rust_batch8_par_out)
 
         # ── Temp-array note ───────────────────────────────────────────────
         ops = sum(expr_str.count(c) for c in "+-*/^")
         tmp_mb = ops * N * 8 / 1024 / 1024
         print(f"\n  NumPy temp arrays: ~{ops} binary ops → ~{tmp_mb:.0f} MB peak")
-        print( "  RSSN JIT: 0 temp arrays — register-resident across entire expression")
+        print("  RSSN JIT: 0 temp arrays — register-resident across entire expression")
         if HAS_NUMEXPR:
-            print( "  numexpr:  ≈0 temp arrays — its own AST-based evaluator")
+            print("  numexpr:  ≈0 temp arrays — its own AST-based evaluator")
         if HAS_NUMBA:
-            print( "  Numba:    ≈0 temp arrays — LLVM-fused scalar loop")
+            print("  Numba:    ≈0 temp arrays — LLVM-fused scalar loop")
 
-        summary.append((name, t_numpy, t_bulk, t_batch, t_batch_par, t_batch4, t_batch4_par, t_batch8, t_batch8_par, t_ne, t_numba, t_sympy))
+        summary.append(
+            (
+                name,
+                t_numpy,
+                t_bulk,
+                t_batch,
+                t_batch_par,
+                t_batch4,
+                t_batch4_par,
+                t_batch8,
+                t_batch8_par,
+                t_ne,
+                t_numba,
+                t_sympy,
+            )
+        )
         lib.rssn_dag_free(builder)
 
     # ── Summary table ───────────────────────────────────────────────────────
     print(f"\n{sep}")
     print("  SUMMARY — speedup vs hand-optimised NumPy  (higher = faster)")
     hdr_cols = ["bulk", "f64x2", "f64x2∥", "f64x4", "f64x4∥", "f64x8", "f64x8∥"]
-    if HAS_NUMEXPR: hdr_cols.append("numexpr")
-    if HAS_NUMBA:   hdr_cols.append("numba")
+    if HAS_NUMEXPR:
+        hdr_cols.append("numexpr")
+    if HAS_NUMBA:
+        hdr_cols.append("numba")
     hdr_cols.append("sympy")
     hdr = "  " + f"{'Expression':<46}" + "".join(f"  {c:>9}" for c in hdr_cols)
     print(hdr)
@@ -592,16 +680,34 @@ def run_benchmark():
         return f"{t_ref / t:7.2f}x" if t is not None else "     n/a"
 
     for row in summary:
-        name_r, t_np, t_bulk, t_batch, t_batch_par, t_batch4, t_batch4_par, t_batch8, t_batch8_par, t_ne, t_numba, t_sympy = row
+        (
+            name_r,
+            t_np,
+            t_bulk,
+            t_batch,
+            t_batch_par,
+            t_batch4,
+            t_batch4_par,
+            t_batch8,
+            t_batch8_par,
+            t_ne,
+            t_numba,
+            t_sympy,
+        ) = row
         label = name_r.split("  ")[0] if "  " in name_r else name_r
         cells = [
             _su(t_np, t_bulk),
-            _su(t_np, t_batch), _su(t_np, t_batch_par),
-            _su(t_np, t_batch4), _su(t_np, t_batch4_par),
-            _su(t_np, t_batch8), _su(t_np, t_batch8_par)
+            _su(t_np, t_batch),
+            _su(t_np, t_batch_par),
+            _su(t_np, t_batch4),
+            _su(t_np, t_batch4_par),
+            _su(t_np, t_batch8),
+            _su(t_np, t_batch8_par),
         ]
-        if HAS_NUMEXPR: cells.append(_su(t_np, t_ne))
-        if HAS_NUMBA:   cells.append(_su(t_np, t_numba))
+        if HAS_NUMEXPR:
+            cells.append(_su(t_np, t_ne))
+        if HAS_NUMBA:
+            cells.append(_su(t_np, t_numba))
         cells.append(_su(t_np, t_sympy))
         print("  " + f"{label:<46}" + "".join(f"  {c:>9}" for c in cells))
 
