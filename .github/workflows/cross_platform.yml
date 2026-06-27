@@ -48,7 +48,7 @@ jobs:
           targets: ${{ matrix.platform }}
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        uses: step-security/setup-zig@1e9fbd457bcc3587b58845344a267f12f151709c # v2.2.2
         with:
           version: "0.13.0"
 
