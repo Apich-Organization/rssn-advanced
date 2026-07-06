@@ -621,9 +621,9 @@ dependencies = [
 
 [[package]]
 name = "dtact"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da87f94b611c83363c5b22fec3fb7b5e77d35570e75c77749d5c319a26b102ee"
+checksum = "91f9baf91d0a0f34a3f22e7dfc744e7a0ebd6d53b8665bf96cc672eebddfcb2b"
 dependencies = [
  "cbindgen",
  "dtact-macros",
